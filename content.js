@@ -195,13 +195,26 @@
             productId: s.productId,
             productName: s.productName || '(ไม่มีชื่อ)',
             productImageURL: s.productImageURL || '',
+            variants: new Map(),
+            orderCountSingle: 0,
+            orderCountMulti: 0,
+          });
+        }
+        const product = state.products.get(s.productId);
+        if (!product.variants.has(s.skuId)) {
+          product.variants.set(s.skuId, {
+            skuId: s.skuId,
+            skuName: s.skuName || '',
+            sellerSkuName: s.sellerSkuName || '',
             orderCountSingle: 0,
             orderCountMulti: 0,
           });
         }
       }
       if (skus.length === 1) {
-        state.products.get(skus[0].productId).orderCountSingle++;
+        const product = state.products.get(skus[0].productId);
+        product.orderCountSingle++;
+        product.variants.get(skus[0].skuId).orderCountSingle++;
       } else if (skus.length > 1) {
         state.weirdOrders.push({
           orderId: rec.mainOrderId,
@@ -213,7 +226,9 @@
           })),
         });
         for (const s of skus) {
-          state.products.get(s.productId).orderCountMulti++;
+          const product = state.products.get(s.productId);
+          product.orderCountMulti++;
+          product.variants.get(s.skuId).orderCountMulti++;
         }
       }
     }
@@ -284,10 +299,23 @@
   }
 
   // ==================== AUTO SELECT ALL ====================
-  async function selectAllOrders(maxWait = 8000) {
+  function findTrForOrder(orderId) {
+    return [...document.querySelectorAll('tr')].find(tr => {
+      const fk = Object.keys(tr).find(k => k.startsWith('__reactFiber'));
+      if (!fk) return false;
+      let fiber = tr[fk], depth = 0;
+      while (fiber && depth < 10) {
+        if (fiber.memoizedProps?.record?.mainOrderId === orderId) return true;
+        if (fiber.memoizedProps?.rowData?.mainOrderId === orderId) return true;
+        fiber = fiber.return; depth++;
+      }
+      return false;
+    });
+  }
+
+  async function waitForStable(maxWait = 8000) {
     const start = Date.now();
-    let prevCount = null;
-    let stableFor = 0;
+    let prevCount = null, stableFor = 0;
     while (Date.now() - start < maxWait) {
       const countEl = [...document.querySelectorAll('*')]
         .find(el => /^พบค่าคำสั่งซื้อ/.test((el.textContent || '').trim()));
@@ -296,12 +324,33 @@
       if (now !== null && now === prevCount) {
         stableFor += 200;
         if (stableFor >= 600) break;
-      } else {
-        stableFor = 0;
-        prevCount = now;
-      }
+      } else { stableFor = 0; prevCount = now; }
       await sleep(200);
     }
+  }
+
+  async function selectAllOrders(filterSkuId = null, maxWait = 8000) {
+    await waitForStable(maxWait);
+
+    if (filterSkuId) {
+      const totalPages = getTotalPages();
+      let count = 0;
+      for (let p = 1; p <= totalPages; p++) {
+        if (p > 1) {
+          const ok = await goToPage(p);
+          if (!ok) break;
+          await waitForStable(4000);
+        }
+        for (const rec of getOrderRecords()) {
+          if (!rec.skuList?.some(s => s.skuId === filterSkuId)) continue;
+          const tr = findTrForOrder(rec.mainOrderId);
+          const checkbox = tr?.querySelector('label.p-checkbox');
+          if (checkbox) { simulateClick(checkbox); count++; await sleep(50); }
+        }
+      }
+      return count;
+    }
+
     const headerLabel = document.querySelector(
       'th[data-log_click_for="select_all_items_in_page"] label.p-checkbox'
     );
@@ -331,16 +380,17 @@
   }
 
   // ==================== HIGH-LEVEL ACTIONS ====================
-  async function applyProductFilter(productId, type) {
+  async function applyProductFilter(productId, skuId, type) {
     try {
-      showToast('กำลังกรอง...', 10000);
+      const label = skuId ? 'กำลังกรอง variant...' : 'กำลังกรอง...';
+      showToast(label, 10000);
       await setSearchBox(productId);
       await clickToShipTab();
       await applyFilterCountType(type);
       if (state.autoSelectAll) {
         showToast('กำลังเลือกทั้งหมด...', 5000);
         await sleep(500);
-        const total = await selectAllOrders();
+        const total = await selectAllOrders(skuId);
         showToast(`✓ กรอง + เลือก ${total ?? ''} ออเดอร์`, 2500);
       } else {
         showToast('✓ กรองเรียบร้อย', 2000);
@@ -500,12 +550,27 @@
         const card = document.createElement('div');
         card.className = 'qf-product-card';
         card.title = p.productName;
+        const variants = [...p.variants.values()].filter(v => v[key] > 0);
+        const badgesHtml = variants.length > 1
+          ? `<div class="qf-variant-badges">${variants.map(v =>
+              `<span class="qf-variant-badge" data-sku-id="${escapeHtml(v.skuId)}">${escapeHtml(v.skuName || v.sellerSkuName || v.skuId)} (${v[key]})</span>`
+            ).join('')}</div>`
+          : '';
         card.innerHTML = `
           <img src="${p.productImageURL}" alt="" referrerpolicy="no-referrer"/>
           <div class="qf-product-name">${escapeHtml(p.productName)}</div>
           <div class="qf-product-count">${p[key]} ออเดอร์</div>
+          ${badgesHtml}
         `;
-        card.addEventListener('click', () => applyProductFilter(p.productId, type));
+        card.addEventListener('click', (e) => {
+          const badge = e.target.closest('.qf-variant-badge');
+          if (badge) {
+            e.stopPropagation();
+            applyProductFilter(p.productId, badge.dataset.skuId, type);
+            return;
+          }
+          applyProductFilter(p.productId, null, type);
+        });
         grid.appendChild(card);
       }
       wrap.appendChild(grid);

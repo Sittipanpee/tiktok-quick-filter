@@ -141,6 +141,29 @@
   color: #888;
   margin-top: 2px;
 }
+.qf-variant-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+  justify-content: center;
+}
+.qf-variant-badge {
+  background: #f5f5f5;
+  border: 1px solid #ddd;
+  border-radius: 10px;
+  padding: 2px 7px;
+  font-size: 10px;
+  color: #444;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+.qf-variant-badge:hover {
+  background: #fe2c55;
+  border-color: #fe2c55;
+  color: #fff;
+}
 #qf-weird-list { display: flex; flex-direction: column; gap: 8px; }
 .qf-weird-order {
   border: 1px solid #eee;
