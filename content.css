@@ -1026,22 +1026,35 @@
   padding-top: 12px;
   border-top: 1px solid #eee;
 }
+.qf-btn-open-all,
 .qf-btn-download-all {
   flex: 1;
-  padding: 9px 16px;
-  background: #fe2c55;
-  color: #fff;
+  padding: 9px 12px;
   border: none;
   border-radius: 6px;
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
+  transition: all 0.12s;
 }
-.qf-btn-download-all:disabled {
-  background: #ccc;
-  cursor: not-allowed;
+.qf-btn-open-all {
+  background: #fff;
+  color: #fe2c55;
+  border: 1px solid #fe2c55;
+}
+.qf-btn-open-all:not(:disabled):hover { background: #fff0f3; }
+.qf-btn-download-all {
+  background: #fe2c55;
+  color: #fff;
 }
 .qf-btn-download-all:not(:disabled):hover { background: #e02147; }
+.qf-btn-open-all:disabled,
+.qf-btn-download-all:disabled {
+  background: #f5f5f5;
+  color: #999;
+  border-color: #ddd;
+  cursor: not-allowed;
+}
 .qf-btn-close-result {
   padding: 9px 16px;
   background: #eee;

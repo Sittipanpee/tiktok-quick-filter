@@ -848,13 +848,14 @@
     });
   }
 
-  function showChunkedResult({title, totalIds, chunks, baseFilename}) {
+  function showChunkedResult({title, totalIds, chunks}) {
+    // chunks: [{count, label, filename}]
     document.querySelectorAll('.qf-progress-overlay').forEach(e => e.remove());
     const overlay = document.createElement('div');
     overlay.className = 'qf-progress-overlay';
     const chunkRows = chunks.map((c, i) => `
       <div class="qf-chunk-row" data-i="${i}">
-        <div class="qf-chunk-row-label">ชุด ${i+1}/${chunks.length} <span class="qf-chunk-row-count">${c.count} ใบ</span></div>
+        <div class="qf-chunk-row-label">${escapeHtml(c.label || `ชุด ${i+1}/${chunks.length}`)} <span class="qf-chunk-row-count">${c.count} ใบ</span></div>
         <div class="qf-chunk-row-status">รอคิว</div>
         <div class="qf-chunk-row-bar"><div class="qf-chunk-row-fill"></div></div>
         <div class="qf-chunk-row-actions"></div>
@@ -866,6 +867,7 @@
         <div class="qf-chunked-sub">${totalIds} ฉลาก • ${chunks.length} ไฟล์</div>
         <div class="qf-chunked-list">${chunkRows}</div>
         <div class="qf-chunked-footer">
+          <button class="qf-btn-open-all" disabled>ดูทั้งหมด</button>
           <button class="qf-btn-download-all" disabled>ดาวน์โหลดทั้งหมด</button>
           <button class="qf-btn-close-result" style="display:none;">ปิด</button>
         </div>
@@ -874,6 +876,7 @@
     document.body.appendChild(overlay);
     const cards = overlay.querySelectorAll('.qf-chunk-row');
     const blobUrls = {}; // chunkIdx → {url, filename}
+    const openAllBtn = overlay.querySelector('.qf-btn-open-all');
     const downloadAllBtn = overlay.querySelector('.qf-btn-download-all');
     const closeBtn = overlay.querySelector('.qf-btn-close-result');
 
@@ -893,6 +896,15 @@
         }, i * 200);
       });
     };
+    openAllBtn.onclick = () => {
+      Object.values(blobUrls).forEach(({url}, i) => {
+        setTimeout(() => {
+          const a = document.createElement('a');
+          a.href = url; a.target = '_blank'; a.rel = 'noopener';
+          document.body.appendChild(a); a.click(); a.remove();
+        }, i * 200);
+      });
+    };
 
     return {
       startChunk(i) {
@@ -907,7 +919,7 @@
       },
       completeChunk(i, {url, pageCount}) {
         const row = cards[i];
-        const filename = `${baseFilename}-ชุด${i+1}-${chunks.length}.pdf`;
+        const filename = chunks[i].filename || `chunk-${i+1}.pdf`;
         blobUrls[i] = {url, filename};
         row.querySelector('.qf-chunk-row-fill').style.width = '100%';
         row.querySelector('.qf-chunk-row-status').textContent = `${pageCount} หน้า`;
@@ -931,7 +943,10 @@
           a.href = url; a.download = filename;
           document.body.appendChild(a); a.click(); a.remove();
         };
-        if (Object.keys(blobUrls).length > 0) downloadAllBtn.disabled = false;
+        if (Object.keys(blobUrls).length > 0) {
+          downloadAllBtn.disabled = false;
+          openAllBtn.disabled = false;
+        }
       },
       errorChunk(i, msg) {
         const row = cards[i];
@@ -1271,31 +1286,77 @@
     return [...set];
   }
 
+  function describeItem(item) {
+    if (item.type === 'combo') {
+      const c = state.weirdCombos.get(item.sigKey);
+      if (!c) return {label: 'combo', filename: 'combo'};
+      const parts = c.items.map(i => (state.aliases.get(i.productId) || '').trim() || shortName(i.productName));
+      return {label: parts.join(' + '), filename: parts.join('+')};
+    }
+    const p = state.products.get(item.productId);
+    const alias = (state.aliases.get(item.productId) || '').trim();
+    const baseName = alias || shortName(p?.productName);
+    if (item.type === 'variant') {
+      const v = p?.variants.get(item.skuId);
+      const variantInfo = getVariantInfo(item.productId, item.skuId);
+      const variantName = (variantInfo?.alias || '').trim() || (v?.skuName || v?.sellerSkuName || '');
+      const tag = item.scenario === 'multi' ? ' (จำนวน>1)' : '';
+      return {
+        label: `${baseName} · ${variantName}${tag}`,
+        filename: `${baseName} ${variantName}`.trim(),
+      };
+    }
+    const tag = item.scenario === 'multi' ? ' (จำนวน>1)' : '';
+    return {label: `${baseName}${tag}`, filename: baseName};
+  }
+
+  function getItemIds(item) {
+    if (item.type === 'combo') {
+      const c = state.weirdCombos.get(item.sigKey);
+      return c ? applyCarrierFilter([...c.fulfillUnitIds]) : [];
+    }
+    return collectFulfillIds(item.productId, item.skuId, item.scenario);
+  }
+
   async function printSelected() {
     const items = [...state.selected.values()];
     if (!items.length) { showToast('ยังไม่ได้เลือกอะไร', 1500); return; }
-    const ids = resolveSelectedIds();
-    if (!ids.length) { showToast('รายการที่เลือกไม่มีฉลาก', 2000); return; }
 
-    const sample = items.slice(0, 3).map(it => {
-      if (it.type === 'combo') {
-        const c = state.weirdCombos.get(it.sigKey);
-        return c ? c.items.map(i => (state.aliases.get(i.productId) || '').trim() || shortName(i.productName)).join('+') : 'combo';
-      }
-      const p = state.products.get(it.productId);
-      const a = (state.aliases.get(it.productId) || '').trim();
-      return a || shortName(p?.productName);
-    }).join(', ') + (items.length > 3 ? ` +อีก ${items.length - 3}` : '');
+    // Build per-item chunks (1 file each = no mixing across products)
+    const chunks = items
+      .map(it => {
+        const ids = getItemIds(it);
+        const {label, filename} = describeItem(it);
+        return {item: it, ids, label, filename};
+      })
+      .filter(c => c.ids.length > 0);
+
+    if (!chunks.length) { showToast('รายการที่เลือกไม่มีฉลาก', 2000); return; }
+
+    const totalIds = chunks.reduce((a, c) => a + c.ids.length, 0);
+    const sample = chunks.slice(0, 3).map(c => c.label).join(', ')
+      + (chunks.length > 3 ? ` +อีก ${chunks.length - 3}` : '');
+
+    const confirmed = await showPrintConfirm({
+      title: `พิมพ์ ${chunks.length} ไฟล์ (1 ไฟล์/รายการ)`,
+      summary: 'แยกไฟล์ตามสินค้า — ไม่ปนกัน',
+      count: totalIds,
+      sampleText: sample,
+    });
+    if (!confirmed) return;
+
+    const stamp = makeBaseFilename('').trim(); // YYYYMMDDHHMM only
+    const exportChunks = chunks.map(c => ({
+      ids: c.ids,
+      label: c.label,
+      filename: `${makeBaseFilename(c.filename)}.pdf`,
+    }));
 
     try {
-      const ok = await printIds(
-        ids,
-        `พิมพ์รวม ${items.length} รายการ`,
-        sample,
-        `รวม-${items.length}-รายการ`
-      );
+      const ok = await runChunkedExport(exportChunks, `พิมพ์รวม ${chunks.length} ไฟล์`);
       if (ok) {
-        for (const it of items) {
+        for (const c of chunks) {
+          const it = c.item;
           if (it.type === 'combo') markComboDone(it.sigKey);
           else {
             const type = it.scenario === 'multi' ? 'single_sku' : 'single_item';
@@ -1464,23 +1525,34 @@
     }
 
     const chunkSize = Math.ceil(ids.length / chunkCount);
+    const baseFilename = makeBaseFilename(filenameHint || displayLabel);
     const chunks = [];
     for (let i = 0; i < ids.length; i += chunkSize) {
-      chunks.push(ids.slice(i, i + chunkSize));
+      const slice = ids.slice(i, i + chunkSize);
+      const idx = chunks.length + 1;
+      chunks.push({
+        ids: slice,
+        filename: chunkCount === 1
+          ? `${baseFilename}.pdf`
+          : `${baseFilename}-ชุด${idx}-${chunkCount}.pdf`,
+        label: chunkCount === 1 ? 'ไฟล์เดียว' : `ชุด ${idx}/${chunkCount}`,
+      });
     }
-    const baseFilename = makeBaseFilename(filenameHint || displayLabel);
+    return runChunkedExport(chunks, displayLabel || 'พิมพ์ฉลาก');
+  }
 
+  async function runChunkedExport(chunks, displayTitle) {
+    const totalIds = chunks.reduce((a, c) => a + c.ids.length, 0);
     const result = showChunkedResult({
-      title: displayLabel || 'พิมพ์ฉลาก',
-      totalIds: ids.length,
-      chunks: chunks.map(c => ({count: c.length})),
-      baseFilename,
+      title: displayTitle,
+      totalIds,
+      chunks: chunks.map(c => ({count: c.ids.length, label: c.label, filename: c.filename})),
     });
 
     const runChunk = async (ci) => {
       result.startChunk(ci);
       try {
-        const { bytes, pageCount } = await buildChunkPdf(chunks[ci], (pct, label) => {
+        const { bytes, pageCount } = await buildChunkPdf(chunks[ci].ids, (pct, label) => {
           result.updateChunkProgress(ci, pct, label);
         });
         const blob = new Blob([bytes], {type: 'application/pdf'});
@@ -1496,15 +1568,11 @@
 
     result.setRetryHandler(runChunk);
 
-    try {
-      for (let ci = 0; ci < chunks.length; ci++) {
-        await runChunk(ci); // continues even on failure → partial success
-      }
-      result.allDone();
-      return true;
-    } catch (err) {
-      throw err;
+    for (let ci = 0; ci < chunks.length; ci++) {
+      await runChunk(ci); // continues even on failure
     }
+    result.allDone();
+    return true;
   }
 
   async function printProductLabels(productId, skuId, scenario) {
