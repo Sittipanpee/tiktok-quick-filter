@@ -1091,7 +1091,7 @@
         if (chk.checked && variantAlias) {
           prev.innerHTML = `บนลาเบล: <b>${escapeHtml(variantAlias)} 1</b>`;
         } else {
-          prev.innerHTML = `บนลาเบล: <b>${escapeHtml(productAlias)}</b><br><span class="qf-av-preview-small">${escapeHtml(variantName)} 1</span>`;
+          prev.innerHTML = `บนลาเบล: <b>${escapeHtml(productAlias)} 1</b><br><span class="qf-av-preview-small">${escapeHtml(variantName)}</span>`;
         }
       });
     };
@@ -1150,8 +1150,7 @@
   }
 
   function buildSkuRender(s) {
-    // Returns {primary, secondary} where primary is the big top text and
-    // secondary is the small bottom text (variant). secondary may be empty.
+    // primary = big top line (alias + qty), secondary = small bottom (variant name only)
     const v = getVariantInfo(s.productId, s.skuId);
     const productAlias = (state.aliases.get(s.productId) || '').trim() || shortName(s.productName);
     const variantOverride = (v?.alias || '').trim();
@@ -1159,26 +1158,29 @@
     const qty = s.quantity || 1;
 
     if (v?.replace && variantOverride) {
-      // Variant replaces product entirely
       return { primary: `${variantOverride} ${qty}`, secondary: '' };
     }
     return {
-      primary: productAlias,
-      secondary: variantName ? `${variantName} ${qty}` : `${qty}`,
+      primary: `${productAlias} ${qty}`,
+      secondary: variantName,
     };
   }
 
   function buildPageLines(record) {
-    // Returns either {mode:'single', primary, secondary} for one-SKU records
-    // or {mode:'multi', text} for weird (multi-SKU) records.
     if (!record?.skuList?.length) return null;
     if (record.skuList.length === 1) {
       const r = buildSkuRender(record.skuList[0]);
       return { mode: 'single', primary: r.primary, secondary: r.secondary };
     }
+    // Multi-SKU: "alias variant qty + alias variant qty"
     const parts = record.skuList.map(s => {
-      const r = buildSkuRender(s);
-      return r.secondary ? `${r.primary} ${r.secondary}`.replace(/\s+/g, ' ').trim() : r.primary;
+      const v = getVariantInfo(s.productId, s.skuId);
+      const productAlias = (state.aliases.get(s.productId) || '').trim() || shortName(s.productName);
+      const variantOverride = (v?.alias || '').trim();
+      const variantName = variantOverride || variantDisplayName(s);
+      const qty = s.quantity || 1;
+      if (v?.replace && variantOverride) return `${variantOverride} ${qty}`;
+      return variantName ? `${productAlias} ${variantName} ${qty}` : `${productAlias} ${qty}`;
     });
     return { mode: 'multi', text: parts.join(' + ') };
   }
@@ -1208,7 +1210,7 @@
       const { size, width: tw } = fitWidth(text, baseSize, width - 16);
       page.drawText(text, {
         x: (width - tw) / 2, y, size, font,
-        color: rgb(0, 0, 0), opacity: 0.4,
+        color: rgb(0, 0, 0), opacity: 0.55,
       });
     };
 
