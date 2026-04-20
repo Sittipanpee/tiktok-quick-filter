@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /Users/testaccount/workspace/tiktok-quick-filter-main remote -v)"
+    ]
+  }
+}
