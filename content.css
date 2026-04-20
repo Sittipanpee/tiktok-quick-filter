@@ -254,28 +254,22 @@
   color: #888;
   margin-top: 2px;
 }
-.qf-alias-row {
-  display: flex;
-  gap: 3px;
+.qf-variant-link {
+  display: block;
+  width: 100%;
   margin-top: 4px;
-  align-items: stretch;
-}
-.qf-alias-row .qf-alias-input { margin-top: 0; flex: 1; min-width: 0; }
-.qf-alias-edit {
-  width: 26px;
-  background: #fff;
-  border: 1px dashed #ccc;
-  border-radius: 4px;
-  font-size: 12px;
-  cursor: pointer;
   padding: 0;
-  flex-shrink: 0;
-  transition: all 0.12s;
+  background: transparent;
+  border: none;
+  font-size: 10px;
+  color: #888;
+  cursor: pointer;
+  text-align: center;
+  letter-spacing: 0.2px;
+  transition: color 0.12s;
 }
-.qf-alias-edit:hover {
-  background: #fff0f3;
-  border-color: #fe2c55;
-}
+.qf-variant-link:hover { color: #fe2c55; }
+.qf-variant-link::after { content: ' →'; opacity: 0.6; }
 .qf-alias-modal {
   width: 460px;
   max-width: 95vw;
@@ -331,12 +325,16 @@
 }
 .qf-alias-modal-section:last-of-type { border-bottom: none; flex: 1; overflow-y: auto; }
 .qf-alias-modal-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #161823;
+  margin-bottom: 2px;
+}
+.qf-alias-modal-hint {
   font-size: 11px;
-  font-weight: 700;
   color: #888;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
+  line-height: 1.4;
 }
 .qf-alias-modal-product {
   width: 100%;
@@ -419,26 +417,13 @@
   cursor: pointer;
 }
 .qf-alias-modal-done:hover { background: #e02147; }
-.qf-combo-alias-row {
-  display: flex;
-  gap: 2px;
-  margin-top: 4px;
-  align-items: stretch;
-}
-.qf-combo-alias-row .qf-combo-alias-input { margin-top: 0; flex: 1; min-width: 0; }
-.qf-combo-alias-edit {
-  width: 22px;
-  background: #fff;
-  border: 1px dashed #ccc;
-  border-radius: 3px;
-  font-size: 10px;
+.qf-combo-item img {
   cursor: pointer;
-  padding: 0;
-  flex-shrink: 0;
+  transition: transform 0.12s, box-shadow 0.12s;
 }
-.qf-combo-alias-edit:hover {
-  background: #fff0f3;
-  border-color: #fe2c55;
+.qf-combo-item img:hover {
+  transform: scale(1.08);
+  box-shadow: 0 0 0 2px #fe2c55;
 }
 .qf-combo-alias-input {
   width: 100%;

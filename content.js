@@ -578,7 +578,10 @@
         fulfillUnitId,
         skuList: skus.map(s => ({
           productId: s.productId,
+          skuId: s.skuId,
           productName: s.productName,
+          skuName: s.skuName,
+          sellerSkuName: s.sellerSkuName,
           quantity: s.quantity,
         })),
       });
@@ -860,18 +863,20 @@
           <img src="${product.productImageURL}" referrerpolicy="no-referrer"/>
           <div class="qf-alias-modal-title">
             <div class="qf-alias-modal-name">${escapeHtml(product.productName)}</div>
-            <div class="qf-alias-modal-sub">${variants.length} variant${variants.length !== 1 ? 's' : ''}</div>
+            <div class="qf-alias-modal-sub">${variants.length} รุ่น</div>
           </div>
           <button class="qf-alias-modal-close" aria-label="ปิด">×</button>
         </div>
 
         <div class="qf-alias-modal-section">
-          <div class="qf-alias-modal-label">Alias หลัก (ใช้กับทุก variant ที่ไม่ override)</div>
+          <div class="qf-alias-modal-label">ชื่อย่อหลัก</div>
+          <div class="qf-alias-modal-hint">ใช้กับทุกรุ่นที่ไม่ได้ตั้งชื่อแยก</div>
           <input class="qf-alias-modal-product" type="text" placeholder="เช่น ครีม, แดง1, สครับ" maxlength="20" value="${escapeHtml(state.aliases.get(productId) || '')}"/>
         </div>
 
         <div class="qf-alias-modal-section">
-          <div class="qf-alias-modal-label">Variant override (ว่าง = ใช้ default)</div>
+          <div class="qf-alias-modal-label">ตั้งชื่อแยกตามรุ่น</div>
+          <div class="qf-alias-modal-hint">ปล่อยว่างจะใช้ชื่อหลักแทน</div>
           <div class="qf-alias-modal-variants"></div>
         </div>
 
@@ -918,10 +923,10 @@
       row.innerHTML = `
         <div class="qf-av-name" title="${escapeHtml(v.skuName || v.sellerSkuName || v.skuId)}">${escapeHtml(v.skuName || v.sellerSkuName || v.skuId)}</div>
         <div class="qf-av-controls">
-          <input class="qf-av-input" type="text" placeholder="(ใช้ default)" maxlength="20" value="${escapeHtml(info.alias)}"/>
+          <input class="qf-av-input" type="text" placeholder="ปล่อยว่าง = ใช้ชื่อหลัก" maxlength="20" value="${escapeHtml(info.alias)}"/>
           <label class="qf-av-replace-label">
             <input class="qf-av-replace" type="checkbox" ${info.replace ? 'checked' : ''}/>
-            <span>ใช้แทนชื่อสินค้า</span>
+            <span>แสดงชื่อนี้แทนชื่อสินค้า</span>
           </label>
         </div>
         <div class="qf-av-preview"></div>
@@ -1650,7 +1655,10 @@
           <img src="${p.productImageURL}" alt="" referrerpolicy="no-referrer"/>
           <div class="qf-product-name">${escapeHtml(p.productName)}</div>
           <div class="qf-product-count">${p._count} ออเดอร์</div>
-          ${labels ? `<div class="qf-alias-row"><input class="qf-alias-input" type="text" placeholder="ชื่อย่อ (เช่น แดง1)" value="${escapeHtml(aliasVal)}" maxlength="20"/><button class="qf-alias-edit" title="ตั้ง alias + variant">✏️</button></div>` : ''}
+          ${labels ? `
+            <input class="qf-alias-input" type="text" placeholder="ชื่อย่อ (เช่น แดง1)" value="${escapeHtml(aliasVal)}" maxlength="20"/>
+            ${variants.length > 0 ? `<button class="qf-variant-link">ปรับ variant</button>` : ''}
+          ` : ''}
           ${hasBadges ? `<div class="qf-variant-badges"></div>` : ''}
         `;
         const aliasInput = card.querySelector('.qf-alias-input');
@@ -1666,9 +1674,9 @@
             if (e.key === 'Enter') { aliasInput.blur(); }
           });
         }
-        const editBtn = card.querySelector('.qf-alias-edit');
-        if (editBtn) {
-          editBtn.addEventListener('click', e => {
+        const variantLink = card.querySelector('.qf-variant-link');
+        if (variantLink) {
+          variantLink.addEventListener('click', e => {
             e.stopPropagation();
             openAliasModal(p.productId);
           });
@@ -1750,12 +1758,9 @@
           const itemsHtml = combo.items.map((s, idx) => `
             ${idx > 0 ? '<span class="qf-combo-plus">+</span>' : ''}
             <div class="qf-combo-item" data-pid="${s.productId}">
-              <img src="${s.productImageURL}" referrerpolicy="no-referrer"/>
+              <img src="${s.productImageURL}" referrerpolicy="no-referrer" title="คลิกเพื่อตั้งชื่อย่อ + รุ่น"/>
               <div class="qf-combo-qty">×${s.quantity}</div>
-              <div class="qf-combo-alias-row">
-                <input class="qf-combo-alias-input" type="text" placeholder="alias" value="${escapeHtml((state.aliases.get(s.productId) || '').trim())}" maxlength="20"/>
-                <button class="qf-combo-alias-edit" title="ตั้ง alias + variant">✏️</button>
-              </div>
+              <input class="qf-combo-alias-input" type="text" placeholder="ชื่อย่อ" value="${escapeHtml((state.aliases.get(s.productId) || '').trim())}" maxlength="20"/>
             </div>
           `).join('');
           card.innerHTML = `
@@ -1766,7 +1771,7 @@
           card.querySelectorAll('.qf-combo-item').forEach(itemEl => {
             const pid = itemEl.dataset.pid;
             const inp = itemEl.querySelector('.qf-combo-alias-input');
-            const edit = itemEl.querySelector('.qf-combo-alias-edit');
+            const img = itemEl.querySelector('img');
             inp.addEventListener('click', e => e.stopPropagation());
             inp.addEventListener('change', () => {
               const v = inp.value.trim();
@@ -1774,7 +1779,7 @@
               saveAliases();
             });
             inp.addEventListener('keydown', e => { if (e.key === 'Enter') inp.blur(); });
-            edit?.addEventListener('click', e => {
+            img.addEventListener('click', e => {
               e.stopPropagation();
               openAliasModal(pid);
             });
