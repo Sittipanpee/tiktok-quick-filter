@@ -6,6 +6,11 @@
   let _apiListBodyTemplate = null;
   let _labelsApiUrl = null;
   let _labelsApiBodyTemplate = null;
+  // Shopee captured URLs/bodies
+  let _shopeeIndexUrl = null;
+  let _shopeeIndexBody = null;
+  let _shopeeCardUrl = null;
+  let _shopeeCardBody = null;
   const _origFetch = window.fetch;
   window.fetch = async function(...args) {
     // Extract URL + body, robust to both URL-string and Request-object call shapes
@@ -43,7 +48,38 @@
       captureBody(b => { if (!_labelsApiBodyTemplate) _labelsApiBodyTemplate = b; });
     }
 
+    // Shopee APIs (some use fetch but most XHR — both branches handled)
+    if (!_shopeeIndexUrl && url.includes('/api/v3/order/search_order_list_index')) {
+      _shopeeIndexUrl = url;
+      captureBody(b => { if (!_shopeeIndexBody) _shopeeIndexBody = b; });
+    }
+    if (!_shopeeCardUrl && url.includes('/api/v3/order/get_order_list_card_list')) {
+      _shopeeCardUrl = url;
+      captureBody(b => { if (!_shopeeCardBody) _shopeeCardBody = b; });
+    }
+
     return await _origFetch.apply(this, args);
+  };
+
+  // XMLHttpRequest hook (Shopee uses XHR for all order APIs)
+  const _origXhrOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+    this._qfUrl = url;
+    this._qfMethod = method;
+    return _origXhrOpen.apply(this, [method, url, ...rest]);
+  };
+  const _origXhrSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function(body) {
+    const url = this._qfUrl || '';
+    if (!_shopeeIndexUrl && url.includes('/api/v3/order/search_order_list_index')) {
+      _shopeeIndexUrl = url;
+      if (typeof body === 'string') { try { _shopeeIndexBody = JSON.parse(body); } catch {} }
+    }
+    if (!_shopeeCardUrl && url.includes('/api/v3/order/get_order_list_card_list')) {
+      _shopeeCardUrl = url;
+      if (typeof body === 'string') { try { _shopeeCardBody = JSON.parse(body); } catch {} }
+    }
+    return _origXhrSend.apply(this, [body]);
   };
 
   // ==================== CONFIG ====================
@@ -161,8 +197,11 @@
   window.__qfState = state;
 
   // ==================== PAGE DETECTION ====================
-  const isLabelsPage = () => /\/shipment\/labels/.test(location.pathname);
-  const isOrderPage  = () => /\/order/.test(location.pathname);
+  const isShopee = () => location.hostname === 'seller.shopee.co.th';
+  const isTikTok = () => location.hostname === 'seller-th.tiktok.com';
+  const isLabelsPage = () => isTikTok() && /\/shipment\/labels/.test(location.pathname)
+                            || isShopee() && /\/portal\/sale/.test(location.pathname);
+  const isOrderPage  = () => isTikTok() && /\/order/.test(location.pathname);
 
   // ==================== UTIL ====================
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -460,12 +499,13 @@
     if (isLabelsPage()) {
       try {
         statusEl.textContent = 'กำลังสแกน...';
-        await scanLabelsPage(statusEl);
-        const total = [...state.products.values()].reduce((s, p) => s + p.orderCountSingle + p.orderCountMulti, 0);
+        if (isShopee()) await scanShopeePage(statusEl);
+        else await scanLabelsPage(statusEl);
         statusEl.textContent = `✓ ${state.products.size} สินค้า | ${state.weirdOrders.length} แปลก`;
         renderAll();
       } catch (err) {
         statusEl.textContent = 'ผิดพลาด: ' + err.message;
+        console.error('[QF] scan failed:', err);
       } finally {
         state.scanning = false;
         btn.disabled = false;
@@ -683,6 +723,195 @@
         scanLabelsDom();
         statusEl.textContent = `สแกน หน้า ${p}/${totalPages} (DOM fallback)`;
       }
+    }
+  }
+
+  // ==================== SHOPEE ADAPTER ====================
+  async function awaitShopeeApiReady(ms = 8000) {
+    const deadline = Date.now() + ms;
+    while ((!_shopeeIndexUrl || !_shopeeIndexBody) && Date.now() < deadline) await sleep(150);
+    return _shopeeIndexUrl && _shopeeIndexBody;
+  }
+
+  async function triggerShopeeApiCapture(statusEl) {
+    statusEl.textContent = 'รอจับ API จาก Shopee...';
+    // Click pagination 2 then 1 to force a fresh API call
+    const items = [...document.querySelectorAll('.shopee-react-pagination__item, [class*="pagination"] *')]
+      .filter(el => /^\d+$/.test((el.textContent||'').trim()));
+    const next = items.find(it => /^2$/.test((it.textContent||'').trim()));
+    const first = items.find(it => /^1$/.test((it.textContent||'').trim()));
+    if (next) { next.click(); await sleep(2000); }
+    if (first) { first.click(); await sleep(1500); }
+    return await awaitShopeeApiReady(3000);
+  }
+
+  function buildShopeeSkuList(items) {
+    return items.map(it => ({
+      productId: String(it.inner_item_ext_info?.item_id || ''),
+      skuId: String(it.inner_item_ext_info?.model_id || it.inner_item_ext_info?.item_id || ''),
+      productName: it.name || '',
+      skuName: it.model_name || it.variation_name || '',
+      sellerSkuName: it.item_sku || '',
+      productImageURL: it.image
+        ? `https://down-th.img.susercontent.com/file/${it.image}_tn`
+        : '',
+      quantity: it.amount || 1,
+    })).filter(s => s.productId);
+  }
+
+  function pushShopeeRecord({fulfillUnitId, ext, items, fulfilment, batchId}) {
+    if (!fulfillUnitId) return;
+    const skuList = buildShopeeSkuList(items);
+    if (!skuList.length) return;
+    const lstatus = ext.logistics_status || 0;
+    // Shopee logistics_status values: 1 = ready to ship, 2 = arranging, 3 = shipped, 4+ = delivered/done
+    const labelStatus = lstatus >= 3 ? LABEL_STATUS_PRINTED : LABEL_STATUS_NOT_PRINTED;
+    const sp = fulfilment || {};
+    const carrierName = sp.fulfilment_channel_name || sp.masked_channel_name || 'ไม่ระบุ';
+    const carrierId = String(sp.fulfilment_channel_name || ext.masked_channel_id || 'unknown');
+    processLabelRecord({
+      fulfillUnitId: String(fulfillUnitId),
+      batchId: String(batchId || fulfillUnitId),
+      orderIds: [String(ext.order_id || '')],
+      labelStatus,
+      skuList,
+      shippingProviderInfo: { name: carrierName, iconUrl: '' },
+      deliveryInfo: { shippingProvider: { id: carrierId, name: carrierName, icon_url: '' } },
+    });
+  }
+
+  function processShopeeRecord(card) {
+    // Tab 300 (to-ship): order_card with single package shape
+    if (card?.order_card) {
+      const oc = card.order_card;
+      const ext = oc.order_ext_info || {};
+      const items = (oc.item_info_group?.item_info_list || []).flatMap(g => g.item_list || []);
+      const pkg = oc.package_ext_info_list?.[0];
+      pushShopeeRecord({
+        fulfillUnitId: pkg?.package_number || ext.order_id,
+        batchId: pkg?.package_number || ext.order_id,
+        ext,
+        items,
+        fulfilment: oc.fulfilment_info,
+      });
+      return;
+    }
+    // Tab 100 (all): package_level_order_card with package_list[]
+    if (card?.package_level_order_card) {
+      const plc = card.package_level_order_card;
+      const ext = plc.order_ext_info || {};
+      for (const pkg of (plc.package_list || [])) {
+        const items = (pkg.item_info_group?.item_info_list || []).flatMap(g => g.item_list || []);
+        const pkgInfo = pkg.package_ext_info || {};
+        pushShopeeRecord({
+          fulfillUnitId: pkgInfo.package_number || ext.order_id,
+          batchId: pkgInfo.package_number || ext.order_id,
+          ext,
+          items,
+          fulfilment: pkg.fulfilment_info,
+        });
+      }
+    }
+  }
+
+  async function fetchShopeePage(pageNumber, pageSize = 40) {
+    const baseBody = _shopeeIndexBody || {};
+    const body = {
+      ...baseBody,
+      pagination: {
+        ...(baseBody.pagination || {}),
+        from_page_number: 1,
+        page_number: pageNumber,
+        page_size: pageSize,
+      },
+    };
+    const r = await _origFetch.call(window, _shopeeIndexUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return r.json();
+  }
+
+  async function fetchShopeeCards(packageOrOrderList) {
+    const baseBody = _shopeeCardBody || { order_list_tab: 100, need_count_down_desc: true };
+    // Decide whether template uses package_param_list or order_param_list
+    const usePackageParam = Array.isArray(baseBody.package_param_list);
+    const param_list = packageOrOrderList.map(it => ({
+      ...(usePackageParam
+        ? { package_number: it.package_number || it.id, shop_id: it.shop_id, region_id: it.region_id || 'TH' }
+        : { order_id: it.order_id || it.id, shop_id: it.shop_id, region_id: it.region_id || 'TH' }),
+    }));
+    const body = {
+      ...baseBody,
+      ...(usePackageParam
+        ? { package_param_list: param_list, order_param_list: undefined }
+        : { order_param_list: param_list, package_param_list: undefined }),
+    };
+    const r = await _origFetch.call(window, _shopeeCardUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return r.json();
+  }
+
+  function extractShopeeOrderRefs(indexData) {
+    // Real key is index_list (returns [{order_id, shop_id, region_id}] or for tab 300 may include package_number)
+    const list = indexData?.index_list || indexData?.list || [];
+    return list.map(it => ({
+      order_id: it.order_id || it.id,
+      package_number: it.package_number || it.primary_package_number || it.ofg_id,
+      shop_id: it.shop_id,
+      region_id: it.region_id || 'TH',
+    })).filter(r => r.order_id || r.package_number);
+  }
+
+  async function scanShopeePage(statusEl) {
+    let ready = await awaitShopeeApiReady(3000);
+    if (!ready) ready = await triggerShopeeApiCapture(statusEl);
+    if (!ready) {
+      throw new Error('ไม่สามารถจับ API ของ Shopee — เปลี่ยนหน้าใน Shopee แล้วกลับมาลองอีกครั้ง');
+    }
+
+    statusEl.textContent = 'กำลังดึงออเดอร์...';
+    const PAGE_SIZE = 40;
+    const first = await fetchShopeePage(1, PAGE_SIZE);
+    if (first.code !== 0) throw new Error('Shopee API: ' + (first.msg || first.message || first.code));
+    const fd = first.data || {};
+    const total = fd.pagination?.total ?? fd.total_count ?? fd.total ?? 0;
+    let firstRefs = extractShopeeOrderRefs(fd);
+    if (!firstRefs.length) {
+      throw new Error('Shopee ตอบว่าง (keys: ' + Object.keys(fd).join(',') + ')');
+    }
+
+    const cardResp = await fetchShopeeCards(firstRefs);
+    if (cardResp.code === 0) {
+      (cardResp.data?.card_list || []).forEach(c => processShopeeRecord(c));
+    }
+    statusEl.textContent = `สแกน ${Math.min(PAGE_SIZE, total)}/${total || '?'}...`;
+
+    const totalPages = Math.ceil(total / PAGE_SIZE);
+    const SHOPEE_CONCURRENCY = 4;
+    const pagesToFetch = [];
+    for (let page = 2; page <= totalPages; page++) pagesToFetch.push(page);
+    for (let i = 0; i < pagesToFetch.length; i += SHOPEE_CONCURRENCY) {
+      const group = pagesToFetch.slice(i, i + SHOPEE_CONCURRENCY);
+      const indexResults = await Promise.all(group.map(p => fetchShopeePage(p, PAGE_SIZE)));
+      const allRefs = indexResults.flatMap(r => r.code === 0 ? extractShopeeOrderRefs(r.data || {}) : []);
+      if (allRefs.length) {
+        // Batch card fetches in groups of 40
+        const cardBatches = [];
+        for (let j = 0; j < allRefs.length; j += 40) cardBatches.push(allRefs.slice(j, j + 40));
+        const cardResults = await Promise.all(cardBatches.map(refs => fetchShopeeCards(refs)));
+        for (const cards of cardResults) {
+          if (cards.code === 0) {
+            (cards.data?.card_list || []).forEach(c => processShopeeRecord(c));
+          }
+        }
+      }
+      const scanned = Math.min((i + SHOPEE_CONCURRENCY + 1) * PAGE_SIZE, total);
+      statusEl.textContent = `สแกน ${scanned}/${total}...`;
     }
   }
 
@@ -1510,6 +1739,10 @@
   }
 
   async function printIds(ids, displayLabel, sampleText, filenameHint) {
+    if (isShopee()) {
+      showToast('Shopee: พิมพ์ฉลากผ่าน extension ยังไม่รองรับ — ใช้ปุ่มของ Shopee แทน', 5000);
+      return false;
+    }
     if (!ids.length) { showToast('ไม่พบ ID สำหรับพิมพ์ — ลองสแกนใหม่', 3000); return false; }
 
     const confirmed = await showPrintConfirm({
@@ -1822,11 +2055,12 @@
   function buildWidget() {
     if (document.getElementById('qf-widget')) return;
     const labels = isLabelsPage();
+    if (isShopee()) document.documentElement.dataset.qfTheme = 'shopee';
     const w = document.createElement('div');
     w.id = 'qf-widget';
     w.innerHTML = `
       <div id="qf-header">
-        <span>⚡ Quick Filter${labels ? ' · Labels' : ''}</span>
+        <span>⚡ Quick Filter${isShopee() ? ' · Shopee' : (labels ? ' · Labels' : '')}</span>
         <div id="qf-header-actions">
           ${!labels ? '<button id="qf-reset-btn" title="รีเซ็ตฟิลเตอร์">↺</button>' : ''}
           <button id="qf-toggle-btn" title="ย่อ/ขยาย">−</button>

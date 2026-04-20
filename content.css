@@ -1,3 +1,104 @@
+/* Shopee CI overrides — applied when html[data-qf-theme=shopee] */
+html[data-qf-theme="shopee"] #qf-header {
+  background: linear-gradient(135deg, #ee4d2d, #f76b1c) !important;
+}
+html[data-qf-theme="shopee"] #qf-scan-btn,
+html[data-qf-theme="shopee"] .qf-btn-confirm,
+html[data-qf-theme="shopee"] #qf-weird-apply-btn,
+html[data-qf-theme="shopee"] .qf-btn-download-all,
+html[data-qf-theme="shopee"] .qf-result-open,
+html[data-qf-theme="shopee"] .qf-chunk-open,
+html[data-qf-theme="shopee"] .qf-alias-modal-done,
+html[data-qf-theme="shopee"] .qf-select-bar-print,
+html[data-qf-theme="shopee"] .qf-seg-btn.active,
+html[data-qf-theme="shopee"] .qf-chunk-preset.active {
+  background: #ee4d2d !important;
+  border-color: #ee4d2d !important;
+}
+html[data-qf-theme="shopee"] #qf-scan-btn:hover,
+html[data-qf-theme="shopee"] .qf-btn-confirm:hover,
+html[data-qf-theme="shopee"] .qf-btn-download-all:not(:disabled):hover,
+html[data-qf-theme="shopee"] .qf-result-open:hover,
+html[data-qf-theme="shopee"] .qf-chunk-open:hover,
+html[data-qf-theme="shopee"] .qf-alias-modal-done:hover,
+html[data-qf-theme="shopee"] .qf-select-bar-print:hover {
+  background: #d4441f !important;
+  border-color: #d4441f !important;
+}
+html[data-qf-theme="shopee"] .qf-tab.active {
+  color: #ee4d2d !important;
+  border-bottom-color: #ee4d2d !important;
+}
+html[data-qf-theme="shopee"] .qf-tab.active .qf-tab-count {
+  background: #ffe9e1 !important;
+  color: #ee4d2d !important;
+}
+html[data-qf-theme="shopee"] .qf-product-card:hover,
+html[data-qf-theme="shopee"] .qf-combo-card:hover,
+html[data-qf-theme="shopee"] .qf-carrier-chip:hover {
+  border-color: #ee4d2d !important;
+}
+html[data-qf-theme="shopee"] .qf-product-card.qf-selected,
+html[data-qf-theme="shopee"] .qf-combo-card.qf-selected {
+  border-color: #ee4d2d !important;
+  background: #fff5f0 !important;
+  box-shadow: 0 0 0 2px rgba(238,77,45,0.15) !important;
+}
+html[data-qf-theme="shopee"] .qf-product-card.qf-select-mode.qf-selected::before,
+html[data-qf-theme="shopee"] .qf-combo-card.qf-select-mode.qf-selected::before {
+  background: #ee4d2d !important;
+  border-color: #ee4d2d !important;
+}
+html[data-qf-theme="shopee"] .qf-variant-badge:hover,
+html[data-qf-theme="shopee"] .qf-variant-badge.qf-selected {
+  background: #ee4d2d !important;
+  border-color: #ee4d2d !important;
+}
+html[data-qf-theme="shopee"] .qf-variant-badge.qf-badge-aliased {
+  color: #ee4d2d !important;
+  border-color: #f5b3a3 !important;
+  background: #fff5f0 !important;
+}
+html[data-qf-theme="shopee"] .qf-carrier-chip.active {
+  background: #fff5f0 !important;
+  border-color: #ee4d2d !important;
+  color: #ee4d2d !important;
+}
+html[data-qf-theme="shopee"] #qf-update-btn {
+  background: #ffd700 !important;
+  color: #5c4400 !important;
+}
+html[data-qf-theme="shopee"] .qf-progress-fill,
+html[data-qf-theme="shopee"] .qf-chunk-row-fill {
+  background: linear-gradient(90deg, #ee4d2d, #f76b1c) !important;
+}
+html[data-qf-theme="shopee"] .qf-progress-percent,
+html[data-qf-theme="shopee"] .qf-modal-count,
+html[data-qf-theme="shopee"] .qf-variant-link:hover,
+html[data-qf-theme="shopee"] .qf-alias-input,
+html[data-qf-theme="shopee"] .qf-combo-alias-input,
+html[data-qf-theme="shopee"] .qf-alias-modal-product,
+html[data-qf-theme="shopee"] .qf-av-input,
+html[data-qf-theme="shopee"] .qf-av-preview b {
+  color: #ee4d2d !important;
+}
+html[data-qf-theme="shopee"] #qf-select-bar { border-top-color: #ee4d2d !important; }
+html[data-qf-theme="shopee"] #qf-select-toggle {
+  border-color: #ee4d2d !important;
+  color: #ee4d2d !important;
+}
+html[data-qf-theme="shopee"] #qf-select-toggle.active {
+  background: #ee4d2d !important;
+}
+html[data-qf-theme="shopee"] .qf-result-download {
+  color: #ee4d2d !important;
+  border-color: #ee4d2d !important;
+}
+html[data-qf-theme="shopee"] .qf-btn-open-all {
+  color: #ee4d2d !important;
+  border-color: #ee4d2d !important;
+}
+
 #qf-widget {
   position: fixed;
   right: 16px;

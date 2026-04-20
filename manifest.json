@@ -1,22 +1,30 @@
 {
   "manifest_version": 3,
-  "name": "Quick Filter for TikTok Seller",
-  "version": "1.4.2",
-  "description": "Floating widget เพื่อ scan ออเดอร์และกรองสินค้าด้วยคลิกเดียวในแท็บที่จะจัดส่ง",
+  "name": "Quick Filter for Online Sellers (TikTok + Shopee)",
+  "version": "1.5.0",
+  "description": "Floating widget to scan, group, and bulk-print labels on TikTok Seller Centre and Shopee Seller Centre (TH)",
   "permissions": [],
   "host_permissions": [
-    "https://seller-th.tiktok.com/*"
+    "https://seller-th.tiktok.com/*",
+    "https://seller.shopee.co.th/*"
   ],
   "content_scripts": [
     {
-      "matches": ["https://seller-th.tiktok.com/order*", "https://seller-th.tiktok.com/shipment/labels*"],
+      "matches": [
+        "https://seller-th.tiktok.com/order*",
+        "https://seller-th.tiktok.com/shipment/labels*",
+        "https://seller.shopee.co.th/portal/sale*"
+      ],
       "js": ["vendor/pdf-lib.min.js", "vendor/fontkit.umd.min.js", "content.js"],
       "css": ["content.css"],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
-      "matches": ["https://seller-th.tiktok.com/shipment/labels*"],
+      "matches": [
+        "https://seller-th.tiktok.com/shipment/labels*",
+        "https://seller.shopee.co.th/portal/sale*"
+      ],
       "js": ["asset-bridge.js"],
       "run_at": "document_start",
       "world": "ISOLATED"
@@ -25,7 +33,7 @@
   "web_accessible_resources": [
     {
       "resources": ["vendor/Sarabun-Bold.ttf"],
-      "matches": ["https://seller-th.tiktok.com/*"]
+      "matches": ["https://seller-th.tiktok.com/*", "https://seller.shopee.co.th/*"]
     }
   ]
 }
