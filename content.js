@@ -781,15 +781,30 @@
   }
 
   function processShopeeRecord(card) {
-    // Tab 300 (to-ship): order_card with single package shape
+    // Tab 300 (to-ship): package_card — single flat package
+    if (card?.package_card) {
+      const pc = card.package_card;
+      const ext = pc.order_ext_info || {};
+      const items = (pc.item_info_group?.item_info_list || []).flatMap(g => g.item_list || []);
+      const pkg = pc.package_ext_info || {};
+      pushShopeeRecord({
+        fulfillUnitId: pkg.package_number || ext.order_id,
+        batchId: pkg.package_number || ext.order_id,
+        ext,
+        items,
+        fulfilment: pc.fulfilment_info,
+      });
+      return;
+    }
+    // Some tabs use order_card (single-package shape)
     if (card?.order_card) {
       const oc = card.order_card;
       const ext = oc.order_ext_info || {};
       const items = (oc.item_info_group?.item_info_list || []).flatMap(g => g.item_list || []);
-      const pkg = oc.package_ext_info_list?.[0];
+      const pkg = oc.package_ext_info_list?.[0] || oc.package_ext_info || {};
       pushShopeeRecord({
-        fulfillUnitId: pkg?.package_number || ext.order_id,
-        batchId: pkg?.package_number || ext.order_id,
+        fulfillUnitId: pkg.package_number || ext.order_id,
+        batchId: pkg.package_number || ext.order_id,
         ext,
         items,
         fulfilment: oc.fulfilment_info,
