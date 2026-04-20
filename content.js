@@ -717,6 +717,35 @@
     return state.fontBytes;
   }
 
+  function showProgress(title) {
+    document.querySelectorAll('.qf-progress-overlay').forEach(e => e.remove());
+    const overlay = document.createElement('div');
+    overlay.className = 'qf-progress-overlay';
+    overlay.innerHTML = `
+      <div class="qf-progress-card">
+        <div class="qf-progress-title">${escapeHtml(title)}</div>
+        <div class="qf-progress-bar"><div class="qf-progress-fill"></div></div>
+        <div class="qf-progress-meta">
+          <span class="qf-progress-percent">0%</span>
+          <span class="qf-progress-status">เริ่มต้น...</span>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    const fill = overlay.querySelector('.qf-progress-fill');
+    const pct = overlay.querySelector('.qf-progress-percent');
+    const status = overlay.querySelector('.qf-progress-status');
+    return {
+      update(percent, label) {
+        const p = Math.max(0, Math.min(100, percent));
+        fill.style.width = p + '%';
+        pct.textContent = p.toFixed(0) + '%';
+        if (label) status.textContent = label;
+      },
+      close() { overlay.remove(); },
+    };
+  }
+
   function shortName(name) {
     if (!name) return '';
     const trimmed = name.replace(/^\[[^\]]*\]\s*/, '').trim();
@@ -732,7 +761,7 @@
     return parts.join(' + ');
   }
 
-  async function overlayAliasOnPdf(pdfBytes, fulfillUnitIds) {
+  async function overlayAliasOnPdf(pdfBytes, fulfillUnitIds, onProgress) {
     if (!window.PDFLib) return pdfBytes;
     const { PDFDocument, rgb } = window.PDFLib;
     const fontBytes = await ensureFontBytes();
@@ -744,27 +773,33 @@
 
     // Pages may be grouped per fulfillUnit (e.g., shipping label + packing list = 2 pages per unit)
     const pagesPerUnit = Math.max(1, Math.round(pages.length / fulfillUnitIds.length));
+    const total = pages.length;
 
     for (let i = 0; i < pages.length; i++) {
       const unitIdx = Math.min(fulfillUnitIds.length - 1, Math.floor(i / pagesPerUnit));
       const rec = state.records.get(fulfillUnitIds[unitIdx]);
       const text = buildPageText(rec);
-      if (!text) continue;
-
-      const page = pages[i];
-      const { width, height } = page.getSize();
-      let size = Math.min(height * 0.05, 22);
-      let textWidth = font.widthOfTextAtSize(text, size);
-      const maxWidth = width - 16;
-      if (textWidth > maxWidth) {
-        size = size * (maxWidth / textWidth);
-        textWidth = font.widthOfTextAtSize(text, size);
+      if (text) {
+        const page = pages[i];
+        const { width, height } = page.getSize();
+        let size = Math.min(height * 0.05, 22);
+        let textWidth = font.widthOfTextAtSize(text, size);
+        const maxWidth = width - 16;
+        if (textWidth > maxWidth) {
+          size = size * (maxWidth / textWidth);
+          textWidth = font.widthOfTextAtSize(text, size);
+        }
+        const x = (width - textWidth) / 2;
+        const y = 6;
+        page.drawText(text, {
+          x, y, size, font, color: rgb(0, 0, 0), opacity: 0.4,
+        });
       }
-      const x = (width - textWidth) / 2;
-      const y = 6;
-      page.drawText(text, {
-        x, y, size, font, color: rgb(0, 0, 0), opacity: 0.4,
-      });
+      // Yield to event loop every 20 pages so UI/progress can update
+      if (onProgress && (i % 20 === 0 || i === total - 1)) {
+        onProgress(i + 1, total);
+        await sleep(0);
+      }
     }
     return await pdfDoc.save();
   }
@@ -843,43 +878,69 @@
     });
     if (!confirmed) return false;
 
-    showToast(`กำลังส่งพิมพ์ ${ids.length} ฉลาก...`, 6000);
+    const total = ids.length;
+    const totalBatches = Math.ceil(total / PRINT_BATCH_SIZE);
+    const progress = showProgress(`พิมพ์ ${total} ฉลาก`);
 
-    for (let i = 0; i < ids.length; i += PRINT_BATCH_SIZE) {
-      const batch = ids.slice(i, i + PRINT_BATCH_SIZE);
-      const body = {
-        fulfill_unit_id_list: batch,
-        content_type_list: [1, 2],
-        template_type: 0,
-        op_scene: 2,
-        file_prefix: 'Shipping label',
-        request_time: Date.now(),
-        print_option: {tmpl: 0, template_size: 0, layout: [0]},
-        print_source: 201,
-      };
-      const resp = await _origFetch.call(window, '/api/v1/fulfillment/shipping_doc/generate', {
-        method: 'POST',
-        headers: {'content-type': 'application/json'},
-        body: JSON.stringify(body),
-      });
-      const data = await resp.json();
-      if (data.code !== 0) throw new Error('generate API: ' + (data.message || data.code));
-      const docUrl = data.data?.doc_url;
-      if (!docUrl) continue;
+    try {
+      for (let i = 0; i < ids.length; i += PRINT_BATCH_SIZE) {
+        const batch = ids.slice(i, i + PRINT_BATCH_SIZE);
+        const batchNum = Math.floor(i / PRINT_BATCH_SIZE) + 1;
+        const baseDone = i;
+        const batchSize = batch.length;
+        const updateBatch = (subPct, label) => {
+          // overall percent = (baseDone + batchSize * subPct) / total * 100
+          const overall = ((baseDone + batchSize * subPct) / total) * 100;
+          progress.update(overall, `[batch ${batchNum}/${totalBatches}] ${label}`);
+        };
 
-      try {
-        const pdfBytes = await fetch(docUrl).then(r => r.arrayBuffer());
-        const modifiedBytes = await overlayAliasOnPdf(pdfBytes, batch);
-        const blob = new Blob([modifiedBytes], { type: 'application/pdf' });
-        window.open(URL.createObjectURL(blob), '_blank');
-      } catch (e) {
-        console.warn('[QF] overlay failed, opening original:', e);
-        window.open(docUrl, '_blank');
+        updateBatch(0.05, 'ส่งคำขอไป TikTok...');
+        const body = {
+          fulfill_unit_id_list: batch,
+          content_type_list: [1, 2],
+          template_type: 0,
+          op_scene: 2,
+          file_prefix: 'Shipping label',
+          request_time: Date.now(),
+          print_option: {tmpl: 0, template_size: 0, layout: [0]},
+          print_source: 201,
+        };
+        const resp = await _origFetch.call(window, '/api/v1/fulfillment/shipping_doc/generate', {
+          method: 'POST',
+          headers: {'content-type': 'application/json'},
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (data.code !== 0) throw new Error('generate API: ' + (data.message || data.code));
+        const docUrl = data.data?.doc_url;
+        if (!docUrl) continue;
+
+        updateBatch(0.20, 'ดาวน์โหลด PDF...');
+        try {
+          const pdfBytes = await fetch(docUrl).then(r => r.arrayBuffer());
+          updateBatch(0.30, 'แปะ alias หน้า 0...');
+          const modifiedBytes = await overlayAliasOnPdf(pdfBytes, batch, (cur, totPages) => {
+            const sub = 0.30 + 0.65 * (cur / totPages);
+            updateBatch(sub, `แปะ alias หน้า ${cur}/${totPages}`);
+          });
+          updateBatch(0.97, 'เปิด tab...');
+          const blob = new Blob([modifiedBytes], { type: 'application/pdf' });
+          window.open(URL.createObjectURL(blob), '_blank');
+        } catch (e) {
+          console.warn('[QF] overlay failed, opening original:', e);
+          window.open(docUrl, '_blank');
+        }
+
+        updateBatch(1.0, 'batch เสร็จ');
+        if (i + PRINT_BATCH_SIZE < ids.length) await sleep(500);
       }
-      if (i + PRINT_BATCH_SIZE < ids.length) await sleep(500);
+      progress.update(100, '✓ เสร็จสมบูรณ์');
+      await sleep(800);
+    } finally {
+      progress.close();
     }
 
-    showToast(`✓ เปิด PDF สำหรับ ${ids.length} ฉลากแล้ว`, 3000);
+    showToast(`✓ เปิด PDF สำหรับ ${total} ฉลากแล้ว`, 3000);
     return true;
   }
 

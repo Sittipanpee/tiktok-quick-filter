@@ -556,6 +556,65 @@
   margin-top: 6px;
   font-weight: 600;
 }
+.qf-progress-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.35);
+  z-index: 9999997;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: all;
+}
+.qf-progress-card {
+  background: #fff;
+  border-radius: 10px;
+  padding: 18px 22px;
+  width: 380px;
+  max-width: 90vw;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.25);
+  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+  color: #161823;
+}
+.qf-progress-title {
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+.qf-progress-bar {
+  height: 8px;
+  background: #f0f0f0;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.qf-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #fe2c55, #ff5c8a);
+  transition: width 0.25s ease-out;
+}
+.qf-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 8px;
+  font-size: 11px;
+  color: #555;
+}
+.qf-progress-percent {
+  font-weight: 700;
+  color: #fe2c55;
+  font-size: 13px;
+  min-width: 40px;
+}
+.qf-progress-status {
+  text-align: right;
+  flex: 1;
+  margin-left: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .qf-toast {
   position: fixed;
   bottom: 20px;
