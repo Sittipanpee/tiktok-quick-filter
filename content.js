@@ -350,57 +350,31 @@
     }
   }
 
-  async function selectAllOrders(filterSkuId = null, minQty = 1, maxWait = 8000) {
+  async function selectAllOrders(filterProductId, filterSkuId = null, minQty = 1, maxWait = 8000) {
     await waitForStable(maxWait);
 
-    if (filterSkuId || minQty > 1) {
-      const totalPages = getTotalPages();
-      let count = 0;
-      for (let p = 1; p <= totalPages; p++) {
-        if (p > 1) {
-          const ok = await goToPage(p);
-          if (!ok) break;
-          await waitForStable(4000);
-        }
-        for (const rec of getOrderRecords()) {
-          const targetSku = filterSkuId
-            ? rec.skuList?.find(s => s.skuId === filterSkuId)
-            : rec.skuList?.[0];
-          if (!targetSku || targetSku.quantity < minQty) continue;
-          const tr = findTrForOrder(rec.mainOrderId);
-          const checkbox = tr?.querySelector('label.p-checkbox');
-          if (checkbox) { simulateClick(checkbox); count++; await sleep(50); }
-        }
+    // Always use fiber-verified individual selection to avoid selecting wrong orders.
+    // TikTok's product search does not reliably filter by productId, so we verify
+    // every order via React fiber before checking its checkbox.
+    const totalPages = getTotalPages();
+    let count = 0;
+    for (let p = 1; p <= totalPages; p++) {
+      if (p > 1) {
+        const ok = await goToPage(p);
+        if (!ok) break;
+        await waitForStable(4000);
       }
-      return count;
+      for (const rec of getOrderRecords()) {
+        const targetSku = filterSkuId
+          ? rec.skuList?.find(s => s.skuId === filterSkuId)
+          : rec.skuList?.find(s => s.productId === filterProductId);
+        if (!targetSku || targetSku.quantity < minQty) continue;
+        const tr = findTrForOrder(rec.mainOrderId);
+        const checkbox = tr?.querySelector('label.p-checkbox');
+        if (checkbox) { simulateClick(checkbox); count++; await sleep(50); }
+      }
     }
-
-    const headerLabel = document.querySelector(
-      'th[data-log_click_for="select_all_items_in_page"] label.p-checkbox'
-    );
-    if (!headerLabel) throw new Error('ไม่เจอ header checkbox');
-    simulateClick(headerLabel);
-    await sleep(800);
-    let selectAllLink = null;
-    const t2 = Date.now();
-    while (Date.now() - t2 < 2000) {
-      selectAllLink = [...document.querySelectorAll('span')].find(el => {
-        const t = (el.textContent || '').trim();
-        if (!/^เลือกคำสั่งซื้อทั้งหมด \d+ รายการ$/.test(t)) return false;
-        return getComputedStyle(el).cursor === 'pointer';
-      });
-      if (selectAllLink) break;
-      await sleep(200);
-    }
-    if (selectAllLink) {
-      simulateClick(selectAllLink);
-      await sleep(1000);
-      const banner = [...document.querySelectorAll('th[colspan]')]
-        .find(el => (el.textContent || '').includes('เลือกคำสั่งซื้อทั้งหมด'));
-      const m = banner?.textContent?.match(/เลือกคำสั่งซื้อทั้งหมด (\d+) รายการ/);
-      return m ? parseInt(m[1]) : null;
-    }
-    return document.querySelectorAll('tr td.col-checkbox label.p-checkbox-checked').length;
+    return count;
   }
 
   // ==================== HIGH-LEVEL ACTIONS ====================
@@ -415,7 +389,7 @@
         showToast('กำลังเลือกทั้งหมด...', 5000);
         await sleep(500);
         const minQty = type === 'single_sku' ? 2 : 1;
-        const total = await selectAllOrders(skuId, minQty);
+        const total = await selectAllOrders(productId, skuId, minQty);
         showToast(`✓ กรอง + เลือก ${total ?? ''} ออเดอร์`, 2500);
       } else {
         showToast('✓ กรองเรียบร้อย', 2000);
@@ -437,7 +411,7 @@
       if (state.autoSelectAll) {
         showToast('กำลังเลือกทั้งหมด...', 5000);
         await sleep(500);
-        const total = await selectAllOrders();
+        const total = await selectAllOrders(null);
         showToast(`✓ เลือกออเดอร์แปลก ${total ?? ''} รายการ`, 2500);
       } else {
         showToast('✓ แสดงออเดอร์แปลกทั้งหมด', 2000);
