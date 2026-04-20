@@ -17,6 +17,166 @@
     doneItems: new Map(), // key: "productId" or "productId:skuId" → timestamp
   };
 
+  // ==================== API SNIFFER ====================
+  // Passive hook: จับ request ที่ browser ยิงเองอยู่แล้วเพื่อ learn endpoint schema.
+  // ไม่ replay, ไม่ดึง credentials ออกจาก page context.
+  const api = {
+    template: null,       // { url, method, bodyKeys, queryKeys, listPath, pageKey, sizeKey, totalKey, defaultSize }
+    lastResponse: null,   // sanitized, คืนให้ debug
+    seenCount: 0,
+  };
+
+  const SENSITIVE_KEY_RE = /token|signature|bogus|cookie|auth|csrf|ms[-_]?token|secret|passport/i;
+
+  function redactValue(v) {
+    if (typeof v === 'string' && v.length > 20) return `<STR:${v.length}>`;
+    if (typeof v === 'string') return `<STR>`;
+    if (typeof v === 'number') return v; // page/pageSize/status ส่วนใหญ่เป็นตัวเลขเล็ก — ไม่ sensitive
+    if (typeof v === 'boolean') return v;
+    if (v === null) return null;
+    if (Array.isArray(v)) return `<ARR:${v.length}>`;
+    if (typeof v === 'object') return `<OBJ:${Object.keys(v).length}>`;
+    return `<${typeof v}>`;
+  }
+
+  function sanitizeObj(obj, depth = 0) {
+    if (depth > 3 || obj == null || typeof obj !== 'object') return redactValue(obj);
+    if (Array.isArray(obj)) return obj.slice(0, 1).map(x => sanitizeObj(x, depth + 1));
+    const out = {};
+    for (const k of Object.keys(obj)) {
+      if (SENSITIVE_KEY_RE.test(k)) { out[k] = '<REDACTED>'; continue; }
+      const v = obj[k];
+      if (v && typeof v === 'object') out[k] = sanitizeObj(v, depth + 1);
+      else out[k] = redactValue(v);
+    }
+    return out;
+  }
+
+  function findOrderListPath(obj, path = [], depth = 0) {
+    if (depth > 6 || obj == null || typeof obj !== 'object') return null;
+    if (Array.isArray(obj)) {
+      const sample = obj[0];
+      if (sample && typeof sample === 'object' && 'mainOrderId' in sample) {
+        return { path, sample };
+      }
+      return null;
+    }
+    for (const k of Object.keys(obj)) {
+      const found = findOrderListPath(obj[k], [...path, k], depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  function detectPaginationKeys(body) {
+    if (!body || typeof body !== 'object') return {};
+    const keys = Object.keys(body);
+    const findKey = (re) => keys.find(k => re.test(k));
+    return {
+      pageKey: findKey(/^(page|pageNo|page_num|pageNum|current|currentPage)$/i),
+      sizeKey: findKey(/^(pageSize|page_size|size|limit|count|rows|rowsPerPage)$/i),
+      offsetKey: findKey(/^(offset|skip|start|from)$/i),
+      cursorKey: findKey(/^(cursor|nextCursor|next_cursor|pageToken)$/i),
+    };
+  }
+
+  function findTotalKey(obj, depth = 0) {
+    if (depth > 3 || obj == null || typeof obj !== 'object') return null;
+    for (const k of Object.keys(obj)) {
+      if (/^(total|totalCount|total_count|totalNum|totalRecords|count)$/i.test(k) && typeof obj[k] === 'number') {
+        return k;
+      }
+    }
+    for (const k of Object.keys(obj)) {
+      const v = obj[k];
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        const r = findTotalKey(v, depth + 1);
+        if (r) return `${k}.${r}`;
+      }
+    }
+    return null;
+  }
+
+  function parseRequestBody(init) {
+    if (!init || !init.body) return null;
+    const body = init.body;
+    if (typeof body === 'string') {
+      try { return JSON.parse(body); } catch { /* form-encoded */ }
+      const params = {};
+      for (const [k, v] of new URLSearchParams(body)) params[k] = v;
+      return Object.keys(params).length ? params : null;
+    }
+    return null;
+  }
+
+  function recordTemplate(url, method, reqBody, resJson) {
+    const urlObj = new URL(url, location.origin);
+    const listInfo = findOrderListPath(resJson);
+    if (!listInfo) return;
+
+    const queryKeys = [...urlObj.searchParams.keys()];
+    const bodyKeys = reqBody ? Object.keys(reqBody) : [];
+    const paginationInBody = detectPaginationKeys(reqBody);
+    const paginationInQuery = detectPaginationKeys(Object.fromEntries(urlObj.searchParams));
+    const pagination = {
+      pageKey: paginationInBody.pageKey || paginationInQuery.pageKey,
+      sizeKey: paginationInBody.sizeKey || paginationInQuery.sizeKey,
+      offsetKey: paginationInBody.offsetKey || paginationInQuery.offsetKey,
+      cursorKey: paginationInBody.cursorKey || paginationInQuery.cursorKey,
+      pageIn: paginationInBody.pageKey ? 'body' : 'query',
+    };
+
+    const defaultSize = pagination.sizeKey
+      ? (reqBody?.[pagination.sizeKey] ?? urlObj.searchParams.get(pagination.sizeKey))
+      : null;
+
+    api.template = {
+      url: urlObj.pathname,
+      origin: urlObj.origin,
+      method,
+      queryKeys,
+      bodyKeys,
+      listPath: listInfo.path.join('.'),
+      pagination,
+      defaultSize: defaultSize != null ? Number(defaultSize) : null,
+      totalKey: findTotalKey(resJson),
+      sampleOrderKeys: listInfo.sample ? Object.keys(listInfo.sample) : [],
+      sampleSkuKeys: listInfo.sample?.skuList?.[0] ? Object.keys(listInfo.sample.skuList[0]) : [],
+    };
+    api.lastResponse = sanitizeObj(resJson);
+    api.seenCount++;
+
+    if (api.seenCount === 1 || api.seenCount % 5 === 0) {
+      console.log('[QF][API] template detected', api.template);
+    }
+  }
+
+  (function installFetchHook() {
+    const origFetch = window.fetch;
+    window.fetch = async function (input, init) {
+      const res = await origFetch.apply(this, arguments);
+      try {
+        const url = typeof input === 'string' ? input : input.url;
+        const method = (init?.method || (typeof input === 'object' && input.method) || 'GET').toUpperCase();
+        const ct = res.headers.get('content-type') || '';
+        if (ct.includes('application/json')) {
+          const clone = res.clone();
+          clone.json().then(json => {
+            const reqBody = parseRequestBody(init);
+            recordTemplate(url, method, reqBody, json);
+          }).catch(() => {});
+        }
+      } catch { /* ignore */ }
+      return res;
+    };
+  })();
+
+  // Debug API — user เรียกจาก DevTools Console: __qf.schema() / __qf.dump()
+  window.__qf = {
+    schema: () => api.template,
+    dump: () => ({ template: api.template, lastResponse: api.lastResponse, seenCount: api.seenCount }),
+  };
+
   // ==================== UTIL ====================
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
