@@ -1,35 +1,121 @@
 (() => {
   'use strict';
 
+  // ==================== FETCH HOOK (runs at document_start, before TikTok saves window.fetch) ====================
+  let _apiListUrl = null;
+  let _apiListBodyTemplate = null;
+  let _labelsApiUrl = null;
+  let _labelsApiBodyTemplate = null;
+  const _origFetch = window.fetch;
+  window.fetch = async function(...args) {
+    // Extract URL + body, robust to both URL-string and Request-object call shapes
+    let url = '';
+    let rawBodyStr = null;
+    let bodyPromise = null; // for Request objects (read async)
+
+    if (args[0] instanceof Request) {
+      url = args[0].url;
+      try { bodyPromise = args[0].clone().text(); } catch (e) {}
+    } else {
+      url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
+      const b = args[1]?.body;
+      if (typeof b === 'string') rawBodyStr = b;
+      else if (b instanceof Blob) bodyPromise = b.text();
+    }
+
+    const captureBody = (sink) => {
+      if (rawBodyStr) {
+        try { sink(JSON.parse(rawBodyStr)); } catch (e) {}
+      } else if (bodyPromise) {
+        bodyPromise.then(t => { try { sink(JSON.parse(t)); } catch (e) {} }).catch(() => {});
+      }
+    };
+
+    // Order list — capture URL + body template
+    if (!_apiListUrl && url.includes('/order/list')) {
+      _apiListUrl = url;
+      captureBody(b => { if (!_apiListBodyTemplate) _apiListBodyTemplate = b; });
+    }
+
+    // Labels API — direct URL match (fast, no response sniffing)
+    if (!_labelsApiUrl && url.includes('/api/fulfillment/package/list')) {
+      _labelsApiUrl = url;
+      captureBody(b => { if (!_labelsApiBodyTemplate) _labelsApiBodyTemplate = b; });
+    }
+
+    return await _origFetch.apply(this, args);
+  };
+
   // ==================== CONFIG ====================
   const WAIT_AFTER_PAGE_CLICK = 2500;
   const WAIT_AFTER_FILTER_CLICK = 2500;
   const WAIT_AFTER_SEARCH = 2500;
   const DONE_TIMEOUT_MS = 30 * 60 * 1000;
+  const LABEL_STATUS_PRINTED     = 50;
+  const LABEL_STATUS_NOT_PRINTED = 30;
 
   // ==================== STATE ====================
+  const ALIAS_STORAGE_KEY = 'qf_product_aliases_v1';
   const state = {
     scanning: false,
     products: new Map(),
     weirdOrders: [],
     currentTab: 'single',
     autoSelectAll: true,
-    doneItems: new Map(), // key: "productId" or "productId:skuId" → timestamp
+    doneItems: new Map(),          // key: "type:productId:skuId" → timestamp
+    labelStatusFilter: 'not_printed', // 'all' | 'not_printed' | 'printed'
+    aliases: loadAliases(),        // productId → aliasText (string)
+    fontUrl: null,                 // Sarabun-Bold.ttf URL from asset-bridge
+    fontBytes: null,               // cached ArrayBuffer
+    records: new Map(),            // fulfillUnitId → {skuList:[{productId,productName,quantity,...}]}
+    weirdFulfillUnitIds: new Set(),
+    weirdCombos: new Map(),        // sigKey → {sigKey, items:[{productId,productName,productImageURL,quantity}], fulfillUnitIds: Set, count}
+    carriers: new Map(),           // carrierId → {id, name, iconUrl, count}
+    carrierOf: new Map(),          // fulfillUnitId → carrierId
+    carrierFilter: new Set(),      // empty = all carriers
   };
+
+  function loadAliases() {
+    try {
+      const raw = localStorage.getItem(ALIAS_STORAGE_KEY);
+      return raw ? new Map(Object.entries(JSON.parse(raw))) : new Map();
+    } catch { return new Map(); }
+  }
+
+  function saveAliases() {
+    const obj = Object.fromEntries(state.aliases);
+    localStorage.setItem(ALIAS_STORAGE_KEY, JSON.stringify(obj));
+  }
+
+  // Listen for font URL from asset-bridge (ISOLATED world)
+  window.addEventListener('message', (e) => {
+    if (e.source === window && e.data?.__qfAsset === 'font' && e.data.url) {
+      state.fontUrl = e.data.url;
+    }
+  });
+  // Ask immediately in case bridge already posted
+  window.postMessage({ __qfAsset: 'request_font' }, '*');
+  // Expose state so the top-level fetch hook can write apiListUrl into it
+  window.__qfState = state;
+
+  // ==================== PAGE DETECTION ====================
+  const isLabelsPage = () => /\/shipment\/labels/.test(location.pathname);
+  const isOrderPage  = () => /\/order/.test(location.pathname);
 
   // ==================== UTIL ====================
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-  function doneKey(productId, skuId) {
-    return skuId ? `${productId}:${skuId}` : productId;
+  function doneKey(productId, skuId, type) {
+    const base = skuId ? `${productId}:${skuId}` : productId;
+    return `${type || ''}:${base}`;
   }
 
-  function markDone(productId, skuId) {
-    state.doneItems.set(doneKey(productId, skuId), Date.now());
+  function markDone(productId, skuId, type) {
+    state.doneItems.set(doneKey(productId, skuId, type), Date.now());
   }
 
-  function isDone(productId, skuId) {
-    const key = doneKey(productId, skuId);
+  function isDone(productId, skuId, type) {
+    const key = doneKey(productId, skuId, type);
     const ts = state.doneItems.get(key);
     if (!ts) return false;
     if (Date.now() - ts > DONE_TIMEOUT_MS) { state.doneItems.delete(key); return false; }
@@ -170,84 +256,90 @@
   }
 
   // ==================== SCANNING ====================
-  async function scanAllPages() {
-    if (state.scanning) return;
-    state.scanning = true;
-    state.products.clear();
-    state.weirdOrders = [];
-    state.doneItems.clear();
+  const API_BATCH_SIZE = 100;   // orders per API call (TikTok accepts up to 500)
+  const API_CONCURRENCY = 5;    // parallel requests
 
-    const statusEl = document.getElementById('qf-scan-status');
-    const btn = document.getElementById('qf-scan-btn');
-    btn.disabled = true;
-
-    try {
-      // บังคับ ที่จะจัดส่ง tab ก่อนสแกนเสมอ
-      statusEl.textContent = 'กำลังเปิดแท็บ ที่จะจัดส่ง...';
-      await clickToShipTab();
-
-      // บังคับ 50/page
-      await ensurePageSize50();
-
-      const totalPages = getTotalPages();
-      const currentPage = getCurrentPage();
-
-      if (totalPages > 1 && currentPage && currentPage !== '1') {
-        statusEl.textContent = 'กำลังกลับหน้า 1...';
-        await goToPage(1);
-      }
-
-      // scan หน้าปัจจุบันเสมอ (แม้ไม่มี pagination)
-      if (totalPages === 1) {
-        statusEl.textContent = `กำลังสแกน...`;
-        processRecordsOnPage();
-      } else {
-        for (let p = 1; p <= totalPages; p++) {
-          statusEl.textContent = `กำลังสแกนหน้า ${p}/${totalPages}...`;
-          const cur = getCurrentPage();
-          if (cur !== null && cur !== String(p)) {
-            const ok = await goToPage(p);
-            if (!ok) {
-              console.warn('[QF] goToPage failed at', p);
-              break;
-            }
-          }
-          processRecordsOnPage();
-        }
-      }
-
-      statusEl.textContent = `✓ พบ ${state.products.size} สินค้า, ${state.weirdOrders.length} ออเดอร์แปลก`;
-      renderAll();
-    } catch (err) {
-      console.error('[QF] scan error', err);
-      statusEl.textContent = 'ผิดพลาด: ' + err.message;
-    } finally {
-      state.scanning = false;
-      btn.disabled = false;
-    }
+  async function awaitApiUrl(timeoutMs = 5000) {
+    const deadline = Date.now() + timeoutMs;
+    while (!_apiListUrl && Date.now() < deadline) await sleep(150);
+    return _apiListUrl;
   }
 
-  function processRecordsOnPage() {
-    const records = getOrderRecords();
-    for (const rec of records) {
-      const skus = rec.skuList || [];
+  async function awaitBodyTemplate(ms = 1500) {
+    const deadline = Date.now() + ms;
+    while (!_apiListBodyTemplate && Date.now() < deadline) await sleep(100);
+    return _apiListBodyTemplate;
+  }
+
+  async function ensureApiUrl() {
+    if (_apiListUrl) {
+      await awaitBodyTemplate();
+      return _apiListUrl;
+    }
+
+    // Tab click may trigger a fetch if we weren't already on this tab
+    await clickToShipTab();
+    let url = await awaitApiUrl(3000);
+    if (url) return url;
+
+    // Fallback: click next page to force a fresh order/list fetch
+    const nextBtn = document.querySelector('.p-pagination-item-next:not(.p-pagination-item-disabled)');
+    if (nextBtn) {
+      simulateClick(nextBtn);
+      url = await awaitApiUrl(3000);
+      if (url) {
+        // Go back to page 1 so UI is consistent
+        const p1 = [...document.querySelectorAll('.p-pagination-item')]
+          .find(el => el.textContent.trim() === '1');
+        if (p1) simulateClick(p1);
+        return url;
+      }
+    }
+
+    return null;
+  }
+
+  async function fetchOrderBatch(offset) {
+    // Use captured body as template (correct format) — override only pagination fields
+    const body = _apiListBodyTemplate
+      ? { ..._apiListBodyTemplate, offset, count: API_BATCH_SIZE }
+      : { offset, count: API_BATCH_SIZE };
+    const resp = await _origFetch.call(window, _apiListUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return resp.json();
+  }
+
+  function extractImageUrl(img) {
+    if (!img) return '';
+    if (typeof img === 'string') return img;
+    // API returns { url_list: [...], thumb_url_list: [...], uri, ... }
+    return img.thumb_url_list?.[0] || img.url_list?.[0] || '';
+  }
+
+  function processApiOrders(orders) {
+    if (!orders) return;
+    for (const order of orders) {
+      const skus = order.sku_module || order.skuModule || order.sku_list || order.skuList || order.items || [];
       for (const s of skus) {
-        if (!state.products.has(s.productId)) {
-          state.products.set(s.productId, {
-            productId: s.productId,
-            productName: s.productName || '(ไม่มีชื่อ)',
-            productImageURL: s.productImageURL || '',
+        if (!state.products.has(s.product_id)) {
+          state.products.set(s.product_id, {
+            productId: s.product_id,
+            productName: s.product_name || '(ไม่มีชื่อ)',
+            productImageURL: extractImageUrl(s.product_image),
             variants: new Map(),
             orderCountSingle: 0,
             orderCountMulti: 0,
           });
         }
-        const product = state.products.get(s.productId);
-        if (!product.variants.has(s.skuId)) {
-          product.variants.set(s.skuId, {
-            skuId: s.skuId,
-            skuName: s.skuName || '',
-            sellerSkuName: s.sellerSkuName || '',
+        const product = state.products.get(s.product_id);
+        if (!product.variants.has(s.sku_id)) {
+          product.variants.set(s.sku_id, {
+            skuId: s.sku_id,
+            skuName: s.sku_name || '',
+            sellerSkuName: s.seller_sku_name || s.sku_name || '',
             orderCountSingle: 0,
             orderCountMulti: 0,
           });
@@ -255,8 +347,8 @@
       }
       if (skus.length === 1) {
         const s = skus[0];
-        const product = state.products.get(s.productId);
-        const variant = product.variants.get(s.skuId);
+        const product = state.products.get(s.product_id);
+        const variant = product.variants.get(s.sku_id);
         if (s.quantity === 1) {
           product.orderCountSingle++;
           variant.orderCountSingle++;
@@ -266,16 +358,549 @@
         }
       } else if (skus.length > 1) {
         state.weirdOrders.push({
-          orderId: rec.mainOrderId,
+          orderId: order.main_order_id,
           skus: skus.map(s => ({
-            productId: s.productId,
-            productName: s.productName || '',
-            productImageURL: s.productImageURL || '',
+            productId: s.product_id,
+            productName: s.product_name || '',
+            productImageURL: s.product_image || '',
             quantity: s.quantity,
           })),
         });
       }
     }
+  }
+
+  async function scanAllPages() {
+    if (state.scanning) return;
+    state.scanning = true;
+    state.products.clear();
+    state.weirdOrders = [];
+    state.doneItems.clear();
+    state.records.clear();
+    state.weirdFulfillUnitIds.clear();
+    state.weirdCombos.clear();
+    state.carriers.clear();
+    state.carrierOf.clear();
+
+    const statusEl = document.getElementById('qf-scan-status');
+    const btn = document.getElementById('qf-scan-btn');
+    btn.disabled = true;
+
+    if (isLabelsPage()) {
+      try {
+        statusEl.textContent = 'กำลังสแกน...';
+        await scanLabelsPage(statusEl);
+        const total = [...state.products.values()].reduce((s, p) => s + p.orderCountSingle + p.orderCountMulti, 0);
+        statusEl.textContent = `✓ ${state.products.size} สินค้า | ${state.weirdOrders.length} แปลก`;
+        renderAll();
+      } catch (err) {
+        statusEl.textContent = 'ผิดพลาด: ' + err.message;
+      } finally {
+        state.scanning = false;
+        btn.disabled = false;
+      }
+      return;
+    }
+
+    try {
+      statusEl.textContent = 'กำลังเตรียม API...';
+      const url = await ensureApiUrl();
+      if (!url) throw new Error('ไม่สามารถจับ API URL — ลองโหลดหน้าใหม่แล้วสแกนอีกครั้ง');
+
+      // First batch to learn total_count
+      statusEl.textContent = 'กำลังดึงออเดอร์...';
+      const first = await fetchOrderBatch(0);
+      if (first.code !== 0) {
+        const tplStatus = _apiListBodyTemplate
+          ? `template OK (${Object.keys(_apiListBodyTemplate).length} fields)`
+          : 'NO TEMPLATE — body fallback ขาดข้อมูล';
+        console.error('[QF] order/list failed:', first, 'template:', _apiListBodyTemplate);
+        throw new Error(`code=${first.code} msg="${first.message || 'empty'}" — ${tplStatus}`);
+      }
+
+      const d = first.data || {};
+      const total = d.total_count ?? d.total ?? 0;
+      const firstOrders = d.main_orders || d.order_list || d.orders || [];
+      if (total === 0 && firstOrders.length === 0) {
+        throw new Error(`API ตอบกลับว่าง (keys: ${Object.keys(d).join(',') || 'none'}) — ลองโหลดหน้าใหม่`);
+      }
+      processApiOrders(firstOrders);
+      statusEl.textContent = `สแกน ${Math.min(API_BATCH_SIZE, total || firstOrders.length)}/${total || '?'}...`;
+
+      const offsets = [];
+      for (let off = API_BATCH_SIZE; off < total; off += API_BATCH_SIZE) offsets.push(off);
+
+      for (let i = 0; i < offsets.length; i += API_CONCURRENCY) {
+        const group = offsets.slice(i, i + API_CONCURRENCY);
+        const results = await Promise.all(group.map(fetchOrderBatch));
+        for (const res of results) {
+          if (res.code === 0) {
+            const rd = res.data || {};
+            processApiOrders(rd.main_orders || rd.order_list || rd.orders || []);
+          }
+        }
+        const scanned = Math.min((i + API_CONCURRENCY + 1) * API_BATCH_SIZE, total);
+        statusEl.textContent = `สแกน ${scanned}/${total}...`;
+      }
+
+      statusEl.textContent = `✓ ${total} ออเดอร์ | ${state.products.size} สินค้า | ${state.weirdOrders.length} แปลก`;
+      renderAll();
+    } catch (err) {
+      statusEl.textContent = 'ผิดพลาด: ' + err.message;
+    } finally {
+      state.scanning = false;
+      btn.disabled = false;
+    }
+  }
+
+  // ==================== LABELS PAGE ====================
+  function getRecordFromRow(row) {
+    const fk = Object.keys(row).find(k => k.startsWith('__reactFiber'));
+    if (!fk) return null;
+    let node = row[fk];
+    for (let i = 0; i < 50 && node; i++) {
+      if (node.memoizedProps?.record?.skuList) return node.memoizedProps.record;
+      node = node.return;
+    }
+    return null;
+  }
+
+  function labelStatusMatches(labelStatus) {
+    if (state.labelStatusFilter === 'all') return true;
+    if (state.labelStatusFilter === 'printed')     return labelStatus === LABEL_STATUS_PRINTED;
+    if (state.labelStatusFilter === 'not_printed') return labelStatus === LABEL_STATUS_NOT_PRINTED;
+    return true;
+  }
+
+  function ensureProduct(s) {
+    if (!state.products.has(s.productId)) {
+      state.products.set(s.productId, {
+        productId: s.productId,
+        productName: s.productName || '(ไม่มีชื่อ)',
+        productImageURL: s.productImageURL || '',
+        variants: new Map(),
+        orderCountSingle: 0,
+        orderCountMulti: 0,
+        fulfillUnitIdsSingle: new Set(),
+        fulfillUnitIdsMulti: new Set(),
+      });
+    }
+    const p = state.products.get(s.productId);
+    if (!p.variants.has(s.skuId)) {
+      p.variants.set(s.skuId, {
+        skuId: s.skuId,
+        skuName: s.skuName || '',
+        sellerSkuName: s.sellerSkuName || s.skuName || '',
+        orderCountSingle: 0,
+        orderCountMulti: 0,
+        fulfillUnitIdsSingle: new Set(),
+        fulfillUnitIdsMulti: new Set(),
+      });
+    }
+    return p;
+  }
+
+  function processLabelRecord(rec) {
+    if (!rec || !labelStatusMatches(rec.labelStatus)) return;
+    const fulfillUnitId = rec.fulfillUnitId;
+    const skus = rec.skuList || [];
+    if (fulfillUnitId) {
+      state.records.set(fulfillUnitId, {
+        fulfillUnitId,
+        skuList: skus.map(s => ({
+          productId: s.productId,
+          productName: s.productName,
+          quantity: s.quantity,
+        })),
+      });
+      // Track carrier
+      const sp = rec.shippingProviderInfo || rec.deliveryInfo?.shippingProvider;
+      const carrierId = rec.deliveryInfo?.shippingProvider?.id || sp?.name || 'unknown';
+      const name = sp?.name || 'ไม่ระบุ';
+      const iconUrl = sp?.iconUrl || sp?.icon_url || '';
+      if (!state.carriers.has(carrierId)) {
+        state.carriers.set(carrierId, { id: carrierId, name, iconUrl, count: 0 });
+      }
+      state.carriers.get(carrierId).count++;
+      state.carrierOf.set(fulfillUnitId, carrierId);
+    }
+    // Always register products + variants so they appear in lists / variant badges
+    for (const s of skus) ensureProduct(s);
+
+    if (skus.length === 1) {
+      const s = skus[0];
+      const product = state.products.get(s.productId);
+      const variant = product.variants.get(s.skuId);
+      if (s.quantity === 1) {
+        product.orderCountSingle++; variant.orderCountSingle++;
+        if (fulfillUnitId) {
+          product.fulfillUnitIdsSingle.add(fulfillUnitId);
+          variant.fulfillUnitIdsSingle.add(fulfillUnitId);
+        }
+      } else {
+        product.orderCountMulti++; variant.orderCountMulti++;
+        if (fulfillUnitId) {
+          product.fulfillUnitIdsMulti.add(fulfillUnitId);
+          variant.fulfillUnitIdsMulti.add(fulfillUnitId);
+        }
+      }
+    } else if (skus.length > 1) {
+      const items = skus.map(s => ({
+        productId: s.productId,
+        productName: s.productName || '',
+        productImageURL: s.productImageURL || '',
+        quantity: s.quantity,
+      }));
+      state.weirdOrders.push({
+        orderId: rec.batchId || rec.orderIds?.[0] || '',
+        fulfillUnitId,
+        skus: items,
+      });
+      if (fulfillUnitId) state.weirdFulfillUnitIds.add(fulfillUnitId);
+
+      // Group by combination signature
+      const sorted = [...items].sort((a, b) => a.productId.localeCompare(b.productId));
+      const sigKey = sorted.map(i => `${i.productId}:${i.quantity}`).join('|');
+      if (!state.weirdCombos.has(sigKey)) {
+        state.weirdCombos.set(sigKey, {
+          sigKey,
+          items: sorted,
+          fulfillUnitIds: new Set(),
+          count: 0,
+        });
+      }
+      const combo = state.weirdCombos.get(sigKey);
+      if (fulfillUnitId) combo.fulfillUnitIds.add(fulfillUnitId);
+      combo.count++;
+    }
+  }
+
+  async function awaitLabelsApiReady(ms = 8000) {
+    const deadline = Date.now() + ms;
+    while ((!_labelsApiUrl || !_labelsApiBodyTemplate) && Date.now() < deadline) await sleep(150);
+    return _labelsApiUrl && _labelsApiBodyTemplate;
+  }
+
+  async function triggerLabelsApiCapture(statusEl) {
+    // Force TikTok to refetch labels by clicking the page-1 pagination item or pressing F5-like reload via filter toggle
+    statusEl.textContent = 'รอจับ API จาก TikTok...';
+    // Try clicking page 2 then back to 1 to trigger fresh API call
+    const items = getPageItems();
+    const next = items.find(it => /^2$/.test(it.textContent.trim()));
+    const first = items.find(it => /^1$/.test(it.textContent.trim()));
+    if (next) { simulateClick(next); await sleep(1500); }
+    if (first) { simulateClick(first); await sleep(1500); }
+    return await awaitLabelsApiReady(3000);
+  }
+
+  async function scanLabelsPage(statusEl) {
+    let ready = await awaitLabelsApiReady(3000);
+    if (!ready) {
+      ready = await triggerLabelsApiCapture(statusEl);
+    }
+    if (ready) {
+      await scanLabelsByApi(_labelsApiUrl, statusEl);
+    } else {
+      // DOM fallback: paginate through all pages
+      statusEl.textContent = '⚠️ ใช้ DOM fallback (ช้า) — API ไม่จับ';
+      const totalPages = getTotalPages();
+      for (let p = 1; p <= totalPages; p++) {
+        if (p > 1) { await goToPage(p); await sleep(WAIT_AFTER_PAGE_CLICK); }
+        scanLabelsDom();
+        statusEl.textContent = `สแกน หน้า ${p}/${totalPages} (DOM fallback)`;
+      }
+    }
+  }
+
+  function getApiList(d) {
+    return d.seller_packages_list || d.list || d.labels || d.orders || [];
+  }
+
+  function normalizeApiRecord(rec) {
+    // Convert snake_case API record into the shape processLabelRecord expects (camelCase + skuList)
+    const lm = rec.label_module || {};
+    const dm = rec.delivery_module || {};
+    const sp = dm.shipment_provider_info || dm.shipping_provider_info || {};
+    const skuList = (rec.sku_module || []).map(s => ({
+      productId: s.product_id,
+      skuId: s.sku_id,
+      productName: s.product_name,
+      skuName: s.sku_name,
+      sellerSkuName: s.seller_sku_name,
+      productImageURL: s.product_image?.thumb_url_list?.[0] || s.product_image?.url_list?.[0] || '',
+      quantity: s.quantity || 1,
+    }));
+    return {
+      fulfillUnitId: rec.fulfill_unit_id || lm.fulfill_unit_id,
+      batchId: lm.batch_id,
+      orderIds: lm.order_ids || rec.order_ids,
+      labelStatus: lm.label_status,
+      skuList,
+      shippingProviderInfo: {
+        name: sp.name,
+        iconUrl: sp.icon_url || sp.iconUrl,
+      },
+      deliveryInfo: {
+        shippingProvider: {
+          id: sp.id,
+          name: sp.name,
+          icon_url: sp.icon_url,
+        },
+      },
+    };
+  }
+
+  async function scanLabelsByApi(apiUrl, statusEl) {
+    const COUNT = 100;
+    const makeBody = (offset) => ({ ..._labelsApiBodyTemplate, offset, count: COUNT });
+
+    const first = await _origFetch.call(window, apiUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(makeBody(0)),
+    }).then(r => r.json());
+    if (first.code !== 0) throw new Error('Labels API error: ' + (first.message || first.code));
+
+    const d = first.data || {};
+    const total = d.total_count ?? d.total ?? 0;
+    getApiList(d).forEach(r => processLabelRecord(normalizeApiRecord(r)));
+    statusEl.textContent = `สแกน ${Math.min(COUNT, total)}/${total || '?'}...`;
+
+    const offsets = [];
+    for (let off = COUNT; off < total; off += COUNT) offsets.push(off);
+    for (let i = 0; i < offsets.length; i += 5) {
+      const results = await Promise.all(offsets.slice(i, i + 5).map(off =>
+        _origFetch.call(window, apiUrl, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(makeBody(off)),
+        }).then(r => r.json())
+      ));
+      for (const res of results) {
+        if (res.code === 0) {
+          getApiList(res.data || {}).forEach(r => processLabelRecord(normalizeApiRecord(r)));
+        }
+      }
+      statusEl.textContent = `สแกน ${Math.min((i + 6) * COUNT, total)}/${total}...`;
+    }
+  }
+
+  function scanLabelsDom() {
+    const rows = [...document.querySelectorAll('tbody tr')];
+    for (const row of rows) {
+      const rec = getRecordFromRow(row);
+      if (rec) processLabelRecord(rec);
+    }
+  }
+
+  const PRINT_BATCH_SIZE = 500; // TikTok limit per generate call
+
+  async function ensureFontBytes() {
+    if (state.fontBytes) return state.fontBytes;
+    if (!state.fontUrl) {
+      // Wait briefly for asset-bridge
+      const deadline = Date.now() + 2000;
+      while (!state.fontUrl && Date.now() < deadline) await sleep(100);
+    }
+    if (!state.fontUrl) throw new Error('ไม่พบ font URL (asset-bridge ยังไม่ทำงาน)');
+    const r = await fetch(state.fontUrl);
+    state.fontBytes = await r.arrayBuffer();
+    return state.fontBytes;
+  }
+
+  function shortName(name) {
+    if (!name) return '';
+    const trimmed = name.replace(/^\[[^\]]*\]\s*/, '').trim();
+    return trimmed.length > 8 ? trimmed.slice(0, 8) + '…' : trimmed;
+  }
+
+  function buildPageText(record) {
+    if (!record?.skuList?.length) return '';
+    const parts = record.skuList.map(s => {
+      const alias = (state.aliases.get(s.productId) || '').trim() || shortName(s.productName);
+      return `${alias} ${s.quantity || 1}`;
+    });
+    return parts.join(' + ');
+  }
+
+  async function overlayAliasOnPdf(pdfBytes, fulfillUnitIds) {
+    if (!window.PDFLib) return pdfBytes;
+    const { PDFDocument, rgb } = window.PDFLib;
+    const fontBytes = await ensureFontBytes();
+    const pdfDoc = await PDFDocument.load(pdfBytes);
+    if (window.fontkit) pdfDoc.registerFontkit(window.fontkit);
+    const font = await pdfDoc.embedFont(fontBytes, { subset: true });
+    const pages = pdfDoc.getPages();
+    if (!pages.length || !fulfillUnitIds?.length) return await pdfDoc.save();
+
+    // Pages may be grouped per fulfillUnit (e.g., shipping label + packing list = 2 pages per unit)
+    const pagesPerUnit = Math.max(1, Math.round(pages.length / fulfillUnitIds.length));
+
+    for (let i = 0; i < pages.length; i++) {
+      const unitIdx = Math.min(fulfillUnitIds.length - 1, Math.floor(i / pagesPerUnit));
+      const rec = state.records.get(fulfillUnitIds[unitIdx]);
+      const text = buildPageText(rec);
+      if (!text) continue;
+
+      const page = pages[i];
+      const { width, height } = page.getSize();
+      let size = Math.min(height * 0.05, 22);
+      let textWidth = font.widthOfTextAtSize(text, size);
+      const maxWidth = width - 16;
+      if (textWidth > maxWidth) {
+        size = size * (maxWidth / textWidth);
+        textWidth = font.widthOfTextAtSize(text, size);
+      }
+      const x = (width - textWidth) / 2;
+      const y = 6;
+      page.drawText(text, {
+        x, y, size, font, color: rgb(0, 0, 0), opacity: 0.4,
+      });
+    }
+    return await pdfDoc.save();
+  }
+
+  function applyCarrierFilter(ids) {
+    if (state.carrierFilter.size === 0) return ids;
+    return ids.filter(id => state.carrierFilter.has(state.carrierOf.get(id)));
+  }
+
+  function collectFulfillIds(productId, skuId, scenario) {
+    // scenario: 'single' (1 SKU qty=1) | 'multi' (1 SKU qty>1)
+    const product = state.products.get(productId);
+    if (!product) return [];
+    let ids;
+    if (skuId) {
+      const v = product.variants.get(skuId);
+      if (!v) return [];
+      if (scenario === 'single')      ids = [...v.fulfillUnitIdsSingle];
+      else if (scenario === 'multi')  ids = [...v.fulfillUnitIdsMulti];
+      else                            ids = [...v.fulfillUnitIdsSingle, ...v.fulfillUnitIdsMulti];
+    } else {
+      if (scenario === 'single')      ids = [...product.fulfillUnitIdsSingle];
+      else if (scenario === 'multi')  ids = [...product.fulfillUnitIdsMulti];
+      else                            ids = [...product.fulfillUnitIdsSingle, ...product.fulfillUnitIdsMulti];
+    }
+    return applyCarrierFilter(ids);
+  }
+
+  function showPrintConfirm({ title, summary, count, sampleText }) {
+    return new Promise(resolve => {
+      const overlay = document.createElement('div');
+      overlay.className = 'qf-modal-overlay';
+      overlay.innerHTML = `
+        <div class="qf-modal" role="dialog">
+          <div class="qf-modal-title">ยืนยันพิมพ์</div>
+          <div class="qf-modal-body">
+            <div class="qf-modal-target">${escapeHtml(title)}</div>
+            ${summary ? `<div class="qf-modal-summary">${escapeHtml(summary)}</div>` : ''}
+            <div class="qf-modal-count">${count} ฉลาก</div>
+            ${sampleText ? `<div class="qf-modal-sample">ลายน้ำตัวอย่าง: <b>${escapeHtml(sampleText)}</b></div>` : ''}
+            <div class="qf-modal-warn">⚠️ จะยิง print API ทันที — TikTok จะนับว่าฉลากถูกพิมพ์</div>
+          </div>
+          <div class="qf-modal-actions">
+            <button class="qf-btn-cancel">ยกเลิก</button>
+            <button class="qf-btn-confirm">พิมพ์เลย</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+      const cleanup = (val) => { overlay.remove(); resolve(val); };
+      overlay.querySelector('.qf-btn-cancel').onclick = () => cleanup(false);
+      overlay.querySelector('.qf-btn-confirm').onclick = () => cleanup(true);
+      overlay.onclick = (e) => { if (e.target === overlay) cleanup(false); };
+      const onKey = (e) => { if (e.key === 'Escape') { cleanup(false); document.removeEventListener('keydown', onKey); } };
+      document.addEventListener('keydown', onKey);
+    });
+  }
+
+  async function printIds(ids, displayLabel, sampleText) {
+    if (!ids.length) { showToast('ไม่พบ ID สำหรับพิมพ์ — ลองสแกนใหม่', 3000); return false; }
+
+    const confirmed = await showPrintConfirm({
+      title: displayLabel || 'พิมพ์ฉลาก',
+      count: ids.length,
+      sampleText,
+    });
+    if (!confirmed) return false;
+
+    showToast(`กำลังส่งพิมพ์ ${ids.length} ฉลาก...`, 6000);
+
+    for (let i = 0; i < ids.length; i += PRINT_BATCH_SIZE) {
+      const batch = ids.slice(i, i + PRINT_BATCH_SIZE);
+      const body = {
+        fulfill_unit_id_list: batch,
+        content_type_list: [1, 2],
+        template_type: 0,
+        op_scene: 2,
+        file_prefix: 'Shipping label',
+        request_time: Date.now(),
+        print_option: {tmpl: 0, template_size: 0, layout: [0]},
+        print_source: 201,
+      };
+      const resp = await _origFetch.call(window, '/api/v1/fulfillment/shipping_doc/generate', {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json();
+      if (data.code !== 0) throw new Error('generate API: ' + (data.message || data.code));
+      const docUrl = data.data?.doc_url;
+      if (!docUrl) continue;
+
+      try {
+        const pdfBytes = await fetch(docUrl).then(r => r.arrayBuffer());
+        const modifiedBytes = await overlayAliasOnPdf(pdfBytes, batch);
+        const blob = new Blob([modifiedBytes], { type: 'application/pdf' });
+        window.open(URL.createObjectURL(blob), '_blank');
+      } catch (e) {
+        console.warn('[QF] overlay failed, opening original:', e);
+        window.open(docUrl, '_blank');
+      }
+      if (i + PRINT_BATCH_SIZE < ids.length) await sleep(500);
+    }
+
+    showToast(`✓ เปิด PDF สำหรับ ${ids.length} ฉลากแล้ว`, 3000);
+    return true;
+  }
+
+  async function printProductLabels(productId, skuId, scenario) {
+    const ids = collectFulfillIds(productId, skuId, scenario);
+    const product = state.products.get(productId);
+    const variant = skuId ? product?.variants.get(skuId) : null;
+    const alias = (state.aliases.get(productId) || '').trim();
+    const baseName = alias || shortName(product?.productName);
+    const variantSuffix = variant ? ` · ${variant.skuName || variant.sellerSkuName || variant.skuId}` : '';
+    const scenarioLabel = scenario === 'multi' ? '(qty > 1)' : '(qty = 1)';
+    const title = `${product?.productName || productId}${variantSuffix} ${scenarioLabel}`;
+    const sampleQty = scenario === 'multi' ? '2+' : '1';
+    return printIds(ids, title, `${baseName} ${sampleQty}`);
+  }
+
+  async function printWeirdCombo(sigKey) {
+    const combo = state.weirdCombos.get(sigKey);
+    if (!combo) { showToast('ไม่พบ combo', 2000); return; }
+    const ids = applyCarrierFilter([...combo.fulfillUnitIds]);
+    const sample = combo.items
+      .map(i => `${(state.aliases.get(i.productId) || '').trim() || shortName(i.productName)} ${i.quantity}`)
+      .join(' + ');
+    return printIds(ids, `ออเดอร์แปลก: ${sample}`, sample);
+  }
+
+  function selectLabelRows(productId, skuId) {
+    const rows = [...document.querySelectorAll('tbody tr')];
+    let count = 0;
+    for (const row of rows) {
+      const rec = getRecordFromRow(row);
+      if (!rec?.skuList) continue;
+      const matches = skuId
+        ? rec.skuList.some(s => s.skuId === skuId)
+        : rec.skuList.some(s => s.productId === productId);
+      if (!matches) continue;
+      const checkbox = row.querySelector('label.p-checkbox, .p-checkbox');
+      if (checkbox) { simulateClick(checkbox); count++; }
+    }
+    return count;
   }
 
   // ==================== FILTER ACTIONS ====================
@@ -403,6 +1028,16 @@
   // ==================== HIGH-LEVEL ACTIONS ====================
   async function applyProductFilter(productId, skuId, type) {
     try {
+      if (isLabelsPage()) {
+        try {
+          const scenario = type === 'single_sku' ? 'multi' : 'single';
+          const ok = await printProductLabels(productId, skuId, scenario);
+          if (ok) { markDone(productId, skuId, type); renderAll(); }
+        } catch(e) {
+          showToast('พิมพ์ผิดพลาด: ' + e.message, 3000);
+        }
+        return;
+      }
       const label = skuId ? 'กำลังกรอง variant...' : 'กำลังกรอง...';
       showToast(label, 10000);
       await setSearchBox(productId);
@@ -417,10 +1052,9 @@
       } else {
         showToast('✓ กรองเรียบร้อย', 2000);
       }
-      markDone(productId, skuId);
+      markDone(productId, skuId, type);
       renderAll();
     } catch (e) {
-      console.error('[QF]', e);
       showToast('ผิดพลาด: ' + e.message, 3000);
     }
   }
@@ -460,27 +1094,46 @@
   // ==================== UI ====================
   function buildWidget() {
     if (document.getElementById('qf-widget')) return;
+    const labels = isLabelsPage();
     const w = document.createElement('div');
     w.id = 'qf-widget';
     w.innerHTML = `
       <div id="qf-header">
-        <span>⚡ Quick Filter</span>
+        <span>⚡ Quick Filter${labels ? ' · Labels' : ''}</span>
         <div id="qf-header-actions">
-          <button id="qf-reset-btn" title="รีเซ็ตฟิลเตอร์">↺</button>
+          ${!labels ? '<button id="qf-reset-btn" title="รีเซ็ตฟิลเตอร์">↺</button>' : ''}
           <button id="qf-toggle-btn" title="ย่อ/ขยาย">−</button>
         </div>
       </div>
       <div id="qf-body">
         <div id="qf-scan-row">
-          <button id="qf-scan-btn">🔍 Scan ทั้งหมด</button>
+          <button id="qf-scan-btn">🔍 Scan</button>
           <span id="qf-scan-status">กดปุ่มเพื่อเริ่มสแกน</span>
         </div>
+        ${!labels ? `
         <div id="qf-options-row">
           <label>
             <input type="checkbox" id="qf-auto-select" checked />
             เลือกออเดอร์ทั้งหมดอัตโนมัติหลังกรอง
           </label>
-        </div>
+        </div>` : `
+        <div id="qf-options-row">
+          <div class="qf-filter-block">
+            <div class="qf-filter-label">สถานะ</div>
+            <div class="qf-segmented" id="qf-status-seg">
+              <button class="qf-seg-btn ${state.labelStatusFilter==='not_printed'?'active':''}" data-val="not_printed">🖨️ ยังไม่พิมพ์</button>
+              <button class="qf-seg-btn ${state.labelStatusFilter==='printed'?'active':''}" data-val="printed">✓ พิมพ์แล้ว</button>
+              <button class="qf-seg-btn ${state.labelStatusFilter==='all'?'active':''}" data-val="all">ทั้งหมด</button>
+            </div>
+          </div>
+          <div class="qf-filter-block" id="qf-carrier-block">
+            <div class="qf-filter-label">ขนส่ง <span class="qf-filter-hint">(ไม่เลือก = ทั้งหมด)</span></div>
+            <div class="qf-carrier-chips" id="qf-carrier-chips">
+              <div class="qf-carrier-empty">— สแกนเพื่อโหลดรายการขนส่ง —</div>
+            </div>
+          </div>
+          <div class="qf-tip">คลิก card → ยืนยัน → พิมพ์ฉลาก</div>
+        </div>`}
         <div id="qf-tabs">
           <div class="qf-tab active" data-tab="single">1 ชิ้น <span class="qf-tab-count" id="qf-count-single">0</span></div>
           <div class="qf-tab" data-tab="multi">หลายชิ้น <span class="qf-tab-count" id="qf-count-multi">0</span></div>
@@ -503,13 +1156,28 @@
       w.classList.toggle('qf-collapsed');
       e.target.textContent = w.classList.contains('qf-collapsed') ? '+' : '−';
     });
-    document.getElementById('qf-reset-btn').addEventListener('click', (e) => {
+    document.getElementById('qf-reset-btn')?.addEventListener('click', (e) => {
       e.stopPropagation();
       resetFilters();
     });
     document.getElementById('qf-scan-btn').addEventListener('click', scanAllPages);
-    document.getElementById('qf-auto-select').addEventListener('change', (e) => {
+    document.getElementById('qf-auto-select')?.addEventListener('change', (e) => {
       state.autoSelectAll = e.target.checked;
+    });
+    document.querySelectorAll('#qf-status-seg .qf-seg-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const val = btn.dataset.val;
+        if (state.labelStatusFilter === val) return;
+        state.labelStatusFilter = val;
+        document.querySelectorAll('#qf-status-seg .qf-seg-btn').forEach(b => {
+          b.classList.toggle('active', b.dataset.val === val);
+        });
+        // Auto re-scan since status filter affects which records are processed
+        if (state.products.size > 0 || state.records.size > 0) {
+          showToast('กำลังสแกนใหม่ตามสถานะใหม่...', 2000);
+          scanAllPages();
+        }
+      });
     });
     document.querySelectorAll('.qf-tab').forEach(tab => {
       tab.addEventListener('click', () => {
@@ -542,18 +1210,48 @@
     window.addEventListener('mouseup', () => dragging = false);
   }
 
+  function renderCarriers() {
+    const wrap = document.getElementById('qf-carrier-chips');
+    if (!wrap) return;
+    if (state.carriers.size === 0) {
+      wrap.innerHTML = '<div class="qf-carrier-empty">— สแกนเพื่อโหลดรายการขนส่ง —</div>';
+      return;
+    }
+    wrap.innerHTML = '';
+    const carriers = [...state.carriers.values()].sort((a, b) => b.count - a.count);
+    for (const c of carriers) {
+      const chip = document.createElement('button');
+      const active = state.carrierFilter.has(c.id);
+      chip.className = 'qf-carrier-chip' + (active ? ' active' : '');
+      chip.title = c.name;
+      chip.innerHTML = `
+        ${c.iconUrl ? `<img src="${c.iconUrl}" referrerpolicy="no-referrer"/>` : '<span class="qf-carrier-noicon">📦</span>'}
+        <span class="qf-carrier-name">${escapeHtml(c.name)}</span>
+        <span class="qf-carrier-count">${c.count}</span>
+      `;
+      chip.addEventListener('click', () => {
+        if (state.carrierFilter.has(c.id)) state.carrierFilter.delete(c.id);
+        else state.carrierFilter.add(c.id);
+        renderCarriers();
+      });
+      wrap.appendChild(chip);
+    }
+  }
+
   function renderAll() {
     const singleCount = [...state.products.values()].filter(p => p.orderCountSingle > 0).length;
-    const multiCount = [...state.products.values()].filter(p => p.orderCountMulti > 0).length;
+    const multiCount  = [...state.products.values()].filter(p => p.orderCountMulti  > 0).length;
     document.getElementById('qf-count-single').textContent = singleCount;
-    document.getElementById('qf-count-multi').textContent = multiCount;
-    document.getElementById('qf-count-weird').textContent = state.weirdOrders.length;
+    document.getElementById('qf-count-multi').textContent  = multiCount;
+    document.getElementById('qf-count-weird').textContent  = state.weirdOrders.length;
+    renderCarriers();
     renderContent();
   }
 
   function renderContent() {
     const wrap = document.getElementById('qf-content');
     wrap.innerHTML = '';
+
     if (state.products.size === 0 && state.weirdOrders.length === 0) {
       wrap.innerHTML = '<div class="qf-empty">ยังไม่ได้สแกน</div>';
       return;
@@ -570,31 +1268,47 @@
       }
       const grid = document.createElement('div');
       grid.className = 'qf-product-grid';
+      const labels = isLabelsPage();
       for (const p of products) {
         const card = document.createElement('div');
-        const cardDone = isDone(p.productId, null);
+        const cardDone = isDone(p.productId, null, type);
         card.className = 'qf-product-card' + (cardDone ? ' qf-done' : '');
         card.title = p.productName;
         const variants = [...p.variants.values()].filter(v => v[key] > 0);
         const hasBadges = variants.length >= 1;
+        const aliasVal = labels ? (state.aliases.get(p.productId) || '') : '';
         card.innerHTML = `
           <img src="${p.productImageURL}" alt="" referrerpolicy="no-referrer"/>
           <div class="qf-product-name">${escapeHtml(p.productName)}</div>
           <div class="qf-product-count">${p[key]} ออเดอร์</div>
+          ${labels ? `<input class="qf-alias-input" type="text" placeholder="ชื่อย่อ (เช่น แดง1)" value="${escapeHtml(aliasVal)}" maxlength="20"/>` : ''}
           ${hasBadges ? `<div class="qf-variant-badges"></div>` : ''}
         `;
+        const aliasInput = card.querySelector('.qf-alias-input');
+        if (aliasInput) {
+          aliasInput.addEventListener('click', e => e.stopPropagation());
+          aliasInput.addEventListener('change', () => {
+            const v = aliasInput.value.trim();
+            if (v) state.aliases.set(p.productId, v);
+            else state.aliases.delete(p.productId);
+            saveAliases();
+          });
+          aliasInput.addEventListener('keydown', e => {
+            if (e.key === 'Enter') { aliasInput.blur(); }
+          });
+        }
         if (hasBadges) {
           const badgesEl = card.querySelector('.qf-variant-badges');
           for (const v of variants) {
-            const badgeDone = isDone(p.productId, v.skuId);
+            const badgeDone = isDone(p.productId, v.skuId, type);
             const badge = document.createElement('span');
             badge.className = 'qf-variant-badge' + (badgeDone ? ' qf-badge-done' : '');
             badge.dataset.skuId = v.skuId;
             badge.textContent = `${v.skuName || v.sellerSkuName || v.skuId} (${v[key]})`;
             badge.addEventListener('click', (e) => {
               e.stopPropagation();
-              if (isDone(p.productId, v.skuId)) {
-                state.doneItems.delete(doneKey(p.productId, v.skuId));
+              if (isDone(p.productId, v.skuId, type)) {
+                state.doneItems.delete(doneKey(p.productId, v.skuId, type));
                 renderAll();
               } else {
                 applyProductFilter(p.productId, v.skuId, type);
@@ -605,7 +1319,7 @@
         }
         card.addEventListener('click', () => {
           if (cardDone) {
-            state.doneItems.delete(doneKey(p.productId, null));
+            state.doneItems.delete(doneKey(p.productId, null, type));
             renderAll();
           } else {
             applyProductFilter(p.productId, null, type);
@@ -615,11 +1329,14 @@
       }
       wrap.appendChild(grid);
     } else if (state.currentTab === 'weird') {
-      const applyBtn = document.createElement('button');
-      applyBtn.id = 'qf-weird-apply-btn';
-      applyBtn.textContent = `📋 แสดงออเดอร์แปลกทั้งหมด (${state.weirdOrders.length})`;
-      applyBtn.addEventListener('click', applyWeirdFilter);
-      wrap.appendChild(applyBtn);
+      const labelsPage = isLabelsPage();
+      if (!labelsPage) {
+        const applyBtn = document.createElement('button');
+        applyBtn.id = 'qf-weird-apply-btn';
+        applyBtn.textContent = `📋 แสดงออเดอร์แปลกทั้งหมด (${state.weirdOrders.length})`;
+        applyBtn.addEventListener('click', applyWeirdFilter);
+        wrap.appendChild(applyBtn);
+      }
       if (!state.weirdOrders.length) {
         const empty = document.createElement('div');
         empty.className = 'qf-empty';
@@ -627,24 +1344,51 @@
         wrap.appendChild(empty);
         return;
       }
-      const list = document.createElement('div');
-      list.id = 'qf-weird-list';
-      for (const o of state.weirdOrders) {
-        const card = document.createElement('div');
-        card.className = 'qf-weird-order';
-        const items = o.skus.map(s => `
-          <div class="qf-weird-item">
-            <img src="${s.productImageURL}" referrerpolicy="no-referrer"/>
-            <span>${escapeHtml((s.productName || '').substring(0, 40))} ×${s.quantity}</span>
-          </div>
-        `).join('');
-        card.innerHTML = `
-          <div class="qf-weird-order-id">#${o.orderId}</div>
-          <div class="qf-weird-items">${items}</div>
-        `;
-        list.appendChild(card);
+
+      if (labelsPage) {
+        // Group by combination signature
+        const combos = [...state.weirdCombos.values()].sort((a, b) => b.count - a.count);
+        const grid = document.createElement('div');
+        grid.id = 'qf-weird-combo-grid';
+        for (const combo of combos) {
+          const card = document.createElement('div');
+          card.className = 'qf-combo-card';
+          const itemsHtml = combo.items.map((s, idx) => `
+            ${idx > 0 ? '<span class="qf-combo-plus">+</span>' : ''}
+            <div class="qf-combo-item">
+              <img src="${s.productImageURL}" referrerpolicy="no-referrer"/>
+              <div class="qf-combo-qty">×${s.quantity}</div>
+              <div class="qf-combo-alias">${escapeHtml((state.aliases.get(s.productId) || '').trim() || shortName(s.productName))}</div>
+            </div>
+          `).join('');
+          card.innerHTML = `
+            <div class="qf-combo-row">${itemsHtml}</div>
+            <div class="qf-combo-count">${combo.count} ออเดอร์</div>
+          `;
+          card.addEventListener('click', () => printWeirdCombo(combo.sigKey));
+          grid.appendChild(card);
+        }
+        wrap.appendChild(grid);
+      } else {
+        const list = document.createElement('div');
+        list.id = 'qf-weird-list';
+        for (const o of state.weirdOrders) {
+          const card = document.createElement('div');
+          card.className = 'qf-weird-order';
+          const items = o.skus.map(s => `
+            <div class="qf-weird-item">
+              <img src="${s.productImageURL}" referrerpolicy="no-referrer"/>
+              <span>${escapeHtml((s.productName || '').substring(0, 40))} ×${s.quantity}</span>
+            </div>
+          `).join('');
+          card.innerHTML = `
+            <div class="qf-weird-order-id">#${o.orderId}</div>
+            <div class="qf-weird-items">${items}</div>
+          `;
+          list.appendChild(card);
+        }
+        wrap.appendChild(list);
       }
-      wrap.appendChild(list);
     }
   }
 
@@ -656,7 +1400,7 @@
 
   // ==================== INIT ====================
   function init() {
-    if (!/\/order(\?|$|\/)/.test(location.pathname + location.search)) return;
+    if (!isOrderPage() && !isLabelsPage()) return;
     buildWidget();
   }
 
