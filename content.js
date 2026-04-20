@@ -5,11 +5,6 @@
   const WAIT_AFTER_PAGE_CLICK = 2500;
   const WAIT_AFTER_FILTER_CLICK = 2500;
   const WAIT_AFTER_SEARCH = 2500;
-  const COUNT_TYPE_VALUE = {
-    single_item: 1,
-    single_sku: 3,
-    multi_sku: 4,
-  };
 
   // ==================== STATE ====================
   const state = {
@@ -38,31 +33,69 @@
 
   function getOrderRecords() {
     const trs = [...document.querySelectorAll('tr')].filter(tr =>
-      /^\d{15,}/.test((tr.textContent || '').trim())
+      /\d{15,}/.test((tr.textContent || '').trim())
     );
     const records = [];
     for (const tr of trs) {
       const fk = Object.keys(tr).find(k => k.startsWith('__reactFiber'));
       if (!fk) continue;
-      const rec = tr[fk].return?.memoizedProps?.record;
-      if (rec) records.push(rec);
+      // ไต่ fiber ขึ้นไปหา record (เพราะ TikTok อาจ wrap หลายชั้น)
+      let fiber = tr[fk];
+      let rec = null;
+      let depth = 0;
+      while (fiber && depth < 10) {
+        if (fiber.memoizedProps?.record) { rec = fiber.memoizedProps.record; break; }
+        if (fiber.memoizedProps?.rowData) { rec = fiber.memoizedProps.rowData; break; }
+        fiber = fiber.return;
+        depth++;
+      }
+      if (rec && rec.skuList) records.push(rec);
     }
     return records;
   }
 
-  function getCurrentPage() {
-    return document.querySelector('.p-pagination-item-active')
-      ?.getAttribute('aria-label')?.replace('Page ', '');
+  // ---------- Pagination (รองรับหลาย selector + หน้าเดียว) ----------
+  function getPageItems() {
+    // ลอง selector ต่างๆ (p-pagination, arco-pagination, หรือ [aria-label^="Page"])
+    const candidates = [
+      '.p-pagination-item',
+      '.arco-pagination-item',
+      '[class*="pagination"] [aria-label^="Page"]',
+      '[class*="Pagination"] [aria-label^="Page"]',
+    ];
+    for (const sel of candidates) {
+      const items = [...document.querySelectorAll(sel)].filter(li =>
+        /^\d+$/.test((li.textContent || '').trim())
+      );
+      if (items.length) return items;
+    }
+    return [];
   }
 
-  function getPageItems() {
-    return [...document.querySelectorAll('.p-pagination-item')]
-      .filter(li => /^\d+$/.test(li.textContent.trim()));
+  function getCurrentPage() {
+    const activeCandidates = [
+      '.p-pagination-item-active',
+      '.arco-pagination-item-active',
+      '[class*="pagination-item-active"]',
+      '[class*="Pagination"] [aria-current="page"]',
+    ];
+    for (const sel of activeCandidates) {
+      const el = document.querySelector(sel);
+      if (el) {
+        const label = el.getAttribute('aria-label') || el.textContent.trim();
+        const m = label.match(/\d+/);
+        if (m) return m[0];
+      }
+    }
+    // ถ้ามี pagination items แต่หา active ไม่เจอ → สมมติหน้า 1
+    if (getPageItems().length) return '1';
+    // ไม่มี pagination เลย = หน้าเดียว
+    return null;
   }
 
   function getTotalPages() {
     const items = getPageItems();
-    if (!items.length) return 1;
+    if (!items.length) return 1; // หน้าเดียว
     return Math.max(...items.map(li => parseInt(li.textContent.trim())));
   }
 
@@ -78,7 +111,12 @@
 
   async function goToPage(pageNum) {
     const items = getPageItems();
-    const target = items.find(li => li.getAttribute('aria-label') === `Page ${pageNum}`);
+    if (!items.length) return false;
+    const target = items.find(li => {
+      const aria = li.getAttribute('aria-label');
+      if (aria && aria === `Page ${pageNum}`) return true;
+      return (li.textContent || '').trim() === String(pageNum);
+    });
     if (!target) return false;
     const before = getOrderRecords()[0]?.mainOrderId;
     simulateClick(target);
@@ -109,47 +147,30 @@
 
     try {
       const totalPages = getTotalPages();
-      if (getCurrentPage() !== '1') {
+      const currentPage = getCurrentPage();
+
+      // กลับหน้า 1 เฉพาะเมื่อรู้แน่ว่าอยู่หน้าอื่น
+      if (totalPages > 1 && currentPage && currentPage !== '1') {
         statusEl.textContent = 'กำลังกลับหน้า 1...';
         await goToPage(1);
       }
 
-      for (let p = 1; p <= totalPages; p++) {
-        statusEl.textContent = `กำลังสแกนหน้า ${p}/${totalPages}...`;
-        if (getCurrentPage() !== String(p)) {
-          const ok = await goToPage(p);
-          if (!ok) break;
-        }
-        const records = getOrderRecords();
-        for (const rec of records) {
-          const skus = rec.skuList || [];
-          for (const s of skus) {
-            if (!state.products.has(s.productId)) {
-              state.products.set(s.productId, {
-                productId: s.productId,
-                productName: s.productName || '(ไม่มีชื่อ)',
-                productImageURL: s.productImageURL || '',
-                orderCountSingle: 0,
-                orderCountMulti: 0,
-              });
+      // scan หน้าปัจจุบันเสมอ (แม้ไม่มี pagination)
+      if (totalPages === 1) {
+        statusEl.textContent = `กำลังสแกน...`;
+        processRecordsOnPage();
+      } else {
+        for (let p = 1; p <= totalPages; p++) {
+          statusEl.textContent = `กำลังสแกนหน้า ${p}/${totalPages}...`;
+          const cur = getCurrentPage();
+          if (cur !== null && cur !== String(p)) {
+            const ok = await goToPage(p);
+            if (!ok) {
+              console.warn('[QF] goToPage failed at', p);
+              break;
             }
           }
-          if (skus.length === 1) {
-            state.products.get(skus[0].productId).orderCountSingle++;
-          } else if (skus.length > 1) {
-            state.weirdOrders.push({
-              orderId: rec.mainOrderId,
-              skus: skus.map(s => ({
-                productId: s.productId,
-                productName: s.productName || '',
-                productImageURL: s.productImageURL || '',
-                quantity: s.quantity,
-              })),
-            });
-            for (const s of skus) {
-              state.products.get(s.productId).orderCountMulti++;
-            }
-          }
+          processRecordsOnPage();
         }
       }
 
@@ -161,6 +182,40 @@
     } finally {
       state.scanning = false;
       btn.disabled = false;
+    }
+  }
+
+  function processRecordsOnPage() {
+    const records = getOrderRecords();
+    for (const rec of records) {
+      const skus = rec.skuList || [];
+      for (const s of skus) {
+        if (!state.products.has(s.productId)) {
+          state.products.set(s.productId, {
+            productId: s.productId,
+            productName: s.productName || '(ไม่มีชื่อ)',
+            productImageURL: s.productImageURL || '',
+            orderCountSingle: 0,
+            orderCountMulti: 0,
+          });
+        }
+      }
+      if (skus.length === 1) {
+        state.products.get(skus[0].productId).orderCountSingle++;
+      } else if (skus.length > 1) {
+        state.weirdOrders.push({
+          orderId: rec.mainOrderId,
+          skus: skus.map(s => ({
+            productId: s.productId,
+            productName: s.productName || '',
+            productImageURL: s.productImageURL || '',
+            quantity: s.quantity,
+          })),
+        });
+        for (const s of skus) {
+          state.products.get(s.productId).orderCountMulti++;
+        }
+      }
     }
   }
 
@@ -178,7 +233,6 @@
     if (!trigger) throw new Error('ไม่เจอตัวกรอง "เนื้อหาคำสั่งซื้อ"');
     simulateClick(trigger);
     await sleep(500);
-
     const optionText = {
       single_item: 'รายการเดียว',
       single_sku: 'SKU เดียว',
@@ -231,7 +285,6 @@
 
   // ==================== AUTO SELECT ALL ====================
   async function selectAllOrders(maxWait = 8000) {
-    // รอให้ตารางเสถียรก่อน (count ไม่เปลี่ยน ≥600ms)
     const start = Date.now();
     let prevCount = null;
     let stableFor = 0;
@@ -249,16 +302,12 @@
       }
       await sleep(200);
     }
-
-    // Step 1: คลิก header checkbox
     const headerLabel = document.querySelector(
       'th[data-log_click_for="select_all_items_in_page"] label.p-checkbox'
     );
     if (!headerLabel) throw new Error('ไม่เจอ header checkbox');
     simulateClick(headerLabel);
     await sleep(800);
-
-    // Step 2: ถ้ามี link "เลือกคำสั่งซื้อทั้งหมด N รายการ" แสดงว่ามีเกิน 1 หน้า
     let selectAllLink = null;
     const t2 = Date.now();
     while (Date.now() - t2 < 2000) {
@@ -270,7 +319,6 @@
       if (selectAllLink) break;
       await sleep(200);
     }
-
     if (selectAllLink) {
       simulateClick(selectAllLink);
       await sleep(1000);
@@ -279,7 +327,6 @@
       const m = banner?.textContent?.match(/เลือกคำสั่งซื้อทั้งหมด (\d+) รายการ/);
       return m ? parseInt(m[1]) : null;
     }
-    // ≤50 รายการ ไม่มี link นี้
     return document.querySelectorAll('tr td.col-checkbox label.p-checkbox-checked').length;
   }
 
@@ -371,7 +418,6 @@
       </div>
     `;
     document.body.appendChild(w);
-
     document.getElementById('qf-header').addEventListener('click', (e) => {
       if (e.target.closest('#qf-header-actions')) return;
       w.classList.toggle('qf-collapsed');
@@ -391,7 +437,6 @@
     document.getElementById('qf-auto-select').addEventListener('change', (e) => {
       state.autoSelectAll = e.target.checked;
     });
-
     document.querySelectorAll('.qf-tab').forEach(tab => {
       tab.addEventListener('click', () => {
         document.querySelectorAll('.qf-tab').forEach(t => t.classList.remove('active'));
@@ -400,7 +445,6 @@
         renderContent();
       });
     });
-
     makeDraggable(w, document.getElementById('qf-header'));
   }
 
@@ -412,26 +456,24 @@
       sx = e.clientX; sy = e.clientY;
       const r = el.getBoundingClientRect();
       sl = r.left; st = r.top;
-      el.style.right = 'auto';
-      el.style.bottom = 'auto';
-      el.style.left = r.left + 'px';
-      el.style.top = r.top + 'px';
+      el.style.right = 'auto'; el.style.bottom = 'auto';
+      el.style.left = r.left + 'px'; el.style.top = r.top + 'px';
       e.preventDefault();
     });
     window.addEventListener('mousemove', (e) => {
       if (!dragging) return;
       el.style.left = (sl + e.clientX - sx) + 'px';
-      el.style.top  = (st + e.clientY - sy) + 'px';
+      el.style.top = (st + e.clientY - sy) + 'px';
     });
     window.addEventListener('mouseup', () => dragging = false);
   }
 
   function renderAll() {
     const singleCount = [...state.products.values()].filter(p => p.orderCountSingle > 0).length;
-    const multiCount  = [...state.products.values()].filter(p => p.orderCountMulti > 0).length;
+    const multiCount = [...state.products.values()].filter(p => p.orderCountMulti > 0).length;
     document.getElementById('qf-count-single').textContent = singleCount;
-    document.getElementById('qf-count-multi').textContent  = multiCount;
-    document.getElementById('qf-count-weird').textContent  = state.weirdOrders.length;
+    document.getElementById('qf-count-multi').textContent = multiCount;
+    document.getElementById('qf-count-weird').textContent = state.weirdOrders.length;
     renderContent();
   }
 
@@ -442,7 +484,6 @@
       wrap.innerHTML = '<div class="qf-empty">ยังไม่ได้สแกน</div>';
       return;
     }
-
     if (state.currentTab === 'single' || state.currentTab === 'multi') {
       const key = state.currentTab === 'single' ? 'orderCountSingle' : 'orderCountMulti';
       const type = state.currentTab === 'single' ? 'single_item' : 'single_sku';
@@ -474,7 +515,6 @@
       applyBtn.textContent = `📋 แสดงออเดอร์แปลกทั้งหมด (${state.weirdOrders.length})`;
       applyBtn.addEventListener('click', applyWeirdFilter);
       wrap.appendChild(applyBtn);
-
       if (!state.weirdOrders.length) {
         const empty = document.createElement('div');
         empty.className = 'qf-empty';
