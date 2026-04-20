@@ -63,6 +63,27 @@ window.fetch = async function(...args) { ... };
 | [vendor/fontkit.umd.min.js](vendor/fontkit.umd.min.js) | Custom font embedding (741KB) | UMD |
 | [vendor/Sarabun-Bold.ttf](vendor/Sarabun-Bold.ttf) | Thai font สำหรับ overlay (88KB) | binary |
 
+## Multi-platform support
+
+Extension runs on both **TikTok Seller Centre** (`seller-th.tiktok.com`)
+and **Shopee Seller Centre** (`seller.shopee.co.th`). Detection via:
+
+```javascript
+isTikTok() // hostname check
+isShopee() // hostname check
+isLabelsPage() // true on TikTok labels OR any Shopee /portal/sale
+```
+
+Shopee uses the **same widget UI**, but theme swaps to orange (#ee4d2d /
+#f76b1c gradient) via `html[data-qf-theme="shopee"]` set in `buildWidget`.
+All `.qf-*` color classes have `html[data-qf-theme=shopee]` overrides in
+content.css.
+
+**Shopee print is currently disabled** — printIds returns early with a
+toast pointing user to Shopee's native button. The print waybill API
+hasn't been wired yet (next iteration). Scan + group + alias + variant
+override + multi-select selection all work identically to TikTok.
+
 ## Critical TikTok endpoints
 
 ทุกตัวเป็น **fragile** — TikTok เปลี่ยนได้ทุกเมื่อ ดูจุด maintenance ด้านล่าง
@@ -73,6 +94,30 @@ window.fetch = async function(...args) { ... };
 | `/api/fulfillment/package/list` | POST | Labels page scan | `seller_packages_list` (response key) |
 | `/api/v1/fulfillment/shipping_doc/generate` | POST | สร้าง PDF | `fulfill_unit_id_list[]`, `content_type_list:[1,2]` |
 | `/api/v1/fulfillment/doc/print_status/verify` | POST | (optional) ตรวจสถานะก่อนพิมพ์ | `fulfill_unit_id[]` |
+
+## Critical Shopee endpoints (XHR, not fetch)
+
+| Endpoint | Method | ใช้กับ | หมายเหตุ |
+|----------|--------|------|---------|
+| `/api/v3/order/search_order_list_index` | POST | ดึง order_id list | response: `data.index_list[]`, total: `data.pagination.total` |
+| `/api/v3/order/get_order_list_card_list` | POST | ดึงรายละเอียด+SKU | body uses `order_param_list` หรือ `package_param_list` ตาม tab |
+| `/api/v3/logistics/can_print_waybill` | POST | (TODO) ตรวจก่อนพิมพ์ | ยังไม่ใช้ |
+
+### Shopee response shapes (3 รูปแบบ)
+
+`processShopeeRecord` รองรับทั้ง 3:
+1. `card.package_card` — tab 300 (ที่ต้องจัดส่ง) — flat single package
+2. `card.order_card` — บางหน้า detail
+3. `card.package_level_order_card` — tab 100 (ทั้งหมด) — order มี multi-package
+
+Field mapping (snake_case → internal camelCase):
+- `inner_item_ext_info.item_id` → `productId`
+- `inner_item_ext_info.model_id` → `skuId`
+- `name` → `productName`
+- `image` (URI) → `productImageURL` (expand to `https://down-th.img.susercontent.com/file/{uri}_tn`)
+- `amount` → `quantity`
+- `order_ext_info.logistics_status` ≥ 3 → `LABEL_STATUS_PRINTED`
+- `fulfilment_info.fulfilment_channel_name` → carrier name (ไม่มี icon URL)
 
 ### API record structure (Labels)
 
