@@ -56,6 +56,7 @@
 
   // ==================== STATE ====================
   const ALIAS_STORAGE_KEY = 'qf_product_aliases_v1';
+  const VARIANT_ALIAS_STORAGE_KEY = 'qf_variant_aliases_v1';
   const state = {
     scanning: false,
     products: new Map(),
@@ -65,6 +66,7 @@
     doneItems: new Map(),          // key: "type:productId:skuId" → timestamp
     labelStatusFilter: 'not_printed', // 'all' | 'not_printed' | 'printed'
     aliases: loadAliases(),        // productId → aliasText (string)
+    variantAliases: loadVariantAliases(), // `${productId}:${skuId}` → {alias: string, replace: boolean}
     fontUrl: null,                 // Sarabun-Bold.ttf URL from asset-bridge
     fontBytes: null,               // cached ArrayBuffer
     records: new Map(),            // fulfillUnitId → {skuList:[{productId,productName,quantity,...}]}
@@ -87,14 +89,72 @@
     localStorage.setItem(ALIAS_STORAGE_KEY, JSON.stringify(obj));
   }
 
-  // Listen for font URL from asset-bridge (ISOLATED world)
+  function loadVariantAliases() {
+    try {
+      const raw = localStorage.getItem(VARIANT_ALIAS_STORAGE_KEY);
+      return raw ? new Map(Object.entries(JSON.parse(raw))) : new Map();
+    } catch { return new Map(); }
+  }
+
+  function saveVariantAliases() {
+    const obj = Object.fromEntries(state.variantAliases);
+    localStorage.setItem(VARIANT_ALIAS_STORAGE_KEY, JSON.stringify(obj));
+  }
+
+  function variantKey(productId, skuId) { return `${productId}:${skuId}`; }
+  function getVariantInfo(productId, skuId) {
+    return state.variantAliases.get(variantKey(productId, skuId)) || null;
+  }
+  function setVariantInfo(productId, skuId, partial) {
+    const key = variantKey(productId, skuId);
+    const cur = state.variantAliases.get(key) || {alias: '', replace: false};
+    const next = {...cur, ...partial};
+    if (!next.alias?.trim() && !next.replace) state.variantAliases.delete(key);
+    else state.variantAliases.set(key, next);
+    saveVariantAliases();
+  }
+
+  // Listen for font URL + manifest version from asset-bridge (ISOLATED world)
+  const REPO_URL = 'https://github.com/Sittipanpee/tiktok-quick-filter';
+  const REMOTE_MANIFEST = 'https://raw.githubusercontent.com/Sittipanpee/tiktok-quick-filter/main/manifest.json';
+  state.localVersion = null;
+  state.remoteVersion = null;
   window.addEventListener('message', (e) => {
-    if (e.source === window && e.data?.__qfAsset === 'font' && e.data.url) {
-      state.fontUrl = e.data.url;
+    if (e.source !== window) return;
+    if (e.data?.__qfAsset === 'font' && e.data.url) state.fontUrl = e.data.url;
+    if (e.data?.__qfAsset === 'manifest' && e.data.version) {
+      state.localVersion = e.data.version;
+      checkForUpdate();
     }
   });
-  // Ask immediately in case bridge already posted
   window.postMessage({ __qfAsset: 'request_font' }, '*');
+
+  async function checkForUpdate() {
+    if (!state.localVersion) return;
+    try {
+      const r = await fetch(REMOTE_MANIFEST, { cache: 'no-store' });
+      if (!r.ok) return;
+      const m = await r.json();
+      state.remoteVersion = m.version;
+      if (m.version && m.version !== state.localVersion) {
+        renderUpdateBadge();
+      }
+    } catch (e) { /* offline / blocked → silent */ }
+  }
+
+  function renderUpdateBadge() {
+    const actions = document.getElementById('qf-header-actions');
+    if (!actions || actions.querySelector('#qf-update-btn')) return;
+    const btn = document.createElement('button');
+    btn.id = 'qf-update-btn';
+    btn.title = `อัพเดตใหม่ v${state.remoteVersion} (ปัจจุบัน v${state.localVersion}) — คลิกเพื่อดาวน์โหลด`;
+    btn.textContent = `↑ v${state.remoteVersion}`;
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      window.open(REPO_URL + '#-ติดตั้ง', '_blank');
+    });
+    actions.insertBefore(btn, actions.firstChild);
+  }
   // Expose state so the top-level fetch hook can write apiListUrl into it
   window.__qfState = state;
 
@@ -792,13 +852,42 @@
     return trimmed.length > 8 ? trimmed.slice(0, 8) + '…' : trimmed;
   }
 
-  function buildPageText(record) {
-    if (!record?.skuList?.length) return '';
+  function variantDisplayName(s) {
+    return (s.skuName || s.sellerSkuName || '').trim();
+  }
+
+  function buildSkuRender(s) {
+    // Returns {primary, secondary} where primary is the big top text and
+    // secondary is the small bottom text (variant). secondary may be empty.
+    const v = getVariantInfo(s.productId, s.skuId);
+    const productAlias = (state.aliases.get(s.productId) || '').trim() || shortName(s.productName);
+    const variantOverride = (v?.alias || '').trim();
+    const variantName = variantOverride || variantDisplayName(s);
+    const qty = s.quantity || 1;
+
+    if (v?.replace && variantOverride) {
+      // Variant replaces product entirely
+      return { primary: `${variantOverride} ${qty}`, secondary: '' };
+    }
+    return {
+      primary: productAlias,
+      secondary: variantName ? `${variantName} ${qty}` : `${qty}`,
+    };
+  }
+
+  function buildPageLines(record) {
+    // Returns either {mode:'single', primary, secondary} for one-SKU records
+    // or {mode:'multi', text} for weird (multi-SKU) records.
+    if (!record?.skuList?.length) return null;
+    if (record.skuList.length === 1) {
+      const r = buildSkuRender(record.skuList[0]);
+      return { mode: 'single', primary: r.primary, secondary: r.secondary };
+    }
     const parts = record.skuList.map(s => {
-      const alias = (state.aliases.get(s.productId) || '').trim() || shortName(s.productName);
-      return `${alias} ${s.quantity || 1}`;
+      const r = buildSkuRender(s);
+      return r.secondary ? `${r.primary} ${r.secondary}`.replace(/\s+/g, ' ').trim() : r.primary;
     });
-    return parts.join(' + ');
+    return { mode: 'multi', text: parts.join(' + ') };
   }
 
   async function overlayAliasOnPdf(pdfBytes, fulfillUnitIds, onProgress) {
@@ -815,27 +904,40 @@
     const pagesPerUnit = Math.max(1, Math.round(pages.length / fulfillUnitIds.length));
     const total = pages.length;
 
+    const fitWidth = (text, baseSize, maxWidth) => {
+      let size = baseSize;
+      let w = font.widthOfTextAtSize(text, size);
+      if (w > maxWidth) { size = size * (maxWidth / w); w = font.widthOfTextAtSize(text, size); }
+      return { size, width: w };
+    };
+    const draw = (page, text, y, baseSize) => {
+      const { width } = page.getSize();
+      const { size, width: tw } = fitWidth(text, baseSize, width - 16);
+      page.drawText(text, {
+        x: (width - tw) / 2, y, size, font,
+        color: rgb(0, 0, 0), opacity: 0.4,
+      });
+    };
+
     for (let i = 0; i < pages.length; i++) {
       const unitIdx = Math.min(fulfillUnitIds.length - 1, Math.floor(i / pagesPerUnit));
       const rec = state.records.get(fulfillUnitIds[unitIdx]);
-      const text = buildPageText(rec);
-      if (text) {
-        const page = pages[i];
-        const { width, height } = page.getSize();
-        let size = Math.min(height * 0.05, 22);
-        let textWidth = font.widthOfTextAtSize(text, size);
-        const maxWidth = width - 16;
-        if (textWidth > maxWidth) {
-          size = size * (maxWidth / textWidth);
-          textWidth = font.widthOfTextAtSize(text, size);
+      const lines = buildPageLines(rec);
+      const page = pages[i];
+      const { height } = page.getSize();
+      const bigSize = Math.min(height * 0.05, 22);
+      const smallSize = Math.min(height * 0.032, 13);
+      if (lines?.mode === 'single') {
+        // big top, small below
+        if (lines.secondary) {
+          draw(page, lines.primary, 4 + smallSize + 2, bigSize); // top line above small
+          draw(page, lines.secondary, 4, smallSize);             // bottom line
+        } else {
+          draw(page, lines.primary, 6, bigSize);
         }
-        const x = (width - textWidth) / 2;
-        const y = 6;
-        page.drawText(text, {
-          x, y, size, font, color: rgb(0, 0, 0), opacity: 0.4,
-        });
+      } else if (lines?.mode === 'multi') {
+        draw(page, lines.text, 6, bigSize);
       }
-      // Yield to event loop every 20 pages so UI/progress can update
       if (onProgress && (i % 20 === 0 || i === total - 1)) {
         onProgress(i + 1, total);
         await sleep(0);
@@ -1443,11 +1545,13 @@
         const variants = variantsRaw.filter(x => x.c > 0);
         const hasBadges = variants.length >= 1;
         const aliasVal = labels ? (state.aliases.get(p.productId) || '') : '';
+        const showVariantToggle = labels && variants.length >= 1;
         card.innerHTML = `
           <img src="${p.productImageURL}" alt="" referrerpolicy="no-referrer"/>
           <div class="qf-product-name">${escapeHtml(p.productName)}</div>
           <div class="qf-product-count">${p._count} ออเดอร์</div>
           ${labels ? `<input class="qf-alias-input" type="text" placeholder="ชื่อย่อ (เช่น แดง1)" value="${escapeHtml(aliasVal)}" maxlength="20"/>` : ''}
+          ${showVariantToggle ? `<button class="qf-variant-toggle">🎨 ตั้ง alias variant ▼</button><div class="qf-variant-panel" style="display:none;"></div>` : ''}
           ${hasBadges ? `<div class="qf-variant-badges"></div>` : ''}
         `;
         const aliasInput = card.querySelector('.qf-alias-input');
@@ -1461,6 +1565,43 @@
           });
           aliasInput.addEventListener('keydown', e => {
             if (e.key === 'Enter') { aliasInput.blur(); }
+          });
+        }
+        const variantToggle = card.querySelector('.qf-variant-toggle');
+        const variantPanel = card.querySelector('.qf-variant-panel');
+        if (variantToggle && variantPanel) {
+          variantToggle.addEventListener('click', e => {
+            e.stopPropagation();
+            const open = variantPanel.style.display !== 'none';
+            if (open) {
+              variantPanel.style.display = 'none';
+              variantToggle.textContent = '🎨 ตั้ง alias variant ▼';
+              return;
+            }
+            // Build panel rows
+            variantPanel.innerHTML = `<div class="qf-variant-panel-hint">ว่าง = ใช้ "${escapeHtml(aliasVal || shortName(p.productName))} ${'{ชื่อ variant}'} {qty}"</div>`;
+            for (const {v} of variants) {
+              const info = getVariantInfo(p.productId, v.skuId) || {alias: '', replace: false};
+              const row = document.createElement('div');
+              row.className = 'qf-variant-row';
+              row.innerHTML = `
+                <span class="qf-variant-row-name" title="${escapeHtml(v.skuName || v.sellerSkuName || v.skuId)}">${escapeHtml((v.skuName || v.sellerSkuName || v.skuId).slice(0, 14))}</span>
+                <input class="qf-variant-row-input" type="text" placeholder="(ใช้ default)" value="${escapeHtml(info.alias)}" maxlength="20"/>
+                <label class="qf-variant-row-replace" title="ใช้ alias นี้แทนชื่อสินค้าเลย (ไม่มีบรรทัดเล็ก)">
+                  <input type="checkbox" ${info.replace ? 'checked' : ''}/> แทน
+                </label>
+              `;
+              const inp = row.querySelector('.qf-variant-row-input');
+              const chk = row.querySelector('input[type="checkbox"]');
+              const commit = () => setVariantInfo(p.productId, v.skuId, {alias: inp.value, replace: chk.checked});
+              inp.addEventListener('change', commit);
+              inp.addEventListener('keydown', ev => { if (ev.key === 'Enter') inp.blur(); });
+              chk.addEventListener('change', commit);
+              [inp, chk, row].forEach(el => el.addEventListener('click', ev => ev.stopPropagation()));
+              variantPanel.appendChild(row);
+            }
+            variantPanel.style.display = 'block';
+            variantToggle.textContent = '🎨 ตั้ง alias variant ▲';
           });
         }
         if (hasBadges) {
@@ -1532,16 +1673,28 @@
           card.className = 'qf-combo-card' + (comboDone ? ' qf-done' : '');
           const itemsHtml = combo.items.map((s, idx) => `
             ${idx > 0 ? '<span class="qf-combo-plus">+</span>' : ''}
-            <div class="qf-combo-item">
+            <div class="qf-combo-item" data-pid="${s.productId}">
               <img src="${s.productImageURL}" referrerpolicy="no-referrer"/>
               <div class="qf-combo-qty">×${s.quantity}</div>
-              <div class="qf-combo-alias">${escapeHtml((state.aliases.get(s.productId) || '').trim() || shortName(s.productName))}</div>
+              <input class="qf-combo-alias-input" type="text" placeholder="alias" value="${escapeHtml((state.aliases.get(s.productId) || '').trim())}" maxlength="20"/>
             </div>
           `).join('');
           card.innerHTML = `
             <div class="qf-combo-row">${itemsHtml}</div>
             <div class="qf-combo-count">${combo._count} ออเดอร์</div>
           `;
+          // wire alias inputs
+          card.querySelectorAll('.qf-combo-item').forEach(itemEl => {
+            const pid = itemEl.dataset.pid;
+            const inp = itemEl.querySelector('.qf-combo-alias-input');
+            inp.addEventListener('click', e => e.stopPropagation());
+            inp.addEventListener('change', () => {
+              const v = inp.value.trim();
+              if (v) state.aliases.set(pid, v); else state.aliases.delete(pid);
+              saveAliases();
+            });
+            inp.addEventListener('keydown', e => { if (e.key === 'Enter') inp.blur(); });
+          });
           card.addEventListener('click', () => {
             if (isComboDone(combo.sigKey)) {
               state.doneItems.delete(comboDoneKey(combo.sigKey));

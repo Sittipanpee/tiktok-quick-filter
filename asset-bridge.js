@@ -1,6 +1,10 @@
 (() => {
   const fontUrl = chrome.runtime.getURL('vendor/Sarabun-Bold.ttf');
-  const send = () => window.postMessage({ __qfAsset: 'font', url: fontUrl }, '*');
+  const version = chrome.runtime.getManifest().version;
+  const send = () => {
+    window.postMessage({ __qfAsset: 'font', url: fontUrl }, '*');
+    window.postMessage({ __qfAsset: 'manifest', version }, '*');
+  };
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', send);
   }
