@@ -152,6 +152,23 @@
     setTimeout(() => t.remove(), duration);
   }
 
+  async function ensurePageSize50() {
+    const pagination = document.querySelector('.p-pagination');
+    if (!pagination) return;
+    const val = pagination.querySelector('.p-select-view-value')?.textContent?.trim();
+    if (val === '50/Page') return;
+    const select = pagination.querySelector('.p-select');
+    if (!select) return;
+    simulateClick(select);
+    await sleep(600);
+    const option = [...document.querySelectorAll('.p-dropdown-menu-item, .p-select-option, [role="option"]')]
+      .find(el => /^50/.test(el.textContent.trim()));
+    if (option) {
+      simulateClick(option);
+      await sleep(WAIT_AFTER_PAGE_CLICK);
+    }
+  }
+
   // ==================== SCANNING ====================
   async function scanAllPages() {
     if (state.scanning) return;
@@ -165,10 +182,16 @@
     btn.disabled = true;
 
     try {
+      // บังคับ ที่จะจัดส่ง tab ก่อนสแกนเสมอ
+      statusEl.textContent = 'กำลังเปิดแท็บ ที่จะจัดส่ง...';
+      await clickToShipTab();
+
+      // บังคับ 50/page
+      await ensurePageSize50();
+
       const totalPages = getTotalPages();
       const currentPage = getCurrentPage();
 
-      // กลับหน้า 1 เฉพาะเมื่อรู้แน่ว่าอยู่หน้าอื่น
       if (totalPages > 1 && currentPage && currentPage !== '1') {
         statusEl.textContent = 'กำลังกลับหน้า 1...';
         await goToPage(1);
