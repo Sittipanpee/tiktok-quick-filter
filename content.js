@@ -552,13 +552,7 @@
   // ==================== INIT ====================
   function init() {
     if (!/\/order(\?|$|\/)/.test(location.pathname + location.search)) return;
-    const t = setInterval(() => {
-      const hasRow = document.querySelector('tr');
-      if (hasRow && getOrderRecords().length > 0) {
-        clearInterval(t);
-        buildWidget();
-      }
-    }, 500);
+    buildWidget();
   }
 
   if (document.readyState === 'loading') {
