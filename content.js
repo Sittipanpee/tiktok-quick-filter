@@ -846,6 +846,106 @@
     };
   }
 
+  function openAliasModal(productId) {
+    const product = state.products.get(productId);
+    if (!product) { showToast('ไม่พบสินค้า', 1500); return; }
+    const variants = [...product.variants.values()];
+
+    document.querySelectorAll('.qf-alias-modal-overlay').forEach(e => e.remove());
+    const overlay = document.createElement('div');
+    overlay.className = 'qf-modal-overlay qf-alias-modal-overlay';
+    overlay.innerHTML = `
+      <div class="qf-modal qf-alias-modal" role="dialog">
+        <div class="qf-alias-modal-header">
+          <img src="${product.productImageURL}" referrerpolicy="no-referrer"/>
+          <div class="qf-alias-modal-title">
+            <div class="qf-alias-modal-name">${escapeHtml(product.productName)}</div>
+            <div class="qf-alias-modal-sub">${variants.length} variant${variants.length !== 1 ? 's' : ''}</div>
+          </div>
+          <button class="qf-alias-modal-close" aria-label="ปิด">×</button>
+        </div>
+
+        <div class="qf-alias-modal-section">
+          <div class="qf-alias-modal-label">Alias หลัก (ใช้กับทุก variant ที่ไม่ override)</div>
+          <input class="qf-alias-modal-product" type="text" placeholder="เช่น ครีม, แดง1, สครับ" maxlength="20" value="${escapeHtml(state.aliases.get(productId) || '')}"/>
+        </div>
+
+        <div class="qf-alias-modal-section">
+          <div class="qf-alias-modal-label">Variant override (ว่าง = ใช้ default)</div>
+          <div class="qf-alias-modal-variants"></div>
+        </div>
+
+        <div class="qf-alias-modal-footer">
+          <button class="qf-alias-modal-done">เสร็จ</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const productInput = overlay.querySelector('.qf-alias-modal-product');
+    const variantsWrap = overlay.querySelector('.qf-alias-modal-variants');
+
+    const updatePreviews = () => {
+      variantsWrap.querySelectorAll('.qf-av-row').forEach(row => {
+        const skuId = row.dataset.skuId;
+        const v = product.variants.get(skuId);
+        const inp = row.querySelector('.qf-av-input');
+        const chk = row.querySelector('.qf-av-replace');
+        const prev = row.querySelector('.qf-av-preview');
+        const productAlias = productInput.value.trim() || shortName(product.productName);
+        const variantAlias = inp.value.trim();
+        const variantName = variantAlias || (v.skuName || v.sellerSkuName || '').trim();
+        if (chk.checked && variantAlias) {
+          prev.innerHTML = `บนลาเบล: <b>${escapeHtml(variantAlias)} 1</b>`;
+        } else {
+          prev.innerHTML = `บนลาเบล: <b>${escapeHtml(productAlias)}</b><br><span class="qf-av-preview-small">${escapeHtml(variantName)} 1</span>`;
+        }
+      });
+    };
+
+    productInput.addEventListener('input', () => {
+      const v = productInput.value.trim();
+      if (v) state.aliases.set(productId, v); else state.aliases.delete(productId);
+      saveAliases();
+      updatePreviews();
+    });
+
+    for (const v of variants) {
+      const info = getVariantInfo(productId, v.skuId) || {alias: '', replace: false};
+      const row = document.createElement('div');
+      row.className = 'qf-av-row';
+      row.dataset.skuId = v.skuId;
+      row.innerHTML = `
+        <div class="qf-av-name" title="${escapeHtml(v.skuName || v.sellerSkuName || v.skuId)}">${escapeHtml(v.skuName || v.sellerSkuName || v.skuId)}</div>
+        <div class="qf-av-controls">
+          <input class="qf-av-input" type="text" placeholder="(ใช้ default)" maxlength="20" value="${escapeHtml(info.alias)}"/>
+          <label class="qf-av-replace-label">
+            <input class="qf-av-replace" type="checkbox" ${info.replace ? 'checked' : ''}/>
+            <span>ใช้แทนชื่อสินค้า</span>
+          </label>
+        </div>
+        <div class="qf-av-preview"></div>
+      `;
+      const inp = row.querySelector('.qf-av-input');
+      const chk = row.querySelector('.qf-av-replace');
+      const commit = () => {
+        setVariantInfo(productId, v.skuId, {alias: inp.value, replace: chk.checked});
+        updatePreviews();
+      };
+      inp.addEventListener('input', commit);
+      chk.addEventListener('change', commit);
+      variantsWrap.appendChild(row);
+    }
+    updatePreviews();
+
+    const cleanup = () => { overlay.remove(); renderAll(); };
+    overlay.querySelector('.qf-alias-modal-close').onclick = cleanup;
+    overlay.querySelector('.qf-alias-modal-done').onclick = cleanup;
+    overlay.onclick = (e) => { if (e.target === overlay) cleanup(); };
+    const onKey = (e) => { if (e.key === 'Escape') { cleanup(); document.removeEventListener('keydown', onKey); } };
+    document.addEventListener('keydown', onKey);
+  }
+
   function shortName(name) {
     if (!name) return '';
     const trimmed = name.replace(/^\[[^\]]*\]\s*/, '').trim();
@@ -1550,8 +1650,7 @@
           <img src="${p.productImageURL}" alt="" referrerpolicy="no-referrer"/>
           <div class="qf-product-name">${escapeHtml(p.productName)}</div>
           <div class="qf-product-count">${p._count} ออเดอร์</div>
-          ${labels ? `<input class="qf-alias-input" type="text" placeholder="ชื่อย่อ (เช่น แดง1)" value="${escapeHtml(aliasVal)}" maxlength="20"/>` : ''}
-          ${showVariantToggle ? `<button class="qf-variant-toggle">🎨 ตั้ง alias variant ▼</button><div class="qf-variant-panel" style="display:none;"></div>` : ''}
+          ${labels ? `<div class="qf-alias-row"><input class="qf-alias-input" type="text" placeholder="ชื่อย่อ (เช่น แดง1)" value="${escapeHtml(aliasVal)}" maxlength="20"/><button class="qf-alias-edit" title="ตั้ง alias + variant">✏️</button></div>` : ''}
           ${hasBadges ? `<div class="qf-variant-badges"></div>` : ''}
         `;
         const aliasInput = card.querySelector('.qf-alias-input');
@@ -1567,41 +1666,11 @@
             if (e.key === 'Enter') { aliasInput.blur(); }
           });
         }
-        const variantToggle = card.querySelector('.qf-variant-toggle');
-        const variantPanel = card.querySelector('.qf-variant-panel');
-        if (variantToggle && variantPanel) {
-          variantToggle.addEventListener('click', e => {
+        const editBtn = card.querySelector('.qf-alias-edit');
+        if (editBtn) {
+          editBtn.addEventListener('click', e => {
             e.stopPropagation();
-            const open = variantPanel.style.display !== 'none';
-            if (open) {
-              variantPanel.style.display = 'none';
-              variantToggle.textContent = '🎨 ตั้ง alias variant ▼';
-              return;
-            }
-            // Build panel rows
-            variantPanel.innerHTML = `<div class="qf-variant-panel-hint">ว่าง = ใช้ "${escapeHtml(aliasVal || shortName(p.productName))} ${'{ชื่อ variant}'} {qty}"</div>`;
-            for (const {v} of variants) {
-              const info = getVariantInfo(p.productId, v.skuId) || {alias: '', replace: false};
-              const row = document.createElement('div');
-              row.className = 'qf-variant-row';
-              row.innerHTML = `
-                <span class="qf-variant-row-name" title="${escapeHtml(v.skuName || v.sellerSkuName || v.skuId)}">${escapeHtml((v.skuName || v.sellerSkuName || v.skuId).slice(0, 14))}</span>
-                <input class="qf-variant-row-input" type="text" placeholder="(ใช้ default)" value="${escapeHtml(info.alias)}" maxlength="20"/>
-                <label class="qf-variant-row-replace" title="ใช้ alias นี้แทนชื่อสินค้าเลย (ไม่มีบรรทัดเล็ก)">
-                  <input type="checkbox" ${info.replace ? 'checked' : ''}/> แทน
-                </label>
-              `;
-              const inp = row.querySelector('.qf-variant-row-input');
-              const chk = row.querySelector('input[type="checkbox"]');
-              const commit = () => setVariantInfo(p.productId, v.skuId, {alias: inp.value, replace: chk.checked});
-              inp.addEventListener('change', commit);
-              inp.addEventListener('keydown', ev => { if (ev.key === 'Enter') inp.blur(); });
-              chk.addEventListener('change', commit);
-              [inp, chk, row].forEach(el => el.addEventListener('click', ev => ev.stopPropagation()));
-              variantPanel.appendChild(row);
-            }
-            variantPanel.style.display = 'block';
-            variantToggle.textContent = '🎨 ตั้ง alias variant ▲';
+            openAliasModal(p.productId);
           });
         }
         if (hasBadges) {
@@ -1676,17 +1745,21 @@
             <div class="qf-combo-item" data-pid="${s.productId}">
               <img src="${s.productImageURL}" referrerpolicy="no-referrer"/>
               <div class="qf-combo-qty">×${s.quantity}</div>
-              <input class="qf-combo-alias-input" type="text" placeholder="alias" value="${escapeHtml((state.aliases.get(s.productId) || '').trim())}" maxlength="20"/>
+              <div class="qf-combo-alias-row">
+                <input class="qf-combo-alias-input" type="text" placeholder="alias" value="${escapeHtml((state.aliases.get(s.productId) || '').trim())}" maxlength="20"/>
+                <button class="qf-combo-alias-edit" title="ตั้ง alias + variant">✏️</button>
+              </div>
             </div>
           `).join('');
           card.innerHTML = `
             <div class="qf-combo-row">${itemsHtml}</div>
             <div class="qf-combo-count">${combo._count} ออเดอร์</div>
           `;
-          // wire alias inputs
+          // wire alias inputs + edit buttons
           card.querySelectorAll('.qf-combo-item').forEach(itemEl => {
             const pid = itemEl.dataset.pid;
             const inp = itemEl.querySelector('.qf-combo-alias-input');
+            const edit = itemEl.querySelector('.qf-combo-alias-edit');
             inp.addEventListener('click', e => e.stopPropagation());
             inp.addEventListener('change', () => {
               const v = inp.value.trim();
@@ -1694,6 +1767,10 @@
               saveAliases();
             });
             inp.addEventListener('keydown', e => { if (e.key === 'Enter') inp.blur(); });
+            edit?.addEventListener('click', e => {
+              e.stopPropagation();
+              openAliasModal(pid);
+            });
           });
           card.addEventListener('click', () => {
             if (isComboDone(combo.sigKey)) {
