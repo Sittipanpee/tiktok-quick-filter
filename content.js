@@ -231,9 +231,16 @@
         }
       }
       if (skus.length === 1) {
-        const product = state.products.get(skus[0].productId);
-        product.orderCountSingle++;
-        product.variants.get(skus[0].skuId).orderCountSingle++;
+        const s = skus[0];
+        const product = state.products.get(s.productId);
+        const variant = product.variants.get(s.skuId);
+        if (s.quantity === 1) {
+          product.orderCountSingle++;
+          variant.orderCountSingle++;
+        } else {
+          product.orderCountMulti++;
+          variant.orderCountMulti++;
+        }
       } else if (skus.length > 1) {
         state.weirdOrders.push({
           orderId: rec.mainOrderId,
@@ -244,11 +251,6 @@
             quantity: s.quantity,
           })),
         });
-        for (const s of skus) {
-          const product = state.products.get(s.productId);
-          product.orderCountMulti++;
-          product.variants.get(s.skuId).orderCountMulti++;
-        }
       }
     }
   }
@@ -348,10 +350,10 @@
     }
   }
 
-  async function selectAllOrders(filterSkuId = null, maxWait = 8000) {
+  async function selectAllOrders(filterSkuId = null, minQty = 1, maxWait = 8000) {
     await waitForStable(maxWait);
 
-    if (filterSkuId) {
+    if (filterSkuId || minQty > 1) {
       const totalPages = getTotalPages();
       let count = 0;
       for (let p = 1; p <= totalPages; p++) {
@@ -361,7 +363,10 @@
           await waitForStable(4000);
         }
         for (const rec of getOrderRecords()) {
-          if (!rec.skuList?.some(s => s.skuId === filterSkuId)) continue;
+          const targetSku = filterSkuId
+            ? rec.skuList?.find(s => s.skuId === filterSkuId)
+            : rec.skuList?.[0];
+          if (!targetSku || targetSku.quantity < minQty) continue;
           const tr = findTrForOrder(rec.mainOrderId);
           const checkbox = tr?.querySelector('label.p-checkbox');
           if (checkbox) { simulateClick(checkbox); count++; await sleep(50); }
@@ -409,7 +414,8 @@
       if (state.autoSelectAll) {
         showToast('กำลังเลือกทั้งหมด...', 5000);
         await sleep(500);
-        const total = await selectAllOrders(skuId);
+        const minQty = type === 'single_sku' ? 2 : 1;
+        const total = await selectAllOrders(skuId, minQty);
         showToast(`✓ กรอง + เลือก ${total ?? ''} ออเดอร์`, 2500);
       } else {
         showToast('✓ กรองเรียบร้อย', 2000);
@@ -573,7 +579,7 @@
         card.className = 'qf-product-card' + (cardDone ? ' qf-done' : '');
         card.title = p.productName;
         const variants = [...p.variants.values()].filter(v => v[key] > 0);
-        const hasBadges = variants.length > 1;
+        const hasBadges = variants.length >= 1;
         card.innerHTML = `
           <img src="${p.productImageURL}" alt="" referrerpolicy="no-referrer"/>
           <div class="qf-product-name">${escapeHtml(p.productName)}</div>
