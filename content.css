@@ -482,6 +482,32 @@
   border-color: #fe2c55;
   box-shadow: 0 4px 12px rgba(254,44,85,0.12);
 }
+.qf-combo-card.qf-done {
+  opacity: 0.4;
+  filter: grayscale(60%);
+  position: relative;
+}
+.qf-combo-card.qf-done::after {
+  content: '✓';
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  background: #4caf50;
+  color: #fff;
+  border-radius: 50%;
+  width: 18px;
+  height: 18px;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  pointer-events: none;
+}
+.qf-combo-card.qf-done:hover {
+  opacity: 0.65;
+  filter: grayscale(30%);
+  border-color: #aaa;
+  box-shadow: none;
+}
 .qf-combo-row {
   display: flex;
   align-items: center;

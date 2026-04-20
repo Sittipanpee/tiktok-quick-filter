@@ -122,6 +122,15 @@
     return true;
   }
 
+  function comboDoneKey(sigKey) { return `combo::${sigKey}`; }
+  function markComboDone(sigKey) { state.doneItems.set(comboDoneKey(sigKey), Date.now()); }
+  function isComboDone(sigKey) {
+    const ts = state.doneItems.get(comboDoneKey(sigKey));
+    if (!ts) return false;
+    if (Date.now() - ts > DONE_TIMEOUT_MS) { state.doneItems.delete(comboDoneKey(sigKey)); return false; }
+    return true;
+  }
+
   function simulateClick(el) {
     if (!el) return;
     const rect = el.getBoundingClientRect();
@@ -884,7 +893,9 @@
     const sample = combo.items
       .map(i => `${(state.aliases.get(i.productId) || '').trim() || shortName(i.productName)} ${i.quantity}`)
       .join(' + ');
-    return printIds(ids, `ออเดอร์แปลก: ${sample}`, sample);
+    const ok = await printIds(ids, `ออเดอร์แปลก: ${sample}`, sample);
+    if (ok) { markComboDone(sigKey); renderAll(); }
+    return ok;
   }
 
   function selectLabelRows(productId, skuId) {
@@ -1352,7 +1363,8 @@
         grid.id = 'qf-weird-combo-grid';
         for (const combo of combos) {
           const card = document.createElement('div');
-          card.className = 'qf-combo-card';
+          const comboDone = isComboDone(combo.sigKey);
+          card.className = 'qf-combo-card' + (comboDone ? ' qf-done' : '');
           const itemsHtml = combo.items.map((s, idx) => `
             ${idx > 0 ? '<span class="qf-combo-plus">+</span>' : ''}
             <div class="qf-combo-item">
@@ -1365,7 +1377,14 @@
             <div class="qf-combo-row">${itemsHtml}</div>
             <div class="qf-combo-count">${combo.count} ออเดอร์</div>
           `;
-          card.addEventListener('click', () => printWeirdCombo(combo.sigKey));
+          card.addEventListener('click', () => {
+            if (isComboDone(combo.sigKey)) {
+              state.doneItems.delete(comboDoneKey(combo.sigKey));
+              renderAll();
+            } else {
+              printWeirdCombo(combo.sigKey);
+            }
+          });
           grid.appendChild(card);
         }
         wrap.appendChild(grid);
