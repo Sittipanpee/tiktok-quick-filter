@@ -514,6 +514,17 @@
   border-color: #fe2c55;
   color: #fff;
 }
+.qf-variant-badge.qf-badge-aliased {
+  color: #d32f2f;
+  font-weight: 700;
+  border-color: #f5a8b3;
+  background: #fff5f7;
+}
+.qf-variant-badge.qf-badge-aliased:hover {
+  color: #fff;
+  background: #fe2c55;
+  border-color: #fe2c55;
+}
 .qf-product-card.qf-done {
   opacity: 0.4;
   filter: grayscale(60%);

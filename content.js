@@ -1677,10 +1677,17 @@
           const badgesEl = card.querySelector('.qf-variant-badges');
           for (const {v, c} of variants) {
             const badgeDone = isDone(p.productId, v.skuId, type);
+            const vInfo = labels ? getVariantInfo(p.productId, v.skuId) : null;
+            const aliasOverride = (vInfo?.alias || '').trim();
+            const originalName = v.skuName || v.sellerSkuName || v.skuId;
+            const displayName = aliasOverride || originalName;
             const badge = document.createElement('span');
-            badge.className = 'qf-variant-badge' + (badgeDone ? ' qf-badge-done' : '');
+            badge.className = 'qf-variant-badge'
+              + (badgeDone ? ' qf-badge-done' : '')
+              + (aliasOverride ? ' qf-badge-aliased' : '');
             badge.dataset.skuId = v.skuId;
-            badge.textContent = `${v.skuName || v.sellerSkuName || v.skuId} (${c})`;
+            if (aliasOverride) badge.title = `${originalName} → ${aliasOverride}`;
+            badge.textContent = `${displayName} (${c})`;
             badge.addEventListener('click', (e) => {
               e.stopPropagation();
               if (isDone(p.productId, v.skuId, type)) {
