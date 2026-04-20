@@ -1,0 +1,200 @@
+#qf-widget {
+  position: fixed;
+  right: 16px;
+  bottom: 80px;
+  width: 380px;
+  max-height: 70vh;
+  background: #fff;
+  border: 1px solid #e5e5e5;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+  font-size: 13px;
+  color: #161823;
+  z-index: 999999;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#qf-widget.qf-collapsed { max-height: 44px; }
+#qf-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: linear-gradient(135deg,#fe2c55,#ff5c8a);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+#qf-header-actions { display: flex; gap: 8px; }
+#qf-header-actions button {
+  background: rgba(255,255,255,0.2);
+  border: none;
+  color: #fff;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+#qf-header-actions button:hover { background: rgba(255,255,255,0.35); }
+#qf-body { overflow: auto; flex: 1; }
+#qf-scan-row {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid #f0f0f0;
+  align-items: center;
+}
+#qf-scan-btn {
+  background: #fe2c55;
+  color: #fff;
+  border: none;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 13px;
+}
+#qf-scan-btn:disabled { opacity: 0.5; cursor: wait; }
+#qf-scan-status { flex: 1; font-size: 12px; color: #555; }
+#qf-options-row label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  font-size: 12px;
+  color: #555;
+  border-bottom: 1px solid #f0f0f0;
+  cursor: pointer;
+}
+#qf-tabs {
+  display: flex;
+  border-bottom: 1px solid #f0f0f0;
+  background: #fafafa;
+}
+.qf-tab {
+  flex: 1;
+  text-align: center;
+  padding: 10px 6px;
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 12px;
+  color: #555;
+  border-bottom: 2px solid transparent;
+}
+.qf-tab.active {
+  color: #fe2c55;
+  border-bottom-color: #fe2c55;
+  background: #fff;
+}
+.qf-tab-count {
+  display: inline-block;
+  background: #eee;
+  border-radius: 10px;
+  padding: 0 6px;
+  margin-left: 4px;
+  font-size: 11px;
+  color: #777;
+}
+.qf-tab.active .qf-tab-count { background: #ffe0e8; color: #fe2c55; }
+#qf-content { padding: 10px; }
+.qf-product-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.qf-product-card {
+  border: 1px solid #eee;
+  border-radius: 8px;
+  padding: 6px;
+  cursor: pointer;
+  transition: transform 0.1s, border-color 0.1s, box-shadow 0.1s;
+  background: #fff;
+  text-align: center;
+}
+.qf-product-card:hover {
+  border-color: #fe2c55;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(254,44,85,0.15);
+}
+.qf-product-card img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 6px;
+  background: #f5f5f5;
+}
+.qf-product-name {
+  font-size: 11px;
+  line-height: 1.3;
+  margin-top: 4px;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  color: #333;
+}
+.qf-product-count {
+  font-size: 10px;
+  color: #888;
+  margin-top: 2px;
+}
+#qf-weird-list { display: flex; flex-direction: column; gap: 8px; }
+.qf-weird-order {
+  border: 1px solid #eee;
+  border-radius: 8px;
+  padding: 8px;
+  background: #fffaf5;
+}
+.qf-weird-order-id {
+  font-size: 11px;
+  color: #888;
+  margin-bottom: 4px;
+  font-family: monospace;
+}
+.qf-weird-items { display: flex; flex-direction: column; gap: 4px; }
+.qf-weird-item {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+}
+.qf-weird-item img {
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  object-fit: cover;
+  background: #f5f5f5;
+}
+.qf-empty {
+  padding: 30px 10px;
+  text-align: center;
+  color: #999;
+  font-size: 12px;
+}
+#qf-weird-apply-btn {
+  display: block;
+  width: 100%;
+  padding: 10px;
+  background: #fe2c55;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-bottom: 10px;
+}
+.qf-toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.85);
+  color: #fff;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 12px;
+  z-index: 9999999;
+}
