@@ -5,6 +5,7 @@
   const WAIT_AFTER_PAGE_CLICK = 2500;
   const WAIT_AFTER_FILTER_CLICK = 2500;
   const WAIT_AFTER_SEARCH = 2500;
+  const DONE_TIMEOUT_MS = 30 * 60 * 1000;
 
   // ==================== STATE ====================
   const state = {
@@ -13,10 +14,27 @@
     weirdOrders: [],
     currentTab: 'single',
     autoSelectAll: true,
+    doneItems: new Map(), // key: "productId" or "productId:skuId" → timestamp
   };
 
   // ==================== UTIL ====================
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+  function doneKey(productId, skuId) {
+    return skuId ? `${productId}:${skuId}` : productId;
+  }
+
+  function markDone(productId, skuId) {
+    state.doneItems.set(doneKey(productId, skuId), Date.now());
+  }
+
+  function isDone(productId, skuId) {
+    const key = doneKey(productId, skuId);
+    const ts = state.doneItems.get(key);
+    if (!ts) return false;
+    if (Date.now() - ts > DONE_TIMEOUT_MS) { state.doneItems.delete(key); return false; }
+    return true;
+  }
 
   function simulateClick(el) {
     if (!el) return;
@@ -140,6 +158,7 @@
     state.scanning = true;
     state.products.clear();
     state.weirdOrders = [];
+    state.doneItems.clear();
 
     const statusEl = document.getElementById('qf-scan-status');
     const btn = document.getElementById('qf-scan-btn');
@@ -395,6 +414,8 @@
       } else {
         showToast('✓ กรองเรียบร้อย', 2000);
       }
+      markDone(productId, skuId);
+      renderAll();
     } catch (e) {
       console.error('[QF]', e);
       showToast('ผิดพลาด: ' + e.message, 3000);
@@ -548,28 +569,44 @@
       grid.className = 'qf-product-grid';
       for (const p of products) {
         const card = document.createElement('div');
-        card.className = 'qf-product-card';
+        const cardDone = isDone(p.productId, null);
+        card.className = 'qf-product-card' + (cardDone ? ' qf-done' : '');
         card.title = p.productName;
         const variants = [...p.variants.values()].filter(v => v[key] > 0);
-        const badgesHtml = variants.length > 1
-          ? `<div class="qf-variant-badges">${variants.map(v =>
-              `<span class="qf-variant-badge" data-sku-id="${escapeHtml(v.skuId)}">${escapeHtml(v.skuName || v.sellerSkuName || v.skuId)} (${v[key]})</span>`
-            ).join('')}</div>`
-          : '';
+        const hasBadges = variants.length > 1;
         card.innerHTML = `
           <img src="${p.productImageURL}" alt="" referrerpolicy="no-referrer"/>
           <div class="qf-product-name">${escapeHtml(p.productName)}</div>
           <div class="qf-product-count">${p[key]} ออเดอร์</div>
-          ${badgesHtml}
+          ${hasBadges ? `<div class="qf-variant-badges"></div>` : ''}
         `;
-        card.addEventListener('click', (e) => {
-          const badge = e.target.closest('.qf-variant-badge');
-          if (badge) {
-            e.stopPropagation();
-            applyProductFilter(p.productId, badge.dataset.skuId, type);
-            return;
+        if (hasBadges) {
+          const badgesEl = card.querySelector('.qf-variant-badges');
+          for (const v of variants) {
+            const badgeDone = isDone(p.productId, v.skuId);
+            const badge = document.createElement('span');
+            badge.className = 'qf-variant-badge' + (badgeDone ? ' qf-badge-done' : '');
+            badge.dataset.skuId = v.skuId;
+            badge.textContent = `${v.skuName || v.sellerSkuName || v.skuId} (${v[key]})`;
+            badge.addEventListener('click', (e) => {
+              e.stopPropagation();
+              if (isDone(p.productId, v.skuId)) {
+                state.doneItems.delete(doneKey(p.productId, v.skuId));
+                renderAll();
+              } else {
+                applyProductFilter(p.productId, v.skuId, type);
+              }
+            });
+            badgesEl.appendChild(badge);
           }
-          applyProductFilter(p.productId, null, type);
+        }
+        card.addEventListener('click', () => {
+          if (cardDone) {
+            state.doneItems.delete(doneKey(p.productId, null));
+            renderAll();
+          } else {
+            applyProductFilter(p.productId, null, type);
+          }
         });
         grid.appendChild(card);
       }
