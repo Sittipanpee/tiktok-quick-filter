@@ -767,6 +767,180 @@
   margin-top: 6px;
   font-weight: 600;
 }
+.qf-chunk-modal { width: 420px; }
+.qf-chunk-summary {
+  font-size: 13px;
+  font-weight: 600;
+  color: #161823;
+  margin-bottom: 4px;
+}
+.qf-chunk-hint {
+  font-size: 11px;
+  color: #888;
+  line-height: 1.5;
+  margin-bottom: 12px;
+}
+.qf-chunk-presets {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.qf-chunk-preset {
+  padding: 8px 6px;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: #444;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  transition: all 0.12s;
+}
+.qf-chunk-preset:hover { border-color: #fe2c55; color: #fe2c55; }
+.qf-chunk-preset.active { background: #fe2c55; color: #fff; border-color: #fe2c55; }
+.qf-chunk-preset-sub { font-size: 10px; opacity: 0.8; font-weight: 400; }
+.qf-chunk-custom {
+  font-size: 12px;
+  color: #555;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.qf-chunk-input {
+  width: 60px;
+  padding: 4px 6px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.qf-chunk-preview {
+  color: #888;
+  font-size: 11px;
+}
+.qf-chunked-card {
+  width: 460px;
+  max-width: 95vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+.qf-chunked-sub {
+  font-size: 11px;
+  color: #888;
+  margin-bottom: 10px;
+}
+.qf-chunked-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+  max-height: 50vh;
+}
+.qf-chunk-row {
+  background: #fafafa;
+  border: 1px solid #eee;
+  border-radius: 6px;
+  padding: 8px 10px;
+  transition: background 0.15s;
+}
+.qf-chunk-row.qf-chunk-active { background: #fff5f7; border-color: #fe2c55; }
+.qf-chunk-row.qf-chunk-done { background: #f0fff4; border-color: #4caf50; }
+.qf-chunk-row.qf-chunk-error { background: #fff0f0; border-color: #f44336; }
+.qf-chunk-row-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #161823;
+  display: flex;
+  justify-content: space-between;
+}
+.qf-chunk-row-count {
+  color: #888;
+  font-weight: 400;
+  font-size: 11px;
+}
+.qf-chunk-row-status {
+  font-size: 11px;
+  color: #555;
+  margin: 4px 0;
+}
+.qf-chunk-row-bar {
+  height: 4px;
+  background: #eee;
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+.qf-chunk-row-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #fe2c55, #ff5c8a);
+  transition: width 0.25s ease-out;
+}
+.qf-chunk-row.qf-chunk-done .qf-chunk-row-fill {
+  background: #4caf50;
+}
+.qf-chunk-row-actions {
+  display: flex;
+  gap: 6px;
+}
+.qf-chunk-btn {
+  flex: 1;
+  padding: 5px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+}
+.qf-chunk-open {
+  background: #fe2c55;
+  color: #fff;
+}
+.qf-chunk-open:hover { background: #e02147; }
+.qf-chunk-download {
+  background: #fff;
+  color: #fe2c55;
+  border: 1px solid #fe2c55;
+}
+.qf-chunk-download:hover { background: #fff0f3; }
+.qf-chunked-footer {
+  display: flex;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid #eee;
+}
+.qf-btn-download-all {
+  flex: 1;
+  padding: 9px 16px;
+  background: #fe2c55;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.qf-btn-download-all:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+.qf-btn-download-all:not(:disabled):hover { background: #e02147; }
+.qf-btn-close-result {
+  padding: 9px 16px;
+  background: #eee;
+  color: #444;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
 .qf-progress-overlay {
   position: fixed;
   inset: 0;
