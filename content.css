@@ -615,6 +615,54 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.qf-progress-result {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #eee;
+}
+.qf-result-summary {
+  font-size: 13px;
+  font-weight: 600;
+  color: #161823;
+  margin-bottom: 4px;
+}
+.qf-result-hint {
+  font-size: 11px;
+  color: #888;
+  margin-bottom: 10px;
+}
+.qf-result-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.qf-result-btn {
+  flex: 1;
+  min-width: 90px;
+  padding: 9px 10px;
+  border-radius: 6px;
+  border: none;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.qf-result-open {
+  background: #fe2c55;
+  color: #fff;
+}
+.qf-result-open:hover { background: #e02147; }
+.qf-result-download {
+  background: #fff;
+  color: #fe2c55;
+  border: 1px solid #fe2c55;
+}
+.qf-result-download:hover { background: #fff0f3; }
+.qf-result-close {
+  background: #eee;
+  color: #555;
+}
+.qf-result-close:hover { background: #ddd; }
 .qf-toast {
   position: fixed;
   bottom: 20px;

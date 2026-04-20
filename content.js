@@ -729,18 +729,58 @@
           <span class="qf-progress-percent">0%</span>
           <span class="qf-progress-status">เริ่มต้น...</span>
         </div>
+        <div class="qf-progress-result" style="display:none;"></div>
       </div>
     `;
     document.body.appendChild(overlay);
+    const card = overlay.querySelector('.qf-progress-card');
     const fill = overlay.querySelector('.qf-progress-fill');
     const pct = overlay.querySelector('.qf-progress-percent');
     const status = overlay.querySelector('.qf-progress-status');
+    const result = overlay.querySelector('.qf-progress-result');
     return {
       update(percent, label) {
         const p = Math.max(0, Math.min(100, percent));
         fill.style.width = p + '%';
         pct.textContent = p.toFixed(0) + '%';
         if (label) status.textContent = label;
+      },
+      showResult({ blobUrl, filename, total, pageCount }) {
+        card.querySelector('.qf-progress-title').textContent = '✓ พิมพ์เสร็จแล้ว';
+        result.style.display = 'block';
+        result.innerHTML = `
+          <div class="qf-result-summary">
+            ${total} ฉลาก · ${pageCount} หน้า
+          </div>
+          <div class="qf-result-hint">เบราว์เซอร์อาจบล็อก auto-popup → กดปุ่มข้างล่าง</div>
+          <div class="qf-result-actions">
+            <button class="qf-result-btn qf-result-open">📄 เปิด PDF</button>
+            <button class="qf-result-btn qf-result-download">💾 ดาวน์โหลด</button>
+            <button class="qf-result-btn qf-result-close">ปิด</button>
+          </div>
+        `;
+        const cleanup = () => {
+          if (blobUrl) URL.revokeObjectURL(blobUrl);
+          overlay.remove();
+        };
+        result.querySelector('.qf-result-open').onclick = () => {
+          if (!blobUrl) return;
+          // Fresh user click → window.open works
+          const w = window.open(blobUrl, '_blank');
+          if (!w) {
+            const a = document.createElement('a');
+            a.href = blobUrl; a.target = '_blank'; a.rel = 'noopener';
+            document.body.appendChild(a); a.click(); a.remove();
+          }
+        };
+        result.querySelector('.qf-result-download').onclick = () => {
+          if (!blobUrl) return;
+          const a = document.createElement('a');
+          a.href = blobUrl; a.download = filename;
+          document.body.appendChild(a); a.click(); a.remove();
+        };
+        result.querySelector('.qf-result-close').onclick = cleanup;
+        overlay.onclick = (e) => { if (e.target === overlay) cleanup(); };
       },
       close() { overlay.remove(); },
     };
@@ -946,36 +986,24 @@
         if (i + PRINT_BATCH_SIZE < ids.length) await sleep(300);
       }
 
-      progress.update(99, `รวม ${mergedPageCount} หน้า → เปิด tab...`);
+      progress.update(99, `รวม ${mergedPageCount} หน้า → เตรียม PDF...`);
+      let blobUrl = null;
+      let filename = `labels-${total}-${new Date().toISOString().slice(0,10)}.pdf`;
       if (mergedDoc) {
         const finalBytes = await mergedDoc.save();
         const blob = new Blob([finalBytes], { type: 'application/pdf' });
-        const url = URL.createObjectURL(blob);
-        const win = window.open(url, '_blank');
-        if (!win) {
-          // popup blocked → fall back to anchor click
-          const a = document.createElement('a');
-          a.href = url;
-          a.target = '_blank';
-          a.rel = 'noopener';
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-        }
+        blobUrl = URL.createObjectURL(blob);
       }
-
-      progress.update(100, '✓ เสร็จสมบูรณ์');
-      await sleep(900);
+      progress.update(100, '✓ PDF พร้อมแล้ว');
+      progress.showResult({ blobUrl, filename, total, pageCount: mergedPageCount });
+      // Don't auto-close; user closes via result buttons
+      return true;
     } catch (err) {
       progress.update(100, '✗ ผิดพลาด: ' + err.message);
-      await sleep(1800);
-      throw err;
-    } finally {
+      await sleep(2200);
       progress.close();
+      throw err;
     }
-
-    showToast(`✓ เปิด PDF รวม ${mergedPageCount} หน้า (${total} ฉลาก)`, 3500);
-    return true;
   }
 
   async function printProductLabels(productId, skuId, scenario) {
