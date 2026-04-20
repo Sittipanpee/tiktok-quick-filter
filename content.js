@@ -882,6 +882,10 @@
     const totalBatches = Math.ceil(total / PRINT_BATCH_SIZE);
     const progress = showProgress(`พิมพ์ ${total} ฉลาก`);
 
+    const { PDFDocument } = window.PDFLib || {};
+    const mergedDoc = PDFDocument ? await PDFDocument.create() : null;
+    let mergedPageCount = 0;
+
     try {
       for (let i = 0; i < ids.length; i += PRINT_BATCH_SIZE) {
         const batch = ids.slice(i, i + PRINT_BATCH_SIZE);
@@ -889,7 +893,6 @@
         const baseDone = i;
         const batchSize = batch.length;
         const updateBatch = (subPct, label) => {
-          // overall percent = (baseDone + batchSize * subPct) / total * 100
           const overall = ((baseDone + batchSize * subPct) / total) * 100;
           progress.update(overall, `[batch ${batchNum}/${totalBatches}] ${label}`);
         };
@@ -913,34 +916,65 @@
         const data = await resp.json();
         if (data.code !== 0) throw new Error('generate API: ' + (data.message || data.code));
         const docUrl = data.data?.doc_url;
-        if (!docUrl) continue;
+        if (!docUrl) { console.warn('[QF] no doc_url in batch', batchNum); continue; }
 
         updateBatch(0.20, 'ดาวน์โหลด PDF...');
+        const pdfBytes = await fetch(docUrl).then(r => r.arrayBuffer());
+
+        updateBatch(0.30, 'แปะ alias...');
+        let modifiedBytes;
         try {
-          const pdfBytes = await fetch(docUrl).then(r => r.arrayBuffer());
-          updateBatch(0.30, 'แปะ alias หน้า 0...');
-          const modifiedBytes = await overlayAliasOnPdf(pdfBytes, batch, (cur, totPages) => {
-            const sub = 0.30 + 0.65 * (cur / totPages);
+          modifiedBytes = await overlayAliasOnPdf(pdfBytes, batch, (cur, totPages) => {
+            const sub = 0.30 + 0.55 * (cur / totPages);
             updateBatch(sub, `แปะ alias หน้า ${cur}/${totPages}`);
           });
-          updateBatch(0.97, 'เปิด tab...');
-          const blob = new Blob([modifiedBytes], { type: 'application/pdf' });
-          window.open(URL.createObjectURL(blob), '_blank');
         } catch (e) {
-          console.warn('[QF] overlay failed, opening original:', e);
-          window.open(docUrl, '_blank');
+          console.warn('[QF] overlay failed, using original PDF:', e);
+          modifiedBytes = pdfBytes;
         }
 
-        updateBatch(1.0, 'batch เสร็จ');
-        if (i + PRINT_BATCH_SIZE < ids.length) await sleep(500);
+        updateBatch(0.90, 'รวมเข้า PDF เดียว...');
+        if (mergedDoc) {
+          const partDoc = await PDFDocument.load(modifiedBytes);
+          const indices = partDoc.getPageIndices();
+          const copied = await mergedDoc.copyPages(partDoc, indices);
+          copied.forEach(p => mergedDoc.addPage(p));
+          mergedPageCount += copied.length;
+        }
+
+        updateBatch(1.0, `batch ${batchNum}/${totalBatches} เสร็จ`);
+        if (i + PRINT_BATCH_SIZE < ids.length) await sleep(300);
       }
+
+      progress.update(99, `รวม ${mergedPageCount} หน้า → เปิด tab...`);
+      if (mergedDoc) {
+        const finalBytes = await mergedDoc.save();
+        const blob = new Blob([finalBytes], { type: 'application/pdf' });
+        const url = URL.createObjectURL(blob);
+        const win = window.open(url, '_blank');
+        if (!win) {
+          // popup blocked → fall back to anchor click
+          const a = document.createElement('a');
+          a.href = url;
+          a.target = '_blank';
+          a.rel = 'noopener';
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+        }
+      }
+
       progress.update(100, '✓ เสร็จสมบูรณ์');
-      await sleep(800);
+      await sleep(900);
+    } catch (err) {
+      progress.update(100, '✗ ผิดพลาด: ' + err.message);
+      await sleep(1800);
+      throw err;
     } finally {
       progress.close();
     }
 
-    showToast(`✓ เปิด PDF สำหรับ ${total} ฉลากแล้ว`, 3000);
+    showToast(`✓ เปิด PDF รวม ${mergedPageCount} หน้า (${total} ฉลาก)`, 3500);
     return true;
   }
 
@@ -964,9 +998,15 @@
     const sample = combo.items
       .map(i => `${(state.aliases.get(i.productId) || '').trim() || shortName(i.productName)} ${i.quantity}`)
       .join(' + ');
-    const ok = await printIds(ids, `ออเดอร์แปลก: ${sample}`, sample);
-    if (ok) { markComboDone(sigKey); renderAll(); }
-    return ok;
+    try {
+      const ok = await printIds(ids, `ออเดอร์แปลก: ${sample}`, sample);
+      if (ok) { markComboDone(sigKey); renderAll(); }
+      return ok;
+    } catch (e) {
+      console.error('[QF] printWeirdCombo failed:', e);
+      showToast('พิมพ์ผิดพลาด: ' + e.message, 4000);
+      return false;
+    }
   }
 
   function selectLabelRows(productId, skuId) {
