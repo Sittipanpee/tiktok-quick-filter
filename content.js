@@ -774,6 +774,16 @@
     return ids.filter(id => state.carrierFilter.has(state.carrierOf.get(id)));
   }
 
+  function carrierFilteredSize(idSet) {
+    if (!idSet) return 0;
+    if (state.carrierFilter.size === 0) return idSet.size;
+    let n = 0;
+    for (const id of idSet) {
+      if (state.carrierFilter.has(state.carrierOf.get(id))) n++;
+    }
+    return n;
+  }
+
   function collectFulfillIds(productId, skuId, scenario) {
     // scenario: 'single' (1 SKU qty=1) | 'multi' (1 SKU qty>1)
     const product = state.products.get(productId);
@@ -1243,18 +1253,26 @@
       chip.addEventListener('click', () => {
         if (state.carrierFilter.has(c.id)) state.carrierFilter.delete(c.id);
         else state.carrierFilter.add(c.id);
-        renderCarriers();
+        renderAll();
       });
       wrap.appendChild(chip);
     }
   }
 
   function renderAll() {
-    const singleCount = [...state.products.values()].filter(p => p.orderCountSingle > 0).length;
-    const multiCount  = [...state.products.values()].filter(p => p.orderCountMulti  > 0).length;
+    const labelsPg = isLabelsPage();
+    const singleCount = labelsPg
+      ? [...state.products.values()].filter(p => carrierFilteredSize(p.fulfillUnitIdsSingle) > 0).length
+      : [...state.products.values()].filter(p => p.orderCountSingle > 0).length;
+    const multiCount = labelsPg
+      ? [...state.products.values()].filter(p => carrierFilteredSize(p.fulfillUnitIdsMulti) > 0).length
+      : [...state.products.values()].filter(p => p.orderCountMulti > 0).length;
+    const weirdCount = labelsPg
+      ? [...state.weirdCombos.values()].filter(c => carrierFilteredSize(c.fulfillUnitIds) > 0).length
+      : state.weirdOrders.length;
     document.getElementById('qf-count-single').textContent = singleCount;
     document.getElementById('qf-count-multi').textContent  = multiCount;
-    document.getElementById('qf-count-weird').textContent  = state.weirdOrders.length;
+    document.getElementById('qf-count-weird').textContent  = weirdCount;
     renderCarriers();
     renderContent();
   }
@@ -1268,11 +1286,15 @@
       return;
     }
     if (state.currentTab === 'single' || state.currentTab === 'multi') {
-      const key = state.currentTab === 'single' ? 'orderCountSingle' : 'orderCountMulti';
+      const idsKey = state.currentTab === 'single' ? 'fulfillUnitIdsSingle' : 'fulfillUnitIdsMulti';
       const type = state.currentTab === 'single' ? 'single_item' : 'single_sku';
-      const products = [...state.products.values()]
-        .filter(p => p[key] > 0)
-        .sort((a, b) => b[key] - a[key]);
+      const labelsPg = isLabelsPage();
+      const productsRaw = labelsPg
+        ? [...state.products.values()].map(p => ({...p, _count: carrierFilteredSize(p[idsKey])}))
+        : [...state.products.values()].map(p => ({...p, _count: state.currentTab === 'single' ? p.orderCountSingle : p.orderCountMulti}));
+      const products = productsRaw
+        .filter(p => p._count > 0)
+        .sort((a, b) => b._count - a._count);
       if (!products.length) {
         wrap.innerHTML = '<div class="qf-empty">ไม่พบสินค้าในประเภทนี้</div>';
         return;
@@ -1280,18 +1302,22 @@
       const grid = document.createElement('div');
       grid.className = 'qf-product-grid';
       const labels = isLabelsPage();
+      const variantCount = (v) => labels
+        ? carrierFilteredSize(v[idsKey])
+        : (state.currentTab === 'single' ? v.orderCountSingle : v.orderCountMulti);
       for (const p of products) {
         const card = document.createElement('div');
         const cardDone = isDone(p.productId, null, type);
         card.className = 'qf-product-card' + (cardDone ? ' qf-done' : '');
         card.title = p.productName;
-        const variants = [...p.variants.values()].filter(v => v[key] > 0);
+        const variantsRaw = [...p.variants.values()].map(v => ({v, c: variantCount(v)}));
+        const variants = variantsRaw.filter(x => x.c > 0);
         const hasBadges = variants.length >= 1;
         const aliasVal = labels ? (state.aliases.get(p.productId) || '') : '';
         card.innerHTML = `
           <img src="${p.productImageURL}" alt="" referrerpolicy="no-referrer"/>
           <div class="qf-product-name">${escapeHtml(p.productName)}</div>
-          <div class="qf-product-count">${p[key]} ออเดอร์</div>
+          <div class="qf-product-count">${p._count} ออเดอร์</div>
           ${labels ? `<input class="qf-alias-input" type="text" placeholder="ชื่อย่อ (เช่น แดง1)" value="${escapeHtml(aliasVal)}" maxlength="20"/>` : ''}
           ${hasBadges ? `<div class="qf-variant-badges"></div>` : ''}
         `;
@@ -1310,12 +1336,12 @@
         }
         if (hasBadges) {
           const badgesEl = card.querySelector('.qf-variant-badges');
-          for (const v of variants) {
+          for (const {v, c} of variants) {
             const badgeDone = isDone(p.productId, v.skuId, type);
             const badge = document.createElement('span');
             badge.className = 'qf-variant-badge' + (badgeDone ? ' qf-badge-done' : '');
             badge.dataset.skuId = v.skuId;
-            badge.textContent = `${v.skuName || v.sellerSkuName || v.skuId} (${v[key]})`;
+            badge.textContent = `${v.skuName || v.sellerSkuName || v.skuId} (${c})`;
             badge.addEventListener('click', (e) => {
               e.stopPropagation();
               if (isDone(p.productId, v.skuId, type)) {
@@ -1357,8 +1383,18 @@
       }
 
       if (labelsPage) {
-        // Group by combination signature
-        const combos = [...state.weirdCombos.values()].sort((a, b) => b.count - a.count);
+        // Group by combination signature, apply carrier filter to count
+        const combos = [...state.weirdCombos.values()]
+          .map(c => ({...c, _count: carrierFilteredSize(c.fulfillUnitIds)}))
+          .filter(c => c._count > 0)
+          .sort((a, b) => b._count - a._count);
+        if (!combos.length) {
+          const empty = document.createElement('div');
+          empty.className = 'qf-empty';
+          empty.textContent = 'ไม่พบ combo (ลองยกเลิกกรองขนส่ง)';
+          wrap.appendChild(empty);
+          return;
+        }
         const grid = document.createElement('div');
         grid.id = 'qf-weird-combo-grid';
         for (const combo of combos) {
@@ -1375,7 +1411,7 @@
           `).join('');
           card.innerHTML = `
             <div class="qf-combo-row">${itemsHtml}</div>
-            <div class="qf-combo-count">${combo.count} ออเดอร์</div>
+            <div class="qf-combo-count">${combo._count} ออเดอร์</div>
           `;
           card.addEventListener('click', () => {
             if (isComboDone(combo.sigKey)) {
