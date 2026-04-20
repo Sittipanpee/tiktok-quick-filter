@@ -254,6 +254,117 @@
   color: #888;
   margin-top: 2px;
 }
+.qf-select-toggle {
+  display: block;
+  width: calc(100% - 28px);
+  margin: 6px 14px 8px;
+  padding: 7px 10px;
+  background: #fff;
+  border: 1px solid #fe2c55;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fe2c55;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.qf-select-toggle:hover { background: #fff0f3; }
+.qf-select-toggle.active {
+  background: #fe2c55;
+  color: #fff;
+}
+#qf-select-bar {
+  position: sticky;
+  bottom: 0;
+  background: #fff;
+  border-top: 1px solid #fe2c55;
+  padding: 10px 12px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  box-shadow: 0 -4px 12px rgba(0,0,0,0.08);
+  z-index: 10;
+}
+.qf-select-bar-info { flex: 1; min-width: 0; }
+.qf-select-bar-count {
+  font-size: 12px;
+  font-weight: 700;
+  color: #161823;
+}
+.qf-select-bar-hint {
+  font-size: 10px;
+  color: #888;
+  margin-top: 1px;
+}
+.qf-select-bar-clear {
+  padding: 7px 12px;
+  background: #eee;
+  color: #555;
+  border: none;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.qf-select-bar-clear:hover { background: #ddd; }
+.qf-select-bar-print {
+  padding: 7px 14px;
+  background: #fe2c55;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.qf-select-bar-print:hover { background: #e02147; }
+.qf-product-card.qf-select-mode,
+.qf-combo-card.qf-select-mode {
+  position: relative;
+}
+.qf-product-card.qf-select-mode::before,
+.qf-combo-card.qf-select-mode::before {
+  content: '';
+  position: absolute;
+  top: 5px;
+  left: 5px;
+  width: 16px;
+  height: 16px;
+  border: 2px solid #ccc;
+  border-radius: 4px;
+  background: #fff;
+  z-index: 1;
+  pointer-events: none;
+}
+.qf-product-card.qf-selected::before,
+.qf-combo-card.qf-selected::before {
+  background: #fe2c55;
+  border-color: #fe2c55;
+}
+.qf-product-card.qf-selected::after,
+.qf-combo-card.qf-selected::after {
+  content: '✓';
+  position: absolute;
+  top: 4px;
+  left: 7px;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  z-index: 2;
+  pointer-events: none;
+  line-height: 1;
+}
+.qf-product-card.qf-selected,
+.qf-combo-card.qf-selected {
+  border-color: #fe2c55 !important;
+  background: #fff5f7;
+  box-shadow: 0 0 0 2px rgba(254,44,85,0.15);
+}
+.qf-variant-badge.qf-selected {
+  background: #fe2c55 !important;
+  color: #fff !important;
+  border-color: #fe2c55 !important;
+}
 .qf-variant-link {
   display: block;
   width: 100%;

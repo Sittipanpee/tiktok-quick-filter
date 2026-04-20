@@ -75,6 +75,8 @@
     carriers: new Map(),           // carrierId → {id, name, iconUrl, count}
     carrierOf: new Map(),          // fulfillUnitId → carrierId
     carrierFilter: new Set(),      // empty = all carriers
+    selectMode: false,
+    selected: new Map(),           // key → {type, productId, skuId, scenario, sigKey}
   };
 
   function loadAliases() {
@@ -933,10 +935,17 @@
       },
       errorChunk(i, msg) {
         const row = cards[i];
-        row.querySelector('.qf-chunk-row-status').textContent = '✗ ' + msg;
+        row.querySelector('.qf-chunk-row-status').textContent = 'ล้มเหลว: ' + msg;
         row.classList.remove('qf-chunk-active');
         row.classList.add('qf-chunk-error');
+        const actions = row.querySelector('.qf-chunk-row-actions');
+        actions.innerHTML = `<button class="qf-chunk-btn qf-chunk-retry">ลองใหม่</button>`;
+        actions.querySelector('.qf-chunk-retry').onclick = async () => {
+          // External retry handler — set via setRetryHandler
+          if (this._retry) await this._retry(i);
+        };
       },
+      setRetryHandler(fn) { this._retry = fn; },
       allDone() {
         closeBtn.style.display = '';
       },
@@ -1027,19 +1036,19 @@
           <img src="${product.productImageURL}" referrerpolicy="no-referrer"/>
           <div class="qf-alias-modal-title">
             <div class="qf-alias-modal-name">${escapeHtml(product.productName)}</div>
-            <div class="qf-alias-modal-sub">${variants.length} รุ่น</div>
+            <div class="qf-alias-modal-sub">${variants.length} ตัวเลือก</div>
           </div>
           <button class="qf-alias-modal-close" aria-label="ปิด">×</button>
         </div>
 
         <div class="qf-alias-modal-section">
           <div class="qf-alias-modal-label">ชื่อย่อหลัก</div>
-          <div class="qf-alias-modal-hint">ใช้กับทุกรุ่นที่ไม่ได้ตั้งชื่อแยก</div>
+          <div class="qf-alias-modal-hint">ใช้กับทุกตัวเลือกที่ไม่ได้ตั้งชื่อแยก</div>
           <input class="qf-alias-modal-product" type="text" placeholder="เช่น ครีม, แดง1, สครับ" maxlength="20" value="${escapeHtml(state.aliases.get(productId) || '')}"/>
         </div>
 
         <div class="qf-alias-modal-section">
-          <div class="qf-alias-modal-label">ตั้งชื่อแยกตามรุ่น</div>
+          <div class="qf-alias-modal-label">ตั้งชื่อแยกตามตัวเลือก</div>
           <div class="qf-alias-modal-hint">ปล่อยว่างจะใช้ชื่อหลักแทน</div>
           <div class="qf-alias-modal-variants"></div>
         </div>
@@ -1220,6 +1229,99 @@
     return ids.filter(id => state.carrierFilter.has(state.carrierOf.get(id)));
   }
 
+  // ==================== MULTI-SELECT ====================
+  function selectionKey(item) {
+    if (item.type === 'combo') return `combo:${item.sigKey}`;
+    if (item.type === 'variant') return `var:${item.productId}:${item.skuId}:${item.scenario}`;
+    return `prod:${item.productId}:${item.scenario}`;
+  }
+
+  function isSelected(item) { return state.selected.has(selectionKey(item)); }
+
+  function toggleSelection(item) {
+    const key = selectionKey(item);
+    if (state.selected.has(key)) state.selected.delete(key);
+    else state.selected.set(key, item);
+    updateSelectionBar();
+  }
+
+  function clearSelection() {
+    state.selected.clear();
+    renderAll();
+  }
+
+  function setSelectMode(on) {
+    state.selectMode = on;
+    if (!on) state.selected.clear();
+    renderAll();
+  }
+
+  function resolveSelectedIds() {
+    const set = new Set();
+    for (const item of state.selected.values()) {
+      let ids = [];
+      if (item.type === 'combo') {
+        const combo = state.weirdCombos.get(item.sigKey);
+        if (combo) ids = applyCarrierFilter([...combo.fulfillUnitIds]);
+      } else {
+        ids = collectFulfillIds(item.productId, item.skuId, item.scenario);
+      }
+      for (const id of ids) set.add(id);
+    }
+    return [...set];
+  }
+
+  async function printSelected() {
+    const items = [...state.selected.values()];
+    if (!items.length) { showToast('ยังไม่ได้เลือกอะไร', 1500); return; }
+    const ids = resolveSelectedIds();
+    if (!ids.length) { showToast('รายการที่เลือกไม่มีฉลาก', 2000); return; }
+
+    const sample = items.slice(0, 3).map(it => {
+      if (it.type === 'combo') {
+        const c = state.weirdCombos.get(it.sigKey);
+        return c ? c.items.map(i => (state.aliases.get(i.productId) || '').trim() || shortName(i.productName)).join('+') : 'combo';
+      }
+      const p = state.products.get(it.productId);
+      const a = (state.aliases.get(it.productId) || '').trim();
+      return a || shortName(p?.productName);
+    }).join(', ') + (items.length > 3 ? ` +อีก ${items.length - 3}` : '');
+
+    try {
+      const ok = await printIds(
+        ids,
+        `พิมพ์รวม ${items.length} รายการ`,
+        sample,
+        `รวม-${items.length}-รายการ`
+      );
+      if (ok) {
+        for (const it of items) {
+          if (it.type === 'combo') markComboDone(it.sigKey);
+          else {
+            const type = it.scenario === 'multi' ? 'single_sku' : 'single_item';
+            markDone(it.productId, it.skuId || null, type);
+          }
+        }
+        state.selected.clear();
+        state.selectMode = false;
+        renderAll();
+      }
+    } catch (e) {
+      console.error('[QF] printSelected failed:', e);
+      showToast('พิมพ์ผิดพลาด: ' + e.message, 4000);
+    }
+  }
+
+  function updateSelectionBar() {
+    const bar = document.getElementById('qf-select-bar');
+    if (!bar) return;
+    const count = state.selected.size;
+    if (count === 0) { bar.style.display = 'none'; return; }
+    bar.style.display = 'flex';
+    const ids = resolveSelectedIds();
+    bar.querySelector('.qf-select-bar-count').textContent = `เลือก ${count} รายการ • ${ids.length} ฉลาก`;
+  }
+
   function carrierFilteredSize(idSet) {
     if (!idSet) return 0;
     if (state.carrierFilter.size === 0) return idSet.size;
@@ -1375,26 +1477,32 @@
       baseFilename,
     });
 
+    const runChunk = async (ci) => {
+      result.startChunk(ci);
+      try {
+        const { bytes, pageCount } = await buildChunkPdf(chunks[ci], (pct, label) => {
+          result.updateChunkProgress(ci, pct, label);
+        });
+        const blob = new Blob([bytes], {type: 'application/pdf'});
+        const url = URL.createObjectURL(blob);
+        result.completeChunk(ci, {url, pageCount});
+        return true;
+      } catch (e) {
+        console.error('[QF] chunk', ci+1, 'failed:', e);
+        result.errorChunk(ci, e.message);
+        return false;
+      }
+    };
+
+    result.setRetryHandler(runChunk);
+
     try {
       for (let ci = 0; ci < chunks.length; ci++) {
-        result.startChunk(ci);
-        try {
-          const { bytes, pageCount } = await buildChunkPdf(chunks[ci], (pct, label) => {
-            result.updateChunkProgress(ci, pct, label);
-          });
-          const blob = new Blob([bytes], {type: 'application/pdf'});
-          const url = URL.createObjectURL(blob);
-          result.completeChunk(ci, {url, pageCount});
-        } catch (e) {
-          result.errorChunk(ci, e.message);
-          console.error('[QF] chunk', ci+1, 'failed:', e);
-          // Continue to next chunk so user gets partial success
-        }
+        await runChunk(ci); // continues even on failure → partial success
       }
       result.allDone();
       return true;
     } catch (err) {
-      result.errorChunk(0, err.message);
       throw err;
     }
   }
@@ -1682,6 +1790,7 @@
             </div>
           </div>
           <div class="qf-tip">คลิก card → ยืนยัน → พิมพ์ฉลาก</div>
+          <button id="qf-select-toggle" class="qf-select-toggle">เลือกหลายรายการ</button>
         </div>`}
         <div id="qf-tabs">
           <div class="qf-tab active" data-tab="single">1 ชิ้น <span class="qf-tab-count" id="qf-count-single">0</span></div>
@@ -1691,6 +1800,14 @@
         <div id="qf-content">
           <div class="qf-empty">ยังไม่ได้สแกน</div>
         </div>
+        ${labels ? `<div id="qf-select-bar" style="display:none;">
+          <div class="qf-select-bar-info">
+            <div class="qf-select-bar-count">เลือก 0 รายการ</div>
+            <div class="qf-select-bar-hint">รวม + dedupe อัตโนมัติ</div>
+          </div>
+          <button class="qf-select-bar-clear">ล้าง</button>
+          <button class="qf-select-bar-print">พิมพ์ที่เลือก</button>
+        </div>` : ''}
       </div>
     `;
     document.body.appendChild(w);
@@ -1710,6 +1827,14 @@
       resetFilters();
     });
     document.getElementById('qf-scan-btn').addEventListener('click', scanAllPages);
+    document.getElementById('qf-select-toggle')?.addEventListener('click', () => {
+      setSelectMode(!state.selectMode);
+    });
+    const bar = document.getElementById('qf-select-bar');
+    if (bar) {
+      bar.querySelector('.qf-select-bar-clear').addEventListener('click', clearSelection);
+      bar.querySelector('.qf-select-bar-print').addEventListener('click', printSelected);
+    }
     document.getElementById('qf-auto-select')?.addEventListener('change', (e) => {
       state.autoSelectAll = e.target.checked;
     });
@@ -1803,6 +1928,12 @@
     document.getElementById('qf-count-weird').textContent  = weirdCount;
     renderCarriers();
     renderContent();
+    const tog = document.getElementById('qf-select-toggle');
+    if (tog) {
+      tog.classList.toggle('active', state.selectMode);
+      tog.textContent = state.selectMode ? 'ออกจากโหมดเลือก' : 'เลือกหลายรายการ';
+    }
+    updateSelectionBar();
   }
 
   function renderContent() {
@@ -1833,10 +1964,16 @@
       const variantCount = (v) => labels
         ? carrierFilteredSize(v[idsKey])
         : (state.currentTab === 'single' ? v.orderCountSingle : v.orderCountMulti);
+      const scenario = state.currentTab === 'single' ? 'single' : 'multi';
       for (const p of products) {
         const card = document.createElement('div');
         const cardDone = isDone(p.productId, null, type);
-        card.className = 'qf-product-card' + (cardDone ? ' qf-done' : '');
+        const productItem = {type: 'product', productId: p.productId, scenario};
+        const selected = state.selectMode && isSelected(productItem);
+        card.className = 'qf-product-card'
+          + (cardDone ? ' qf-done' : '')
+          + (state.selectMode ? ' qf-select-mode' : '')
+          + (selected ? ' qf-selected' : '');
         card.title = p.productName;
         const variantsRaw = [...p.variants.values()].map(v => ({v, c: variantCount(v)}));
         const variants = variantsRaw.filter(x => x.c > 0);
@@ -1849,7 +1986,7 @@
           <div class="qf-product-count">${p._count} ออเดอร์</div>
           ${labels ? `
             <input class="qf-alias-input" type="text" placeholder="ชื่อย่อ (เช่น แดง1)" value="${escapeHtml(aliasVal)}" maxlength="20"/>
-            ${variants.length > 0 ? `<button class="qf-variant-link">ปรับ variant</button>` : ''}
+            ${variants.length > 0 ? `<button class="qf-variant-link">ปรับตัวเลือก</button>` : ''}
           ` : ''}
           ${hasBadges ? `<div class="qf-variant-badges"></div>` : ''}
         `;
@@ -1888,8 +2025,16 @@
             badge.dataset.skuId = v.skuId;
             if (aliasOverride) badge.title = `${originalName} → ${aliasOverride}`;
             badge.textContent = `${displayName} (${c})`;
+            const variantItem = {type: 'variant', productId: p.productId, skuId: v.skuId, scenario};
+            if (state.selectMode && isSelected(variantItem)) badge.classList.add('qf-selected');
             badge.addEventListener('click', (e) => {
               e.stopPropagation();
+              if (state.selectMode) {
+                if (badgeDone) return;
+                toggleSelection(variantItem);
+                badge.classList.toggle('qf-selected');
+                return;
+              }
               if (isDone(p.productId, v.skuId, type)) {
                 state.doneItems.delete(doneKey(p.productId, v.skuId, type));
                 renderAll();
@@ -1901,6 +2046,12 @@
           }
         }
         card.addEventListener('click', () => {
+          if (state.selectMode) {
+            if (cardDone) return; // can't select already-printed
+            toggleSelection(productItem);
+            card.classList.toggle('qf-selected');
+            return;
+          }
           if (cardDone) {
             state.doneItems.delete(doneKey(p.productId, null, type));
             renderAll();
@@ -1946,11 +2097,16 @@
         for (const combo of combos) {
           const card = document.createElement('div');
           const comboDone = isComboDone(combo.sigKey);
-          card.className = 'qf-combo-card' + (comboDone ? ' qf-done' : '');
+          const comboItem = {type: 'combo', sigKey: combo.sigKey};
+          const selected = state.selectMode && isSelected(comboItem);
+          card.className = 'qf-combo-card'
+            + (comboDone ? ' qf-done' : '')
+            + (state.selectMode ? ' qf-select-mode' : '')
+            + (selected ? ' qf-selected' : '');
           const itemsHtml = combo.items.map((s, idx) => `
             ${idx > 0 ? '<span class="qf-combo-plus">+</span>' : ''}
             <div class="qf-combo-item" data-pid="${s.productId}">
-              <img src="${s.productImageURL}" referrerpolicy="no-referrer" title="คลิกเพื่อตั้งชื่อย่อ + รุ่น"/>
+              <img src="${s.productImageURL}" referrerpolicy="no-referrer" title="คลิกเพื่อตั้งชื่อย่อ + ตัวเลือก"/>
               <div class="qf-combo-qty">×${s.quantity}</div>
               <input class="qf-combo-alias-input" type="text" placeholder="ชื่อย่อ" value="${escapeHtml((state.aliases.get(s.productId) || '').trim())}" maxlength="20"/>
             </div>
@@ -1977,6 +2133,12 @@
             });
           });
           card.addEventListener('click', () => {
+            if (state.selectMode) {
+              if (comboDone) return;
+              toggleSelection(comboItem);
+              card.classList.toggle('qf-selected');
+              return;
+            }
             if (isComboDone(combo.sigKey)) {
               state.doneItems.delete(comboDoneKey(combo.sigKey));
               renderAll();
