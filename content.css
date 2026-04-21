@@ -717,17 +717,32 @@ html[data-qf-theme="shopee"] .qf-advanced-toggle:hover {
   color: #888;
   margin-top: 1px;
 }
+.qf-select-bar-all,
 .qf-select-bar-clear {
-  padding: 7px 12px;
-  background: #eee;
+  padding: 7px 10px;
+  background: #fff;
   color: #555;
-  border: none;
+  border: 1px solid #e5e7eb;
   border-radius: 5px;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.12s, border-color 0.12s, color 0.12s;
 }
-.qf-select-bar-clear:hover { background: #ddd; }
+.qf-select-bar-all { color: #fe2c55; border-color: #fe2c55; }
+.qf-select-bar-all:hover { background: #fff0f3; }
+.qf-select-bar-clear:hover:not(:disabled) { background: #f3f4f6; }
+.qf-select-bar-clear:disabled,
+.qf-select-bar-print:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+html[data-qf-theme="shopee"] .qf-select-bar-all {
+  color: #ee4d2d;
+  border-color: #ee4d2d;
+}
+html[data-qf-theme="shopee"] .qf-select-bar-all:hover { background: #fff5f0; }
 .qf-select-bar-print {
   padding: 7px 14px;
   background: #fe2c55;
@@ -738,7 +753,7 @@ html[data-qf-theme="shopee"] .qf-advanced-toggle:hover {
   font-weight: 700;
   cursor: pointer;
 }
-.qf-select-bar-print:hover { background: #e02147; }
+.qf-select-bar-print:hover:not(:disabled) { background: #e02147; }
 .qf-product-card.qf-select-mode,
 .qf-combo-card.qf-select-mode {
   position: relative;

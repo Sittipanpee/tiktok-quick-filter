@@ -1956,6 +1956,33 @@
     renderAll();
   }
 
+  // Select all visible (non-done) items in the CURRENT tab, respecting filters.
+  // Used by the "เลือกทั้งหมด" button inside the select bar.
+  function selectAllVisible() {
+    const tab = state.currentTab;
+    if (tab === 'single' || tab === 'multi') {
+      const idsKey = tab === 'single' ? 'fulfillUnitIdsSingle' : 'fulfillUnitIdsMulti';
+      const type = tab === 'single' ? 'single_item' : 'single_sku';
+      const scenario = tab === 'single' ? 'single' : 'multi';
+      for (const p of state.products.values()) {
+        const count = carrierFilteredSize(p[idsKey]);
+        if (count === 0) continue;
+        if (isDone(p.productId, null, type)) continue;
+        state.selected.set(selectionKey({type:'product', productId:p.productId, scenario}),
+                          {type:'product', productId:p.productId, scenario});
+      }
+    } else if (tab === 'weird') {
+      for (const combo of state.weirdCombos.values()) {
+        const count = carrierFilteredSize(combo.fulfillUnitIds);
+        if (count === 0) continue;
+        if (isComboDone(combo.sigKey)) continue;
+        state.selected.set(selectionKey({type:'combo', sigKey:combo.sigKey}),
+                          {type:'combo', sigKey:combo.sigKey});
+      }
+    }
+    renderAll();
+  }
+
   function setSelectMode(on) {
     state.selectMode = on;
     if (!on) state.selected.clear();
@@ -2127,11 +2154,17 @@
   function updateSelectionBar() {
     const bar = document.getElementById('qf-select-bar');
     if (!bar) return;
-    const count = state.selected.size;
-    if (count === 0) { bar.style.display = 'none'; return; }
+    // Show bar whenever select mode is on so "เลือกทั้งหมด" is reachable
+    // from a zero-selection state.
+    if (!state.selectMode) { bar.style.display = 'none'; return; }
     bar.style.display = 'flex';
-    const ids = resolveSelectedIds();
-    bar.querySelector('.qf-select-bar-count').textContent = `เลือก ${count} รายการ • ${ids.length} ฉลาก`;
+    const count = state.selected.size;
+    const ids = count > 0 ? resolveSelectedIds() : [];
+    bar.querySelector('.qf-select-bar-count').textContent =
+      count > 0 ? `เลือก ${count} รายการ • ${ids.length} ฉลาก` : 'ยังไม่ได้เลือก';
+    // Disable clear/print when nothing is selected
+    bar.querySelector('.qf-select-bar-clear').disabled = count === 0;
+    bar.querySelector('.qf-select-bar-print').disabled = count === 0;
   }
 
   function carrierFilteredSize(idSet) {
@@ -2852,6 +2885,7 @@
             <div class="qf-select-bar-count">เลือก 0 รายการ</div>
             <div class="qf-select-bar-hint">รวม + dedupe อัตโนมัติ</div>
           </div>
+          <button class="qf-select-bar-all">เลือกทั้งหมด</button>
           <button class="qf-select-bar-clear">ล้าง</button>
           <button class="qf-select-bar-print">พิมพ์ที่เลือก</button>
         </div>` : ''}
@@ -2884,6 +2918,7 @@
     if (bar) {
       bar.querySelector('.qf-select-bar-clear').addEventListener('click', clearSelection);
       bar.querySelector('.qf-select-bar-print').addEventListener('click', printSelected);
+      bar.querySelector('.qf-select-bar-all')?.addEventListener('click', selectAllVisible);
     }
     document.getElementById('qf-auto-select')?.addEventListener('change', (e) => {
       state.autoSelectAll = e.target.checked;
