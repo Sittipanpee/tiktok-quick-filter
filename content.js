@@ -1414,16 +1414,18 @@
           <button class="qf-alias-modal-close" aria-label="ปิด">×</button>
         </div>
 
-        <div class="qf-alias-modal-section">
-          <div class="qf-alias-modal-label">ชื่อย่อหลัก</div>
-          <div class="qf-alias-modal-hint">ใช้กับทุกตัวเลือกที่ไม่ได้ตั้งชื่อแยก</div>
-          <input class="qf-alias-modal-product" type="text" placeholder="เช่น ครีม, แดง1, สครับ" maxlength="20" value="${escapeHtml(state.aliases.get(productId) || '')}"/>
-        </div>
+        <div class="qf-alias-modal-body">
+          <div class="qf-alias-modal-section">
+            <div class="qf-alias-modal-label">ชื่อย่อหลัก</div>
+            <div class="qf-alias-modal-hint">ใช้กับทุกตัวเลือกที่ไม่ได้ตั้งชื่อแยก</div>
+            <input class="qf-alias-modal-product" type="text" placeholder="เช่น ครีม, แดง1, สครับ" maxlength="20" value="${escapeHtml(state.aliases.get(productId) || '')}"/>
+          </div>
 
-        <div class="qf-alias-modal-section qf-alias-modal-section-scroll">
-          <div class="qf-alias-modal-label">ตั้งชื่อแยกตามตัวเลือก</div>
-          <div class="qf-alias-modal-hint">ปล่อยว่างจะใช้ชื่อหลักแทน</div>
-          <div class="qf-alias-modal-variants"></div>
+          <div class="qf-alias-modal-section">
+            <div class="qf-alias-modal-label">ตั้งชื่อแยกตามตัวเลือก</div>
+            <div class="qf-alias-modal-hint">ปล่อยว่างจะใช้ชื่อหลักแทน</div>
+            <div class="qf-alias-modal-variants"></div>
+          </div>
         </div>
 
         <div class="qf-alias-modal-footer">

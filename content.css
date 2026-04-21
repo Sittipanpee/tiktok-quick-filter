@@ -819,22 +819,20 @@ html[data-qf-theme="shopee"] .qf-advanced-toggle:hover {
   line-height: 1;
 }
 .qf-alias-modal-close:hover { color: #fe2c55; }
-.qf-alias-modal-section {
-  padding: 12px 16px;
-  border-bottom: 1px solid #f5f5f5;
-  flex-shrink: 0;
-}
-.qf-alias-modal .qf-alias-modal-section-scroll {
-  border-bottom: none;
+.qf-alias-modal-body {
   flex: 1 1 0;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
 }
-.qf-alias-modal .qf-alias-modal-footer { flex-shrink: 0; flex-grow: 0; }
-.qf-alias-modal .qf-alias-modal-header { flex-shrink: 0; }
-.qf-alias-modal .qf-alias-modal-section:not(.qf-alias-modal-section-scroll) { flex: 0 0 auto; }
+.qf-alias-modal-section {
+  padding: 14px 18px;
+  border-bottom: 1px solid #f5f5f5;
+}
+.qf-alias-modal-section:last-child { border-bottom: none; }
+.qf-alias-modal .qf-alias-modal-header { flex: 0 0 auto; }
+.qf-alias-modal .qf-alias-modal-footer { flex: 0 0 auto; }
 .qf-alias-modal-label {
   font-size: 13px;
   font-weight: 600;
