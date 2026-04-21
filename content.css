@@ -1745,3 +1745,35 @@ html[data-qf-theme="shopee"] .qf-split-badge { background: #ee4d2d; }
   font-size: 12px;
   z-index: 9999999;
 }
+.qf-toast-error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 520px;
+  background: rgba(180, 30, 40, 0.95);
+  padding: 10px 14px;
+  line-height: 1.4;
+}
+.qf-toast-error .qf-toast-msg {
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.qf-toast-error .qf-toast-copy {
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.qf-toast-error .qf-toast-copy:hover {
+  background: rgba(255, 255, 255, 0.32);
+}
+.qf-toast-error .qf-toast-copy:active {
+  background: rgba(255, 255, 255, 0.5);
+}

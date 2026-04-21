@@ -392,6 +392,55 @@
     setTimeout(() => t.remove(), duration);
   }
 
+  // Error toast with a "คัดลอก debug" button so the user can paste diagnostic
+  // JSON when reporting an issue. Stays up longer than a normal toast.
+  function showErrorToast(message, details = {}, duration = 8000) {
+    document.querySelectorAll('.qf-toast').forEach(e => e.remove());
+    const t = document.createElement('div');
+    t.className = 'qf-toast qf-toast-error';
+
+    const msgEl = document.createElement('span');
+    msgEl.className = 'qf-toast-msg';
+    msgEl.textContent = message;
+    t.appendChild(msgEl);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'qf-toast-copy';
+    btn.textContent = 'คัดลอก debug';
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      const payload = {
+        message,
+        details,
+        url: location.href,
+        userAgent: navigator.userAgent,
+        ts: new Date().toISOString(),
+      };
+      const text = JSON.stringify(payload, null, 2);
+      try {
+        await navigator.clipboard.writeText(text);
+        btn.textContent = 'คัดลอกแล้ว ✓';
+      } catch {
+        // Fallback for sites that deny clipboard permission
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); btn.textContent = 'คัดลอกแล้ว ✓'; }
+        catch { btn.textContent = 'คัดลอกไม่ได้'; }
+        document.body.removeChild(ta);
+      }
+      setTimeout(() => { if (btn.isConnected) btn.textContent = 'คัดลอก debug'; }, 2000);
+    };
+    t.appendChild(btn);
+
+    document.body.appendChild(t);
+    setTimeout(() => { if (t.isConnected) t.remove(); }, duration);
+  }
+
   async function ensurePageSize50() {
     const pagination = document.querySelector('.p-pagination');
     if (!pagination) return;
@@ -549,7 +598,21 @@
     state.scanning = true;
     state.products.clear();
     state.weirdOrders = [];
-    // Keep doneItems across scans so "ที่พิมพ์แล้ว" markers survive page refresh
+    // Keep non-expired doneItems across scans so "ที่พิมพ์แล้ว" markers survive
+    // both page refresh and rescan. Only drop entries that have already
+    // exceeded DONE_TIMEOUT_MS (30 min) — they would be dropped lazily by
+    // isDone/isComboDone anyway, but a centralized sweep keeps the map small.
+    {
+      const nowTs = Date.now();
+      let dropped = false;
+      for (const [k, ts] of state.doneItems) {
+        if (typeof ts !== 'number' || nowTs - ts > DONE_TIMEOUT_MS) {
+          state.doneItems.delete(k);
+          dropped = true;
+        }
+      }
+      if (dropped) saveDoneItems();
+    }
     state.records.clear();
     state.weirdFulfillUnitIds.clear();
     state.weirdCombos.clear();
@@ -581,7 +644,14 @@
     try {
       statusEl.textContent = 'กำลังเตรียม API...';
       const url = await ensureApiUrl();
-      if (!url) throw new Error('ไม่สามารถจับ API URL — ลองโหลดหน้าใหม่แล้วสแกนอีกครั้ง');
+      if (!url) {
+        showErrorToast('ไม่สามารถจับ API URL — ลองโหลดหน้าใหม่แล้วสแกนอีกครั้ง', {
+          source: 'scanAllPages:ensureApiUrl',
+          apiListUrl: _apiListUrl,
+          hasTemplate: !!_apiListBodyTemplate,
+        });
+        throw new Error('ไม่สามารถจับ API URL — ลองโหลดหน้าใหม่แล้วสแกนอีกครั้ง');
+      }
 
       // First batch to learn total_count
       statusEl.textContent = 'กำลังดึงออเดอร์...';
@@ -608,6 +678,12 @@
       const total = d.total_count ?? d.total ?? 0;
       const firstOrders = d.main_orders || d.order_list || d.orders || [];
       if (total === 0 && firstOrders.length === 0) {
+        showErrorToast('API ตอบกลับว่าง — ลองโหลดหน้าใหม่', {
+          source: 'scanAllPages:emptyResponse',
+          responseKeys: Object.keys(d),
+          apiListUrl: _apiListUrl,
+          hasTemplate: !!_apiListBodyTemplate,
+        });
         throw new Error(`API ตอบกลับว่าง (keys: ${Object.keys(d).join(',') || 'none'}) — ลองโหลดหน้าใหม่`);
       }
       processApiOrders(firstOrders);
@@ -1182,14 +1258,44 @@
         while (!state.fontUrl && Date.now() < deadline) await sleep(100);
       }
       if (!state.fontUrl) throw new Error('ไม่พบ font URL (asset-bridge ยังไม่ทำงาน)');
-      const r = await fetch(state.fontUrl);
-      state.fontBytes = await r.arrayBuffer();
-      return state.fontBytes;
+      // Retry font fetch up to 3 attempts total with 500ms / 1500ms backoff.
+      // A one-off 404/timeout used to permanently cache null → all PDFs
+      // rendered Thai as boxes silently until the page was reloaded.
+      const backoffs = [0, 500, 1500];
+      let lastErr = null;
+      for (let i = 0; i < backoffs.length; i++) {
+        if (backoffs[i]) await sleep(backoffs[i]);
+        try {
+          const r = await fetch(state.fontUrl);
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          const bytes = await r.arrayBuffer();
+          if (!bytes || !bytes.byteLength) throw new Error('empty font response');
+          state.fontBytes = bytes;
+          return state.fontBytes;
+        } catch (e) {
+          lastErr = e;
+          console.warn(`[QF] font fetch attempt ${i + 1}/${backoffs.length} failed:`, e);
+        }
+      }
+      throw lastErr || new Error('font fetch failed');
     })();
     try {
       return await _fontBytesPromise;
     } catch (e) {
-      _fontBytesPromise = null; // allow retry on next call
+      // Reset both the in-flight promise AND state.fontBytes so the next
+      // print attempt tries again from scratch instead of permanently
+      // caching a failed fetch. overlayAliasOnPdf already catches and
+      // falls back to the original PDF, so a dropped watermark is
+      // non-fatal — we just warn the user it may be missing.
+      _fontBytesPromise = null;
+      state.fontBytes = null;
+      try {
+        showErrorToast('โหลดฟอนต์ไม่สำเร็จ — PDF อาจไม่มีลายน้ำ', {
+          source: 'ensureFontBytes',
+          fontUrl: state.fontUrl || null,
+          error: String(e && (e.message || e)),
+        });
+      } catch {}
       throw e;
     }
   }
@@ -1860,7 +1966,11 @@
       }
     } catch (e) {
       console.error('[QF] printSelected failed:', e);
-      showToast('พิมพ์ผิดพลาด: ' + e.message, 4000);
+      showErrorToast('พิมพ์ผิดพลาด: ' + e.message, {
+        source: 'printSelected',
+        error: String(e && (e.stack || e.message || e)),
+        selectedCount: state.selected?.size || 0,
+      });
     }
   }
 
@@ -2275,7 +2385,11 @@
       return ok;
     } catch (e) {
       console.error('[QF] printWeirdCombo failed:', e);
-      showToast('พิมพ์ผิดพลาด: ' + e.message, 4000);
+      showErrorToast('พิมพ์ผิดพลาด: ' + e.message, {
+        source: 'printWeirdCombo',
+        sigKey,
+        error: String(e && (e.stack || e.message || e)),
+      });
       return false;
     }
   }
@@ -2391,6 +2505,26 @@
     }
   }
 
+  // Build `mainOrderId → <tr>` map by walking each row's fiber once. Avoids
+  // the O(n²) hit of calling findTrForOrder() inside selectAllOrders (which
+  // re-queries + re-walks every row for every record on the page).
+  function buildTrMapForPage() {
+    const map = new Map();
+    const trs = document.querySelectorAll('tr');
+    for (const tr of trs) {
+      const fk = Object.keys(tr).find(k => k.startsWith('__reactFiber'));
+      if (!fk) continue;
+      let fiber = tr[fk], depth = 0;
+      while (fiber && depth < 10) {
+        const id = fiber.memoizedProps?.record?.mainOrderId
+                || fiber.memoizedProps?.rowData?.mainOrderId;
+        if (id) { if (!map.has(id)) map.set(id, tr); break; }
+        fiber = fiber.return; depth++;
+      }
+    }
+    return map;
+  }
+
   async function selectAllOrders(filterProductId, filterSkuId = null, minQty = 1, maxWait = 8000) {
     await waitForStable(maxWait);
 
@@ -2405,12 +2539,15 @@
         if (!ok) break;
         await waitForStable(4000);
       }
+      // Build the trMap once per page so the inner record loop is O(n)
+      // instead of O(n²).
+      const trMap = buildTrMapForPage();
       for (const rec of getOrderRecords()) {
         const targetSku = filterSkuId
           ? rec.skuList?.find(s => s.skuId === filterSkuId)
           : rec.skuList?.find(s => s.productId === filterProductId);
         if (!targetSku || targetSku.quantity < minQty) continue;
-        const tr = findTrForOrder(rec.mainOrderId);
+        const tr = trMap.get(rec.mainOrderId);
         const checkbox = tr?.querySelector('label.p-checkbox');
         if (checkbox) { simulateClick(checkbox); count++; await sleep(50); }
       }
@@ -2427,7 +2564,11 @@
           const ok = await printProductLabels(productId, skuId, scenario);
           if (ok) { markDone(productId, skuId, type); renderAll(); }
         } catch(e) {
-          showToast('พิมพ์ผิดพลาด: ' + e.message, 3000);
+          showErrorToast('พิมพ์ผิดพลาด: ' + e.message, {
+            source: 'applyProductFilter:print',
+            productId, skuId, type,
+            error: String(e && (e.stack || e.message || e)),
+          });
         }
         return;
       }
