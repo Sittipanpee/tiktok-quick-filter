@@ -1619,8 +1619,17 @@
     if (end !== null && t >= end) return false; // end exclusive (next-day midnight)
     return true;
   }
+  // Check if record's labelStatus matches current filter — needed AFTER optimistic
+  // updates flip rec.labelStatus from 30 → 50, so counts drop in "ยังไม่พิมพ์".
+  function passesLabelStatus(id) {
+    if (state.labelStatusFilter === 'all') return true;
+    const rec = state.records.get(id);
+    if (!rec) return true; // records without status info always pass
+    const target = state.labelStatusFilter === 'printed' ? LABEL_STATUS_PRINTED : LABEL_STATUS_NOT_PRINTED;
+    return rec.labelStatus === target;
+  }
   function applyCarrierFilter(ids) {
-    return ids.filter(id => passesCarrier(id) && passesPreOrder(id) && passesDate(id));
+    return ids.filter(id => passesCarrier(id) && passesPreOrder(id) && passesDate(id) && passesLabelStatus(id));
   }
 
   // ==================== MULTI-SELECT ====================
@@ -1820,11 +1829,9 @@
 
   function carrierFilteredSize(idSet) {
     if (!idSet) return 0;
-    const dateActive = state.dateFilter.start !== null || state.dateFilter.end !== null;
-    if (state.carrierFilter.size === 0 && state.preOrderFilter === 'all' && !dateActive) return idSet.size;
     let n = 0;
     for (const id of idSet) {
-      if (passesCarrier(id) && passesPreOrder(id) && passesDate(id)) n++;
+      if (passesCarrier(id) && passesPreOrder(id) && passesDate(id) && passesLabelStatus(id)) n++;
     }
     return n;
   }
@@ -1926,6 +1933,15 @@
       if (!docUrl) {
         console.warn('[QF] generate succeeded but no doc_url:', data);
         continue;
+      }
+
+      // Optimistic update: server accepted the print for these IDs → mark them
+      // as printed in local state so calendar / tab counts reflect reality
+      // without waiting for a manual rescan. If a later step (overlay, merge)
+      // fails, the labels are STILL printed on TikTok's side, so this is safe.
+      for (const id of batch) {
+        const rec = state.records.get(id);
+        if (rec) rec.labelStatus = 50;
       }
 
       update(0.20, 'ดาวน์โหลด PDF...');
@@ -2634,10 +2650,10 @@
   }
 
   function summarizeZones(field) {
-    const buckets = { critical: 0, urgent: 0, watch: 0, safe: 0 };
+    const buckets = { critical: 0, urgent: 0, watch: 0, safe: 0, neutral: 0 };
     const seenDays = new Map(); // day → zone
     for (const [id, rec] of state.records) {
-      if (!passesCarrier(id) || !passesPreOrder(id)) continue;
+      if (!passesCarrier(id) || !passesPreOrder(id) || !passesLabelStatus(id)) continue;
       const t = rec[field];
       if (!t) continue;
       const k = startOfDay(t);
@@ -2649,10 +2665,10 @@
   }
 
   function buildDayCounts(field) {
-    // returns Map<YYYY-MM-DD, count> counting records that match carrier+preorder filter (but NOT date filter)
+    // Counts per day that match carrier+preorder+labelStatus (but NOT date filter — this IS the date)
     const counts = new Map();
     for (const [id, rec] of state.records) {
-      if (!passesCarrier(id) || !passesPreOrder(id)) continue;
+      if (!passesCarrier(id) || !passesPreOrder(id) || !passesLabelStatus(id)) continue;
       const t = rec[field];
       if (!t) continue;
       const k = dayKey(t);
