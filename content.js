@@ -2564,6 +2564,8 @@
   }
 
   function getDangerZone(field, dayTs) {
+    // Printed orders are already handled — no urgency. Render neutral.
+    if (state.labelStatusFilter === 'printed') return 'neutral';
     // dayTs = midnight ms of the day
     const todayStart = startOfDay(Date.now());
     const daysFromToday = Math.floor((dayTs - todayStart) / 86400000);
@@ -2720,7 +2722,7 @@
           <option value="autoCancelTime" ${field==='autoCancelTime'?'selected':''}>${FIELD_LABELS.autoCancelTime}</option>
         </select>
       </div>
-      ${summaryParts.length ? `<div class="qf-zone-summary">${summaryParts.join('')}</div>` : ''}
+      ${state.labelStatusFilter === 'printed' ? `<div class="qf-zone-archive-note">พิมพ์แล้ว — โหมดข้อมูลย้อนหลัง ไม่แสดงระดับความเร่งด่วน</div>` : (summaryParts.length ? `<div class="qf-zone-summary">${summaryParts.join('')}</div>` : '')}
       <div class="qf-cal-header">
         <button class="qf-cal-nav qf-cal-prev" aria-label="เดือนก่อน">‹</button>
         <div class="qf-cal-title">${TH_MONTHS[cm.month]} ${cm.year + 543}</div>
@@ -2750,12 +2752,12 @@
         ${(start !== null || end !== null) ? `<button class="qf-cal-clear">ล้าง</button>` : ''}
       </div>
       <div class="qf-cal-hint">คลิก = วันเดียว · Shift+คลิก = ช่วง</div>
-      <div class="qf-zone-legend">
+      ${state.labelStatusFilter === 'printed' ? '' : `<div class="qf-zone-legend">
         <span><span class="qf-zone-dot qf-zone-critical-dot"></span>ใกล้/เลย</span>
         <span><span class="qf-zone-dot qf-zone-urgent-dot"></span>รีบ</span>
         <span><span class="qf-zone-dot qf-zone-watch-dot"></span>ระวัง</span>
         <span><span class="qf-zone-dot qf-zone-safe-dot"></span>ปลอดภัย</span>
-      </div>
+      </div>`}
     `;
 
     panel.querySelector('.qf-cal-field').addEventListener('change', (e) => {

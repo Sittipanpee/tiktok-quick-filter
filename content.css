@@ -431,14 +431,27 @@ html[data-qf-theme="shopee"] .qf-cal-icon-dot { background: #ee4d2d; }
 .qf-cal-cell.qf-zone-watch    { background: #fef3c7; }
 .qf-cal-cell.qf-zone-urgent   { background: #ffedd5; }
 .qf-cal-cell.qf-zone-critical { background: #fee2e2; }
+.qf-cal-cell.qf-zone-neutral  { background: #f3f4f6; }
 .qf-cal-cell.qf-zone-safe     .qf-cal-count { color: #047857; }
 .qf-cal-cell.qf-zone-watch    .qf-cal-count { color: #b45309; }
 .qf-cal-cell.qf-zone-urgent   .qf-cal-count { color: #c2410c; }
 .qf-cal-cell.qf-zone-critical .qf-cal-count { color: #b91c1c; }
+.qf-cal-cell.qf-zone-neutral  .qf-cal-count { color: #6b7280; }
 .qf-cal-cell.qf-zone-safe:hover     { background: #d1fae5; }
 .qf-cal-cell.qf-zone-watch:hover    { background: #fde68a; }
 .qf-cal-cell.qf-zone-urgent:hover   { background: #fed7aa; }
 .qf-cal-cell.qf-zone-critical:hover { background: #fecaca; }
+.qf-cal-cell.qf-zone-neutral:hover  { background: #e5e7eb; }
+.qf-zone-archive-note {
+  font-size: 11px;
+  color: #6b7280;
+  background: #f6f7f8;
+  padding: 8px 10px;
+  border-left: 3px solid #9ca3af;
+  border-radius: 0 6px 6px 0;
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
 
 .qf-cal-cell.qf-cal-in-range {
   outline: 2px solid #fe2c55;
