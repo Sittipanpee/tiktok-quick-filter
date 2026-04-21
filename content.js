@@ -2424,6 +2424,48 @@
     return startOfDay(ts) + 86400000;
   }
 
+  function getDangerZone(field, dayTs) {
+    // dayTs = midnight ms of the day
+    const todayStart = startOfDay(Date.now());
+    const daysFromToday = Math.floor((dayTs - todayStart) / 86400000);
+    if (field === 'createTime') {
+      // older order = more urgent (still unshipped)
+      const age = -daysFromToday;
+      if (age >= 14) return 'critical';
+      if (age >= 7) return 'urgent';
+      if (age >= 2) return 'watch';
+      return 'safe';
+    }
+    if (field === 'shipByTime') {
+      if (daysFromToday <= 0) return 'critical'; // today or past
+      if (daysFromToday === 1) return 'urgent';
+      if (daysFromToday <= 3) return 'watch';
+      return 'safe';
+    }
+    if (field === 'autoCancelTime') {
+      if (daysFromToday <= 1) return 'critical'; // today/tomorrow/past
+      if (daysFromToday <= 3) return 'urgent';
+      if (daysFromToday <= 7) return 'watch';
+      return 'safe';
+    }
+    return 'safe';
+  }
+
+  function summarizeZones(field) {
+    const buckets = { critical: 0, urgent: 0, watch: 0, safe: 0 };
+    const seenDays = new Map(); // day → zone
+    for (const [id, rec] of state.records) {
+      if (!passesCarrier(id) || !passesPreOrder(id)) continue;
+      const t = rec[field];
+      if (!t) continue;
+      const k = startOfDay(t);
+      let zone = seenDays.get(k);
+      if (!zone) { zone = getDangerZone(field, k); seenDays.set(k, zone); }
+      buckets[zone]++;
+    }
+    return buckets;
+  }
+
   function buildDayCounts(field) {
     // returns Map<YYYY-MM-DD, count> counting records that match carrier+preorder filter (but NOT date filter)
     const counts = new Map();
@@ -2491,6 +2533,15 @@
       return n;
     })();
 
+    const zones = summarizeZones(field);
+    const zoneLabels = {
+      createTime: { critical: 'ค้างนานมาก', urgent: 'ค้างนาน', watch: 'รอจัดส่ง', safe: 'เพิ่งสั่ง' },
+      shipByTime: { critical: 'ต้องส่งวันนี้/เลย', urgent: 'พรุ่งนี้', watch: 'ใน 3 วัน', safe: 'ปลอดภัย' },
+      autoCancelTime: { critical: 'ใกล้ยกเลิก', urgent: 'รีบทำ', watch: 'ระวัง', safe: 'ปลอดภัย' },
+    }[field];
+    const summaryParts = ['critical','urgent','watch','safe']
+      .filter(z => zones[z] > 0)
+      .map(z => `<span class="qf-zone-pill qf-zone-${z}-pill"><span class="qf-zone-dot qf-zone-${z}-dot"></span>${zones[z]} ${zoneLabels[z]}</span>`);
     panel.innerHTML = `
       <div class="qf-cal-field-row">
         <select class="qf-cal-field">
@@ -2499,6 +2550,7 @@
           <option value="autoCancelTime" ${field==='autoCancelTime'?'selected':''}>${FIELD_LABELS.autoCancelTime}</option>
         </select>
       </div>
+      ${summaryParts.length ? `<div class="qf-zone-summary">${summaryParts.join('')}</div>` : ''}
       <div class="qf-cal-header">
         <button class="qf-cal-nav qf-cal-prev" aria-label="เดือนก่อน">‹</button>
         <div class="qf-cal-title">${TH_MONTHS[cm.month]} ${cm.year + 543}</div>
@@ -2510,8 +2562,10 @@
           if (c === '') return `<div class="qf-cal-cell qf-cal-empty"></div>`;
           const k = `${cm.year}-${String(cm.month+1).padStart(2,'0')}-${String(c).padStart(2,'0')}`;
           const cnt = counts.get(k) || 0;
+          const dayTs = new Date(cm.year, cm.month, c).getTime();
+          const zone = cnt > 0 ? getDangerZone(field, dayTs) : null;
           const cls = ['qf-cal-cell'];
-          if (cnt > 0) cls.push('qf-cal-has');
+          if (cnt > 0) cls.push('qf-cal-has', `qf-zone-${zone}`);
           if (isInRange(c)) cls.push('qf-cal-in-range');
           if (isStart(c)) cls.push('qf-cal-start');
           if (isEnd(c)) cls.push('qf-cal-end');
@@ -2526,6 +2580,12 @@
         ${(start !== null || end !== null) ? `<button class="qf-cal-clear">ล้าง</button>` : ''}
       </div>
       <div class="qf-cal-hint">คลิก = วันเดียว · Shift+คลิก = ช่วง</div>
+      <div class="qf-zone-legend">
+        <span><span class="qf-zone-dot qf-zone-critical-dot"></span>ใกล้/เลย</span>
+        <span><span class="qf-zone-dot qf-zone-urgent-dot"></span>รีบ</span>
+        <span><span class="qf-zone-dot qf-zone-watch-dot"></span>ระวัง</span>
+        <span><span class="qf-zone-dot qf-zone-safe-dot"></span>ปลอดภัย</span>
+      </div>
     `;
 
     panel.querySelector('.qf-cal-field').addEventListener('change', (e) => {

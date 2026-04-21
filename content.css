@@ -384,14 +384,83 @@ html[data-qf-theme="shopee"] .qf-result-download {
   line-height: 1.1;
   margin-top: 1px;
 }
-.qf-cal-cell.qf-cal-in-range { background: #fff0f3; color: #fe2c55; }
+/* Danger zones — semantic colors per cell */
+.qf-cal-cell.qf-zone-safe     { background: #ecfdf5; }
+.qf-cal-cell.qf-zone-watch    { background: #fef3c7; }
+.qf-cal-cell.qf-zone-urgent   { background: #ffedd5; }
+.qf-cal-cell.qf-zone-critical { background: #fee2e2; }
+.qf-cal-cell.qf-zone-safe     .qf-cal-count { color: #047857; }
+.qf-cal-cell.qf-zone-watch    .qf-cal-count { color: #b45309; }
+.qf-cal-cell.qf-zone-urgent   .qf-cal-count { color: #c2410c; }
+.qf-cal-cell.qf-zone-critical .qf-cal-count { color: #b91c1c; }
+.qf-cal-cell.qf-zone-safe:hover     { background: #d1fae5; }
+.qf-cal-cell.qf-zone-watch:hover    { background: #fde68a; }
+.qf-cal-cell.qf-zone-urgent:hover   { background: #fed7aa; }
+.qf-cal-cell.qf-zone-critical:hover { background: #fecaca; }
+
+.qf-cal-cell.qf-cal-in-range {
+  outline: 2px solid #fe2c55;
+  outline-offset: -2px;
+}
 .qf-cal-cell.qf-cal-start,
 .qf-cal-cell.qf-cal-end {
   background: #fe2c55 !important;
   color: #fff !important;
 }
 .qf-cal-cell.qf-cal-start .qf-cal-count,
-.qf-cal-cell.qf-cal-end .qf-cal-count { color: #fff; }
+.qf-cal-cell.qf-cal-end .qf-cal-count { color: #fff !important; }
+
+/* Zone summary pills (above calendar) */
+.qf-zone-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.qf-zone-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #f6f7f8;
+  color: #374151;
+}
+.qf-zone-critical-pill { background: #fee2e2; color: #991b1b; }
+.qf-zone-urgent-pill   { background: #ffedd5; color: #9a3412; }
+.qf-zone-watch-pill    { background: #fef3c7; color: #854d0e; }
+.qf-zone-safe-pill     { background: #ecfdf5; color: #065f46; }
+
+/* Zone dots (in pills + legend) */
+.qf-zone-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.qf-zone-critical-dot { background: #ef4444; }
+.qf-zone-urgent-dot   { background: #f97316; }
+.qf-zone-watch-dot    { background: #f59e0b; }
+.qf-zone-safe-dot     { background: #10b981; }
+
+/* Legend (below calendar) */
+.qf-zone-legend {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: #6b7280;
+  padding: 6px 4px 0;
+  border-top: 1px solid #f0f0f0;
+  margin-top: 6px;
+}
+.qf-zone-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
 .qf-cal-footer {
   display: flex;
   align-items: center;
