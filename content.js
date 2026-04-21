@@ -1136,19 +1136,53 @@
     },
   };
 
+  // Best-effort: detect which Shopee tab the user is looking at so we don't
+  // silently fall back to the to-ship body when they're on "ทั้งหมด".
+  // Returns one of 'toship' | 'all' | null. Shopee's tab markup changes
+  // often, so we hedge with several signals; null means "can't tell".
+  function detectShopeeActiveTab() {
+    // 1. Active tab element — try common shadcn-ish / antd-style selectors
+    const activeSelectors = [
+      '[role="tab"][aria-selected="true"]',
+      '.shopee-tabs__item--active',
+      '.shopee-tabs-tab--active',
+      '.eds-tab--active',
+      '.eds-tabs__tab--active',
+      '.shopee-tab--active',
+    ];
+    let activeText = '';
+    for (const sel of activeSelectors) {
+      const el = document.querySelector(sel);
+      if (el && el.textContent) { activeText = el.textContent.trim(); break; }
+    }
+    if (!activeText) return null;
+    // 2. Match by visible label (Thai)
+    if (/ทั้งหมด/.test(activeText)) return 'all';
+    if (/ที่ต้องจัดส่ง|ยังไม่จัดส่ง|รอจัดส่ง|เตรียมจัดส่ง/.test(activeText)) return 'toship';
+    return null;
+  }
+
   async function scanShopeePage(statusEl) {
     // Re-capture so body reflects the user's current Shopee tab/filter view.
     resetShopeeCapture();
     statusEl.textContent = 'รอจับ API ตามแท็บที่กำลังดู...';
     await triggerShopeeApiCapture(statusEl);
 
-    // If still nothing captured (no pagination on the page, or single-page list),
-    // fall back to a sensible default targeting the to-ship tab. This makes
-    // scan work even if the user just opened the page and clicked Scan.
+    // If still nothing captured, only fall back to the hardcoded to-ship
+    // body when DOM detection confirms the user is actually on that tab.
+    // Otherwise we'd silently feed them wrong-tab data (e.g. user on
+    // "ทั้งหมด" would get filtered to to-ship only).
     if (!_shopeeIndexUrl || !_shopeeIndexBody) {
-      _shopeeIndexUrl = SHOPEE_TOSHIP_DEFAULT.indexUrl;
-      _shopeeIndexBody = SHOPEE_TOSHIP_DEFAULT.indexBody;
-      statusEl.textContent = 'ใช้ฟิลเตอร์เริ่มต้น (ที่ต้องจัดส่ง)...';
+      const tab = detectShopeeActiveTab();
+      if (tab === 'toship') {
+        _shopeeIndexUrl = SHOPEE_TOSHIP_DEFAULT.indexUrl;
+        _shopeeIndexBody = SHOPEE_TOSHIP_DEFAULT.indexBody;
+        statusEl.textContent = 'ใช้ฟิลเตอร์เริ่มต้น (ที่ต้องจัดส่ง)...';
+      } else {
+        // Can't confirm tab — bail with a clear message rather than risk
+        // showing data from the wrong tab.
+        throw new Error('ยังไม่ได้จับ API — กรุณาคลิกเปลี่ยนหน้า/แท็บหนึ่งครั้ง แล้วกด Scan ใหม่');
+      }
     }
     if (!_shopeeCardUrl || !_shopeeCardBody) {
       _shopeeCardUrl = SHOPEE_TOSHIP_DEFAULT.cardUrl;
