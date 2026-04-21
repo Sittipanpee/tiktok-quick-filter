@@ -1092,7 +1092,7 @@
   }
 
   function showChunkChoiceModal({total}) {
-    const defaultChunks = Math.max(1, Math.ceil(total / 500));
+    const defaultChunks = Math.max(1, Math.ceil(total / 200));
     return new Promise(resolve => {
       const overlay = document.createElement('div');
       overlay.className = 'qf-modal-overlay qf-chunk-modal-overlay';
@@ -1101,7 +1101,7 @@
         <div class="qf-modal qf-chunk-modal" role="dialog">
           <div class="qf-modal-title">แบ่งไฟล์เพื่อความปลอดภัย</div>
           <div class="qf-modal-body">
-            <div class="qf-chunk-summary">${total} ฉลาก ใหญ่เกินไปที่จะรวมไฟล์เดียว</div>
+            <div class="qf-chunk-summary">${total} ฉลาก เยอะเกิน 200 ใบ — แนะนำแบ่งไฟล์</div>
             <div class="qf-chunk-hint">แบ่งเพื่อ: ป้องกันค้างเครื่อง / ถ้ามีปัญหากลางทาง ยังได้ไฟล์ที่เสร็จแล้ว</div>
             <div class="qf-chunk-presets">
               ${presets.map(n => `<button class="qf-chunk-preset" data-n="${n}">${n} ไฟล์<span class="qf-chunk-preset-sub">~${Math.ceil(total/n)} ใบ/ไฟล์</span></button>`).join('')}
@@ -1870,7 +1870,7 @@
     if (!confirmed) return false;
 
     let chunkCount = 1;
-    if (ids.length > 500) {
+    if (ids.length > 200) {
       const choice = await showChunkChoiceModal({total: ids.length});
       if (choice === null) return false;
       chunkCount = choice;
