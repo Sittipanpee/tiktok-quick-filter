@@ -1077,7 +1077,23 @@
 
   async function scanLabelsByApi(apiUrl, statusEl) {
     const COUNT = 100;
-    const makeBody = (offset) => ({ ..._labelsApiBodyTemplate, offset, count: COUNT });
+    const makeBody = (offset) => {
+      const base = _labelsApiBodyTemplate || {};
+      // Inject extension filters as server-side search_condition so API pre-filters
+      // (otherwise we hit the 10,000-record cap on unfiltered queries and miss records).
+      const cl = {};
+      if (state.labelStatusFilter === 'not_printed') cl.fulfillment_label_status = { value: ['30'] };
+      else if (state.labelStatusFilter === 'printed') cl.fulfillment_label_status = { value: ['50'] };
+      if (state.preOrderFilter === 'preorder') cl.fulfillment_order_label = { value: ['1'] };
+      // 'normal' (fulfillment_order_label=0) is filtered client-side since the server
+      // value for "not pre-order" isn't documented; client-side handles it.
+      return {
+        ...base,
+        search_condition: { ...(base.search_condition || {}), scene: 1, condition_list: cl },
+        offset,
+        count: COUNT,
+      };
+    };
 
     const firstResp = await _origFetch.call(window, apiUrl, {
       method: 'POST',
