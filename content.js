@@ -1791,10 +1791,21 @@
         headers: {'content-type': 'application/json'},
         body: JSON.stringify(body),
       });
-      const data = await resp.json();
-      if (data.code !== 0) throw new Error('generate API: ' + (data.message || data.code));
+      const text = await resp.text();
+      if (!text) {
+        throw new Error(`TikTok ตอบกลับว่าง (HTTP ${resp.status}) — อาจถูก rate limit, รอสัก 30 วิแล้วลองใหม่`);
+      }
+      let data;
+      try { data = JSON.parse(text); }
+      catch (parseErr) {
+        throw new Error(`TikTok ตอบกลับไม่ใช่ JSON (HTTP ${resp.status}): ${text.slice(0, 80)}`);
+      }
+      if (data.code !== 0) throw new Error(`generate API code=${data.code} msg="${data.message || 'empty'}"`);
       const docUrl = data.data?.doc_url;
-      if (!docUrl) continue;
+      if (!docUrl) {
+        console.warn('[QF] generate succeeded but no doc_url:', data);
+        continue;
+      }
 
       update(0.20, 'ดาวน์โหลด PDF...');
       const pdfBytes = await fetch(docUrl).then(r => r.arrayBuffer());
