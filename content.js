@@ -144,6 +144,9 @@
     preOrderFilter: 'all',         // 'all' | 'preorder' | 'normal'
     selectMode: false,
     selected: new Map(),           // key → {type, productId, skuId, scenario, sigKey}
+    dateFilter: { start: null, end: null, field: 'createTime' }, // field: createTime | shipByTime | autoCancelTime
+    advancedOpen: false,
+    calendarMonth: null, // {year, month} cursor for the visible month
     overlayEnabled: loadOverlayPref(),
   };
 
@@ -660,6 +663,9 @@
     if (fulfillUnitId) {
       state.records.set(fulfillUnitId, {
         fulfillUnitId,
+        createTime: rec.createTime || null,
+        shipByTime: rec.shipByTime || null,
+        autoCancelTime: rec.autoCancelTime || null,
         skuList: skus.map(s => ({
           productId: s.productId,
           skuId: s.skuId,
@@ -1023,6 +1029,7 @@
     // Convert snake_case API record into the shape processLabelRecord expects (camelCase + skuList)
     const lm = rec.label_module || {};
     const dm = rec.delivery_module || {};
+    const fm = rec.fulfillment_module || {};
     const sp = dm.shipment_provider_info || dm.shipping_provider_info || {};
     const skuList = (rec.sku_module || []).map(s => ({
       productId: s.product_id,
@@ -1042,6 +1049,17 @@
       orderIds: lm.order_ids || rec.order_ids,
       labelStatus: lm.label_status,
       isPreOrder,
+      // Time fields — all converted to ms timestamps (some sources are in seconds)
+      // createTime: เวลาลูกค้าสร้างออเดอร์
+      createTime: fm.create_time ? Number(fm.create_time)
+                : (rec.trade_order_module?.[0]?.create_time ? Number(rec.trade_order_module[0].create_time) * 1000
+                : (lm.purchase_time ? Number(lm.purchase_time) * 1000 : null)),
+      // shipByTime: deadline ที่ต้องจัดส่งภายใน
+      shipByTime: rec.trade_order_module?.[0]?.latest_tts_time
+                ? Number(rec.trade_order_module[0].latest_tts_time) * 1000 : null,
+      // autoCancelTime: เวลาที่จะถูกยกเลิกอัตโนมัติ
+      autoCancelTime: rec.trade_order_module?.[0]?.close_sla_time
+                ? Number(rec.trade_order_module[0].close_sla_time) * 1000 : null,
       skuList,
       shippingProviderInfo: {
         name: sp.name,
@@ -1574,8 +1592,17 @@
     if (state.carrierFilter.size === 0) return true;
     return state.carrierFilter.has(state.carrierOf.get(id));
   }
+  function passesDate(id) {
+    const { start, end, field } = state.dateFilter;
+    if (start === null && end === null) return true;
+    const t = state.records.get(id)?.[field || 'createTime'];
+    if (!t) return false;
+    if (start !== null && t < start) return false;
+    if (end !== null && t >= end) return false; // end exclusive (next-day midnight)
+    return true;
+  }
   function applyCarrierFilter(ids) {
-    return ids.filter(id => passesCarrier(id) && passesPreOrder(id));
+    return ids.filter(id => passesCarrier(id) && passesPreOrder(id) && passesDate(id));
   }
 
   // ==================== MULTI-SELECT ====================
@@ -1736,10 +1763,11 @@
 
   function carrierFilteredSize(idSet) {
     if (!idSet) return 0;
-    if (state.carrierFilter.size === 0 && state.preOrderFilter === 'all') return idSet.size;
+    const dateActive = state.dateFilter.start !== null || state.dateFilter.end !== null;
+    if (state.carrierFilter.size === 0 && state.preOrderFilter === 'all' && !dateActive) return idSet.size;
     let n = 0;
     for (const id of idSet) {
-      if (passesCarrier(id) && passesPreOrder(id)) n++;
+      if (passesCarrier(id) && passesPreOrder(id) && passesDate(id)) n++;
     }
     return n;
   }
@@ -2255,6 +2283,10 @@
               <button class="qf-seg-btn ${state.preOrderFilter==='preorder'?'active':''}" data-val="preorder">พรีออเดอร์</button>
             </div>
           </div>` : ''}
+          ${isTikTok() ? `<div class="qf-advanced-block">
+            <button id="qf-advanced-toggle" class="qf-advanced-toggle">โหมดขั้นสูง · กรองตามวัน</button>
+            <div id="qf-advanced-panel" class="qf-advanced-panel" style="display:none;"></div>
+          </div>` : ''}
           <div class="qf-tip">คลิก card → ยืนยัน → พิมพ์ฉลาก</div>
           <button id="qf-select-toggle" class="qf-select-toggle">เลือกหลายรายการ</button>
         </div>`}
@@ -2295,6 +2327,13 @@
     document.getElementById('qf-scan-btn').addEventListener('click', scanAllPages);
     document.getElementById('qf-select-toggle')?.addEventListener('click', () => {
       setSelectMode(!state.selectMode);
+    });
+    document.getElementById('qf-advanced-toggle')?.addEventListener('click', () => {
+      state.advancedOpen = !state.advancedOpen;
+      const tog = document.getElementById('qf-advanced-toggle');
+      tog.classList.toggle('open', state.advancedOpen);
+      tog.textContent = (state.advancedOpen ? 'ปิด' : 'โหมด') + 'ขั้นสูง · กรองตามวัน';
+      renderAdvanced();
     });
     const bar = document.getElementById('qf-select-bar');
     if (bar) {
@@ -2361,6 +2400,175 @@
     window.addEventListener('mouseup', () => dragging = false);
   }
 
+  // ==================== ADVANCED DATE FILTER (CALENDAR) ====================
+  const FIELD_LABELS = {
+    createTime: 'วันที่ลูกค้าสั่ง',
+    shipByTime: 'วันที่ต้องส่ง',
+    autoCancelTime: 'วันที่ยกเลิกอัตโนมัติ',
+  };
+  const TH_MONTHS = ['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน',
+                     'กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
+  const TH_DOWS = ['อา','จ','อ','พ','พฤ','ศ','ส'];
+
+  function dayKey(ts) {
+    if (!ts) return null;
+    const d = new Date(ts);
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  }
+  function startOfDay(ts) {
+    const d = new Date(ts);
+    d.setHours(0,0,0,0);
+    return d.getTime();
+  }
+  function nextDay(ts) {
+    return startOfDay(ts) + 86400000;
+  }
+
+  function buildDayCounts(field) {
+    // returns Map<YYYY-MM-DD, count> counting records that match carrier+preorder filter (but NOT date filter)
+    const counts = new Map();
+    for (const [id, rec] of state.records) {
+      if (!passesCarrier(id) || !passesPreOrder(id)) continue;
+      const t = rec[field];
+      if (!t) continue;
+      const k = dayKey(t);
+      counts.set(k, (counts.get(k) || 0) + 1);
+    }
+    return counts;
+  }
+
+  function getCalendarMonth() {
+    if (state.calendarMonth) return state.calendarMonth;
+    // Default to month of latest record
+    let latest = 0;
+    for (const rec of state.records.values()) {
+      const t = rec[state.dateFilter.field];
+      if (t && t > latest) latest = t;
+    }
+    const d = latest ? new Date(latest) : new Date();
+    return { year: d.getFullYear(), month: d.getMonth() };
+  }
+
+  function renderAdvanced() {
+    const panel = document.getElementById('qf-advanced-panel');
+    if (!panel) return;
+    if (!state.advancedOpen) { panel.style.display = 'none'; return; }
+    panel.style.display = 'block';
+
+    const field = state.dateFilter.field;
+    const counts = buildDayCounts(field);
+    const cm = getCalendarMonth();
+    const firstDay = new Date(cm.year, cm.month, 1);
+    const daysInMonth = new Date(cm.year, cm.month + 1, 0).getDate();
+    const startDow = firstDay.getDay();
+    const cells = [];
+    for (let i = 0; i < startDow; i++) cells.push('');
+    for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+    const { start, end } = state.dateFilter;
+    const isInRange = (day) => {
+      const t = new Date(cm.year, cm.month, day).getTime();
+      if (start === null && end === null) return false;
+      if (start !== null && end !== null) return t >= start && t < end;
+      if (start !== null) return t === start;
+      return false;
+    };
+    const isStart = (day) => start !== null && new Date(cm.year, cm.month, day).getTime() === start;
+    const isEnd = (day) => end !== null && new Date(cm.year, cm.month, day).getTime() === (end - 86400000);
+
+    const headerSummary = (start === null && end === null)
+      ? '<span class="qf-cal-empty">เลือกวันใน calendar</span>'
+      : (start === end - 86400000 || end === null)
+        ? `เลือก: <b>${new Date(start).toLocaleDateString('th-TH', {day:'numeric', month:'short'})}</b>`
+        : `ช่วง: <b>${new Date(start).toLocaleDateString('th-TH', {day:'numeric', month:'short'})}</b> – <b>${new Date(end - 86400000).toLocaleDateString('th-TH', {day:'numeric', month:'short'})}</b>`;
+
+    const matchedCount = (start === null && end === null) ? 0 : (() => {
+      let n = 0;
+      for (const [id, rec] of state.records) {
+        if (!passesCarrier(id) || !passesPreOrder(id)) continue;
+        if (passesDate(id)) n++;
+      }
+      return n;
+    })();
+
+    panel.innerHTML = `
+      <div class="qf-cal-field-row">
+        <select class="qf-cal-field">
+          <option value="createTime" ${field==='createTime'?'selected':''}>${FIELD_LABELS.createTime}</option>
+          <option value="shipByTime" ${field==='shipByTime'?'selected':''}>${FIELD_LABELS.shipByTime}</option>
+          <option value="autoCancelTime" ${field==='autoCancelTime'?'selected':''}>${FIELD_LABELS.autoCancelTime}</option>
+        </select>
+      </div>
+      <div class="qf-cal-header">
+        <button class="qf-cal-nav qf-cal-prev" aria-label="เดือนก่อน">‹</button>
+        <div class="qf-cal-title">${TH_MONTHS[cm.month]} ${cm.year + 543}</div>
+        <button class="qf-cal-nav qf-cal-next" aria-label="เดือนถัดไป">›</button>
+      </div>
+      <div class="qf-cal-grid">
+        ${TH_DOWS.map(d => `<div class="qf-cal-dow">${d}</div>`).join('')}
+        ${cells.map(c => {
+          if (c === '') return `<div class="qf-cal-cell qf-cal-empty"></div>`;
+          const k = `${cm.year}-${String(cm.month+1).padStart(2,'0')}-${String(c).padStart(2,'0')}`;
+          const cnt = counts.get(k) || 0;
+          const cls = ['qf-cal-cell'];
+          if (cnt > 0) cls.push('qf-cal-has');
+          if (isInRange(c)) cls.push('qf-cal-in-range');
+          if (isStart(c)) cls.push('qf-cal-start');
+          if (isEnd(c)) cls.push('qf-cal-end');
+          return `<div class="${cls.join(' ')}" data-day="${c}">
+            <div class="qf-cal-num">${c}</div>
+            ${cnt > 0 ? `<div class="qf-cal-count">${cnt}</div>` : ''}
+          </div>`;
+        }).join('')}
+      </div>
+      <div class="qf-cal-footer">
+        <div class="qf-cal-summary">${headerSummary}${matchedCount > 0 ? ` · <b>${matchedCount}</b> ออเดอร์` : ''}</div>
+        ${(start !== null || end !== null) ? `<button class="qf-cal-clear">ล้าง</button>` : ''}
+      </div>
+      <div class="qf-cal-hint">คลิก = วันเดียว · Shift+คลิก = ช่วง</div>
+    `;
+
+    panel.querySelector('.qf-cal-field').addEventListener('change', (e) => {
+      state.dateFilter.field = e.target.value;
+      state.dateFilter.start = null;
+      state.dateFilter.end = null;
+      renderAll();
+    });
+    panel.querySelector('.qf-cal-prev').addEventListener('click', () => {
+      const nm = cm.month - 1;
+      state.calendarMonth = nm < 0 ? {year: cm.year - 1, month: 11} : {year: cm.year, month: nm};
+      renderAdvanced();
+    });
+    panel.querySelector('.qf-cal-next').addEventListener('click', () => {
+      const nm = cm.month + 1;
+      state.calendarMonth = nm > 11 ? {year: cm.year + 1, month: 0} : {year: cm.year, month: nm};
+      renderAdvanced();
+    });
+    panel.querySelectorAll('.qf-cal-cell[data-day]').forEach(cell => {
+      cell.addEventListener('click', (e) => {
+        const day = parseInt(cell.dataset.day);
+        const ts = new Date(cm.year, cm.month, day).getTime();
+        if (e.shiftKey && state.dateFilter.start !== null) {
+          // Range select: extend
+          const start = Math.min(state.dateFilter.start, ts);
+          const end = Math.max(state.dateFilter.start + 86400000, ts + 86400000);
+          state.dateFilter.start = start;
+          state.dateFilter.end = end;
+        } else {
+          // Single day
+          state.dateFilter.start = ts;
+          state.dateFilter.end = ts + 86400000;
+        }
+        renderAll();
+      });
+    });
+    panel.querySelector('.qf-cal-clear')?.addEventListener('click', () => {
+      state.dateFilter.start = null;
+      state.dateFilter.end = null;
+      renderAll();
+    });
+  }
+
   function renderCarriers() {
     const wrap = document.getElementById('qf-carrier-chips');
     if (!wrap) return;
@@ -2414,6 +2622,7 @@
     document.getElementById('qf-count-multi').textContent  = multiCount;
     document.getElementById('qf-count-weird').textContent  = weirdCount;
     renderCarriers();
+    renderAdvanced();
     renderContent();
     const tog = document.getElementById('qf-select-toggle');
     if (tog) {

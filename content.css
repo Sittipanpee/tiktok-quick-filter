@@ -270,6 +270,171 @@ html[data-qf-theme="shopee"] .qf-result-download {
 .qf-carrier-chip.active .qf-carrier-count {
   background: rgba(254,44,85,0.15);
 }
+.qf-advanced-block {
+  border-top: 1px solid #f0f0f0;
+  padding: 8px 12px;
+}
+.qf-advanced-toggle {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  background: #fafbfc;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #6b7280;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.12s;
+}
+.qf-advanced-toggle::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.15s;
+  color: #9ca3af;
+}
+.qf-advanced-toggle.open::before {
+  transform: rotate(90deg);
+}
+.qf-advanced-toggle:hover { background: #f3f4f6; color: #fe2c55; border-color: #fe2c55; }
+.qf-advanced-panel {
+  margin-top: 8px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 10px;
+}
+.qf-cal-field-row { margin-bottom: 8px; }
+.qf-cal-field {
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 5px;
+  background: #fafbfc;
+  color: #161823;
+  cursor: pointer;
+  outline: none;
+}
+.qf-cal-field:focus { border-color: #fe2c55; }
+.qf-cal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.qf-cal-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #161823;
+  flex: 1;
+  text-align: center;
+}
+.qf-cal-nav {
+  width: 24px;
+  height: 24px;
+  background: transparent;
+  border: 1px solid #e5e7eb;
+  border-radius: 5px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  color: #6b7280;
+  line-height: 1;
+}
+.qf-cal-nav:hover { border-color: #fe2c55; color: #fe2c55; }
+.qf-cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+.qf-cal-dow {
+  font-size: 10px;
+  font-weight: 600;
+  color: #9ca3af;
+  text-align: center;
+  padding: 4px 0 2px;
+}
+.qf-cal-cell {
+  aspect-ratio: 1 / 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #d1d5db;
+  position: relative;
+  user-select: none;
+}
+.qf-cal-cell.qf-cal-empty { background: transparent; cursor: default; }
+.qf-cal-cell.qf-cal-has {
+  color: #161823;
+  cursor: pointer;
+  background: #f6f7f8;
+}
+.qf-cal-cell.qf-cal-has:hover { background: #fff0f3; color: #fe2c55; }
+.qf-cal-num { font-weight: 600; line-height: 1.1; }
+.qf-cal-count {
+  font-size: 9px;
+  color: #fe2c55;
+  font-weight: 700;
+  line-height: 1.1;
+  margin-top: 1px;
+}
+.qf-cal-cell.qf-cal-in-range { background: #fff0f3; color: #fe2c55; }
+.qf-cal-cell.qf-cal-start,
+.qf-cal-cell.qf-cal-end {
+  background: #fe2c55 !important;
+  color: #fff !important;
+}
+.qf-cal-cell.qf-cal-start .qf-cal-count,
+.qf-cal-cell.qf-cal-end .qf-cal-count { color: #fff; }
+.qf-cal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #f0f0f0;
+  font-size: 11px;
+  color: #555;
+}
+.qf-cal-summary { flex: 1; }
+.qf-cal-summary b { color: #161823; font-weight: 700; }
+.qf-cal-empty { color: #9ca3af; font-style: italic; font-weight: 400; }
+.qf-cal-clear {
+  padding: 4px 10px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #6b7280;
+  cursor: pointer;
+}
+.qf-cal-clear:hover { background: #f3f4f6; color: #fe2c55; border-color: #fe2c55; }
+.qf-cal-hint {
+  font-size: 10px;
+  color: #9ca3af;
+  margin-top: 4px;
+  text-align: center;
+}
+html[data-qf-theme="shopee"] .qf-cal-cell.qf-cal-has:hover {
+  background: #fff5f0; color: #ee4d2d;
+}
+html[data-qf-theme="shopee"] .qf-cal-cell.qf-cal-in-range {
+  background: #fff5f0; color: #ee4d2d;
+}
+html[data-qf-theme="shopee"] .qf-cal-cell.qf-cal-start,
+html[data-qf-theme="shopee"] .qf-cal-cell.qf-cal-end {
+  background: #ee4d2d !important;
+}
+html[data-qf-theme="shopee"] .qf-cal-count,
+html[data-qf-theme="shopee"] .qf-advanced-toggle:hover {
+  color: #ee4d2d;
+}
 .qf-tip {
   font-size: 10px;
   color: #aaa;
