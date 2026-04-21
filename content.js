@@ -211,6 +211,20 @@
   // ==================== UTIL ====================
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+  async function safeJson(resp, label = 'API') {
+    const text = await resp.text();
+    if (!text) {
+      throw new Error(`${label} ตอบกลับว่าง (HTTP ${resp.status}) — เซิร์ฟเวอร์อาจ overload หรือ session หมดอายุ`);
+    }
+    try { return JSON.parse(text); }
+    catch {
+      const preview = text.slice(0, 80).replace(/\s+/g, ' ');
+      const isHtml = /^\s*<(!doctype|html)/i.test(text);
+      const hint = isHtml ? ' — น่าจะ session หมดอายุ ลอง refresh หน้าใหม่' : '';
+      throw new Error(`${label} ตอบกลับไม่ใช่ JSON (HTTP ${resp.status}): ${preview}${hint}`);
+    }
+  }
+
   function doneKey(productId, skuId, type) {
     const base = skuId ? `${productId}:${skuId}` : productId;
     return `${type || ''}:${base}`;
@@ -1025,11 +1039,12 @@
     const COUNT = 100;
     const makeBody = (offset) => ({ ..._labelsApiBodyTemplate, offset, count: COUNT });
 
-    const first = await _origFetch.call(window, apiUrl, {
+    const firstResp = await _origFetch.call(window, apiUrl, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(makeBody(0)),
-    }).then(r => r.json());
+    });
+    const first = await safeJson(firstResp, 'Labels list');
     if (first.code !== 0) throw new Error('Labels API error: ' + (first.message || first.code));
 
     const d = first.data || {};
@@ -1045,7 +1060,7 @@
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(makeBody(off)),
-        }).then(r => r.json())
+        }).then(r => safeJson(r, 'Labels list').catch(e => ({ code: -1, _err: e.message })))
       ));
       for (const res of results) {
         if (res.code === 0) {
@@ -1791,16 +1806,8 @@
         headers: {'content-type': 'application/json'},
         body: JSON.stringify(body),
       });
-      const text = await resp.text();
-      if (!text) {
-        throw new Error(`TikTok ตอบกลับว่าง (HTTP ${resp.status}) — อาจถูก rate limit, รอสัก 30 วิแล้วลองใหม่`);
-      }
-      let data;
-      try { data = JSON.parse(text); }
-      catch (parseErr) {
-        throw new Error(`TikTok ตอบกลับไม่ใช่ JSON (HTTP ${resp.status}): ${text.slice(0, 80)}`);
-      }
-      if (data.code !== 0) throw new Error(`generate API code=${data.code} msg="${data.message || 'empty'}"`);
+      const data = await safeJson(resp, 'TikTok print');
+      if (data.code !== 0) throw new Error(`print API code=${data.code} msg="${data.message || 'empty'}"`);
       const docUrl = data.data?.doc_url;
       if (!docUrl) {
         console.warn('[QF] generate succeeded but no doc_url:', data);
