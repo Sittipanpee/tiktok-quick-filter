@@ -179,16 +179,55 @@
     localStorage.setItem(VARIANT_ALIAS_STORAGE_KEY, JSON.stringify(obj));
   }
 
-  function variantKey(productId, skuId) { return `${productId}:${skuId}`; }
+  // Platform-prefixed alias keys keep TikTok and Shopee aliases separate
+  // when the same numeric productId/skuId collides across the two platforms.
+  // Migration: existing (unprefixed) keys are read as TikTok-side legacy;
+  // all new writes are platform-prefixed. Reads on TikTok check both the
+  // prefixed form and the unprefixed legacy form, so old TikTok aliases
+  // survive. Reads on Shopee only check the prefixed form.
+  function aliasKey(productId) {
+    const p = isShopee() ? 'sp' : 'tk';
+    return `${p}:${productId}`;
+  }
+  function variantKey(productId, skuId) {
+    const p = isShopee() ? 'sp' : 'tk';
+    return `${p}:${productId}:${skuId}`;
+  }
+  function getAlias(productId) {
+    // Prefixed key wins; fall back to unprefixed legacy on TikTok only.
+    const prefixed = state.aliases.get(aliasKey(productId));
+    if (prefixed != null) return prefixed;
+    if (!isShopee()) return state.aliases.get(String(productId));
+    return undefined;
+  }
+  function setAlias(productId, value) {
+    const k = aliasKey(productId);
+    if (value) state.aliases.set(k, value);
+    else state.aliases.delete(k);
+    // Also clear legacy unprefixed entry on TikTok so it doesn't shadow
+    // the cleared prefixed one on future reads.
+    if (!isShopee()) state.aliases.delete(String(productId));
+    saveAliases();
+  }
   function getVariantInfo(productId, skuId) {
-    return state.variantAliases.get(variantKey(productId, skuId)) || null;
+    const prefixed = state.variantAliases.get(variantKey(productId, skuId));
+    if (prefixed) return prefixed;
+    if (!isShopee()) {
+      // Legacy format: `${productId}:${skuId}` without platform prefix.
+      return state.variantAliases.get(`${productId}:${skuId}`) || null;
+    }
+    return null;
   }
   function setVariantInfo(productId, skuId, partial) {
     const key = variantKey(productId, skuId);
-    const cur = state.variantAliases.get(key) || {alias: '', replace: false};
+    const cur = state.variantAliases.get(key)
+              || (!isShopee() ? state.variantAliases.get(`${productId}:${skuId}`) : null)
+              || {alias: '', replace: false};
     const next = {...cur, ...partial};
     if (!next.alias?.trim() && !next.replace) state.variantAliases.delete(key);
     else state.variantAliases.set(key, next);
+    // Clear legacy unprefixed entry on TikTok so new prefixed write wins.
+    if (!isShopee()) state.variantAliases.delete(`${productId}:${skuId}`);
     saveVariantAliases();
   }
 
@@ -1670,7 +1709,7 @@
           <div class="qf-alias-modal-section">
             <div class="qf-alias-modal-label">ชื่อย่อหลัก</div>
             <div class="qf-alias-modal-hint">ใช้กับทุกตัวเลือกที่ไม่ได้ตั้งชื่อแยก</div>
-            <input class="qf-alias-modal-product" type="text" placeholder="เช่น ครีม, แดง1, สครับ" maxlength="20" value="${escapeHtml(state.aliases.get(productId) || '')}"/>
+            <input class="qf-alias-modal-product" type="text" placeholder="เช่น ครีม, แดง1, สครับ" maxlength="20" value="${escapeHtml(getAlias(productId) || '')}"/>
           </div>
 
           <div class="qf-alias-modal-section">
@@ -1710,8 +1749,7 @@
 
     productInput.addEventListener('input', () => {
       const v = productInput.value.trim();
-      if (v) state.aliases.set(productId, v); else state.aliases.delete(productId);
-      saveAliases();
+      setAlias(productId, v);
       updatePreviews();
     });
 
@@ -1764,7 +1802,7 @@
   function buildSkuRender(s) {
     // primary = big top line (alias + qty), secondary = small bottom (variant name only)
     const v = getVariantInfo(s.productId, s.skuId);
-    const productAlias = (state.aliases.get(s.productId) || '').trim() || shortName(s.productName);
+    const productAlias = (getAlias(s.productId) || '').trim() || shortName(s.productName);
     const variantOverride = (v?.alias || '').trim();
     const variantName = variantOverride || variantDisplayName(s);
     const qty = s.quantity || 1;
@@ -1787,7 +1825,7 @@
     // Multi-SKU: "alias variant qty + alias variant qty"
     const parts = record.skuList.map(s => {
       const v = getVariantInfo(s.productId, s.skuId);
-      const productAlias = (state.aliases.get(s.productId) || '').trim() || shortName(s.productName);
+      const productAlias = (getAlias(s.productId) || '').trim() || shortName(s.productName);
       const variantOverride = (v?.alias || '').trim();
       const variantName = variantOverride || variantDisplayName(s);
       const qty = s.quantity || 1;
@@ -1933,11 +1971,11 @@
     if (item.type === 'combo') {
       const c = state.weirdCombos.get(item.sigKey);
       if (!c) return {label: 'combo', filename: 'combo'};
-      const parts = c.items.map(i => (state.aliases.get(i.productId) || '').trim() || shortName(i.productName));
+      const parts = c.items.map(i => (getAlias(i.productId) || '').trim() || shortName(i.productName));
       return {label: parts.join(' + '), filename: parts.join('+')};
     }
     const p = state.products.get(item.productId);
-    const alias = (state.aliases.get(item.productId) || '').trim();
+    const alias = (getAlias(item.productId) || '').trim();
     const baseName = alias || shortName(p?.productName);
     if (item.type === 'variant') {
       const v = p?.variants.get(item.skuId);
@@ -2394,7 +2432,7 @@
 
   async function printProductByVariants(productId, scenario, variantsList) {
     const product = state.products.get(productId);
-    const alias = (state.aliases.get(productId) || '').trim();
+    const alias = (getAlias(productId) || '').trim();
     const baseName = alias || shortName(product?.productName);
     const SUB = 200;
     const chunks = [];
@@ -2431,7 +2469,7 @@
 
   async function printProductLabels(productId, skuId, scenario) {
     const product = state.products.get(productId);
-    const alias = (state.aliases.get(productId) || '').trim();
+    const alias = (getAlias(productId) || '').trim();
     const baseName = alias || shortName(product?.productName);
 
     // Card-level click (no skuId) + product has multiple variants with data → ask split choice
@@ -2477,11 +2515,11 @@
     if (!combo) { showToast('ไม่พบ combo', 2000); return; }
     const ids = applyCarrierFilter([...combo.fulfillUnitIds]);
     const sample = combo.items
-      .map(i => `${(state.aliases.get(i.productId) || '').trim() || shortName(i.productName)} ${i.quantity}`)
+      .map(i => `${(getAlias(i.productId) || '').trim() || shortName(i.productName)} ${i.quantity}`)
       .join(' + ');
     try {
       const filenameHint = combo.items
-        .map(i => (state.aliases.get(i.productId) || '').trim() || shortName(i.productName))
+        .map(i => (getAlias(i.productId) || '').trim() || shortName(i.productName))
         .join('+');
       const ok = await printIds(ids, `ออเดอร์แปลก: ${sample}`, sample, filenameHint);
       if (ok) { markComboDone(sigKey); renderAll(); }
@@ -3284,7 +3322,7 @@
         const variantsRaw = [...p.variants.values()].map(v => ({v, c: variantCount(v)}));
         const variants = variantsRaw.filter(x => x.c > 0);
         const hasBadges = variants.length >= 1;
-        const aliasVal = labels ? (state.aliases.get(p.productId) || '') : '';
+        const aliasVal = labels ? (getAlias(p.productId) || '') : '';
         const showVariantToggle = labels && variants.length >= 1;
         card.innerHTML = `
           <img src="${p.productImageURL}" alt="" referrerpolicy="no-referrer"/>
@@ -3301,9 +3339,7 @@
           aliasInput.addEventListener('click', e => e.stopPropagation());
           aliasInput.addEventListener('change', () => {
             const v = aliasInput.value.trim();
-            if (v) state.aliases.set(p.productId, v);
-            else state.aliases.delete(p.productId);
-            saveAliases();
+            setAlias(p.productId, v);
           });
           aliasInput.addEventListener('keydown', e => {
             if (e.key === 'Enter') { aliasInput.blur(); }
@@ -3421,7 +3457,7 @@
             <div class="qf-combo-item" data-pid="${s.productId}">
               <img src="${s.productImageURL}" referrerpolicy="no-referrer" title="คลิกเพื่อตั้งชื่อย่อ + ตัวเลือก"/>
               <div class="qf-combo-qty">×${s.quantity}</div>
-              <input class="qf-combo-alias-input" type="text" placeholder="ชื่อย่อ" value="${escapeHtml((state.aliases.get(s.productId) || '').trim())}" maxlength="20"/>
+              <input class="qf-combo-alias-input" type="text" placeholder="ชื่อย่อ" value="${escapeHtml((getAlias(s.productId) || '').trim())}" maxlength="20"/>
             </div>
           `).join('');
           card.innerHTML = `
@@ -3436,8 +3472,7 @@
             inp.addEventListener('click', e => e.stopPropagation());
             inp.addEventListener('change', () => {
               const v = inp.value.trim();
-              if (v) state.aliases.set(pid, v); else state.aliases.delete(pid);
-              saveAliases();
+              setAlias(pid, v);
             });
             inp.addEventListener('keydown', e => { if (e.key === 'Enter') inp.blur(); });
             img.addEventListener('click', e => {
