@@ -2537,7 +2537,9 @@
               <div class="qf-carrier-empty">— สแกนเพื่อโหลดรายการขนส่ง —</div>
             </div>
           </div>
-          <div class="qf-tip">คลิก card → ยืนยัน → พิมพ์ฉลาก</div>
+          <div class="qf-tip">${isShopee()
+            ? 'Shopee: คลิก card → คัดลอก order IDs → paste ในช่องค้นหาของ Shopee → ใช้ปุ่มพิมพ์ของ Shopee'
+            : 'คลิก card → ยืนยัน → พิมพ์ฉลาก'}</div>
           <button id="qf-select-toggle" class="qf-select-toggle">เลือกหลายรายการ</button>
         </div>`}
         <div id="qf-tabs">
@@ -2978,7 +2980,16 @@
     const tog = document.getElementById('qf-select-toggle');
     if (tog) {
       tog.classList.toggle('active', state.selectMode);
-      tog.textContent = state.selectMode ? 'ออกจากโหมดเลือก' : 'เลือกหลายรายการ';
+      // In select mode, inline the live count so users who've scrolled far from
+      // the sticky bottom select-bar still see how many items they've picked.
+      const selCount = state.selected.size;
+      if (state.selectMode) {
+        tog.textContent = selCount > 0
+          ? `ออกจากโหมดเลือก (เลือกแล้ว ${selCount} รายการ)`
+          : 'ออกจากโหมดเลือก';
+      } else {
+        tog.textContent = 'เลือกหลายรายการ';
+      }
     }
     updateSelectionBar();
   }
@@ -3021,7 +3032,12 @@
           + (cardDone ? ' qf-done' : '')
           + (state.selectMode ? ' qf-select-mode' : '')
           + (selected ? ' qf-selected' : '');
-        card.title = p.productName;
+        // When the green-check badge is shown, explain it auto-clears at
+        // DONE_TIMEOUT_MS (30 min) — the disappearance was confusing users
+        // who thought the state was lost unexpectedly.
+        card.title = cardDone
+          ? `${p.productName}\n\nเสร็จแล้ว — จะหายอัตโนมัติใน 30 นาที (หรือคลิกเพื่อเคลียร์ทันที)`
+          : p.productName;
         const variantsRaw = [...p.variants.values()].map(v => ({v, c: variantCount(v)}));
         const variants = variantsRaw.filter(x => x.c > 0);
         const hasBadges = variants.length >= 1;
@@ -3152,6 +3168,10 @@
             + (comboDone ? ' qf-done' : '')
             + (state.selectMode ? ' qf-select-mode' : '')
             + (selected ? ' qf-selected' : '');
+          // Same 30-min auto-clear hint for combo cards.
+          if (comboDone) {
+            card.title = 'เสร็จแล้ว — จะหายอัตโนมัติใน 30 นาที (หรือคลิกเพื่อเคลียร์ทันที)';
+          }
           const itemsHtml = combo.items.map((s, idx) => `
             ${idx > 0 ? '<span class="qf-combo-plus">+</span>' : ''}
             <div class="qf-combo-item" data-pid="${s.productId}">

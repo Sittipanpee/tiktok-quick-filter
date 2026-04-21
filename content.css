@@ -96,6 +96,13 @@ html[data-qf-theme="shopee"] .qf-result-download {
   color: #ee4d2d !important;
   border-color: #ee4d2d !important;
 }
+/* Shopee: print pipeline not wired (printIds falls back to clipboard copy).
+   Hide the multi-select + print-selected affordances to avoid misleading users.
+   Card click + scan + alias edit still work — they don't trigger print on Shopee. */
+html[data-qf-theme="shopee"] #qf-select-toggle,
+html[data-qf-theme="shopee"] #qf-select-bar {
+  display: none !important;
+}
 
 #qf-widget {
   position: fixed;
@@ -218,6 +225,28 @@ html[data-qf-theme="shopee"] .qf-result-download {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+  /* Cap height at ~4 chip-rows. Past 20 carriers the chip list used to overflow
+     the widget silently — this turns the overflow into a proper scroll region
+     with a thin, theme-neutral scrollbar instead. */
+  max-height: 120px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #d0d0d0 transparent;
+  padding-right: 2px;
+}
+.qf-carrier-chips::-webkit-scrollbar {
+  width: 6px;
+}
+.qf-carrier-chips::-webkit-scrollbar-track {
+  background: transparent;
+}
+.qf-carrier-chips::-webkit-scrollbar-thumb {
+  background: #d0d0d0;
+  border-radius: 3px;
+}
+.qf-carrier-chips::-webkit-scrollbar-thumb:hover {
+  background: #b0b0b0;
 }
 .qf-carrier-empty {
   font-size: 11px;
@@ -660,7 +689,11 @@ html[data-qf-theme="shopee"] .qf-advanced-toggle:hover {
 .qf-select-toggle.active {
   background: #fe2c55;
   color: #fff;
+  /* Ring + darker hover state so the "mode is active" signal is stronger
+     than a single bg color swap — helps users mid-selection notice the mode. */
+  box-shadow: 0 0 0 2px rgba(254,44,85,0.20);
 }
+.qf-select-toggle.active:hover { background: #e02147; }
 #qf-select-bar {
   position: sticky;
   bottom: 0;
@@ -709,6 +742,14 @@ html[data-qf-theme="shopee"] .qf-advanced-toggle:hover {
 .qf-product-card.qf-select-mode,
 .qf-combo-card.qf-select-mode {
   position: relative;
+  /* Dashed outline makes it obvious every card is in "checkbox mode" and
+     clicks will not trigger print. Pairs with the ::before checkbox pseudo. */
+  outline: 1px dashed rgba(254,44,85,0.5);
+  outline-offset: 2px;
+}
+html[data-qf-theme="shopee"] .qf-product-card.qf-select-mode,
+html[data-qf-theme="shopee"] .qf-combo-card.qf-select-mode {
+  outline-color: rgba(238,77,45,0.5);
 }
 .qf-product-card.qf-select-mode::before,
 .qf-combo-card.qf-select-mode::before {
@@ -772,7 +813,10 @@ html[data-qf-theme="shopee"] .qf-advanced-toggle:hover {
 .qf-modal.qf-alias-modal {
   width: 460px !important;
   max-width: 95vw !important;
-  max-height: 85vh;
+  /* 90vh (was 85vh) — on short viewports bottom inputs in the variant list
+     were getting pushed out of reach. Header and footer are flex: 0 0 auto,
+     body is flex: 1 1 auto with min-height: 0 so only the middle scrolls. */
+  max-height: 90vh;
   display: flex !important;
   flex-direction: column;
   padding: 0 !important;
