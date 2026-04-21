@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Quick Filter for Online Sellers (TikTok + Shopee)",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "Floating widget to scan, group, and bulk-print labels on TikTok Seller Centre and Shopee Seller Centre (TH)",
   "permissions": [],
   "host_permissions": [
@@ -22,6 +22,7 @@
     },
     {
       "matches": [
+        "https://seller-th.tiktok.com/order*",
         "https://seller-th.tiktok.com/shipment/labels*",
         "https://seller.shopee.co.th/portal/sale*"
       ],

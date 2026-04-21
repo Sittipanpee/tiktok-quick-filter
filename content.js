@@ -164,33 +164,26 @@
     saveVariantAliases();
   }
 
-  // Listen for font URL + manifest version from asset-bridge (ISOLATED world)
+  // Listen for messages from asset-bridge (ISOLATED world) — handles font URL,
+  // local manifest version, and remote update check (CSP-safe in ISOLATED).
   const REPO_URL = 'https://github.com/Sittipanpee/tiktok-quick-filter';
-  const REMOTE_MANIFEST = 'https://raw.githubusercontent.com/Sittipanpee/tiktok-quick-filter/main/manifest.json';
   state.localVersion = null;
   state.remoteVersion = null;
   window.addEventListener('message', (e) => {
     if (e.source !== window) return;
-    if (e.data?.__qfAsset === 'font' && e.data.url) state.fontUrl = e.data.url;
-    if (e.data?.__qfAsset === 'manifest' && e.data.version) {
-      state.localVersion = e.data.version;
-      checkForUpdate();
+    const d = e.data;
+    if (!d?.__qfAsset) return;
+    if (d.__qfAsset === 'font' && d.url) state.fontUrl = d.url;
+    if (d.__qfAsset === 'manifest' && d.version) state.localVersion = d.version;
+    if (d.__qfAsset === 'update' && d.remoteVersion) {
+      state.remoteVersion = d.remoteVersion;
+      if (d.localVersion) state.localVersion = d.localVersion;
+      if (state.remoteVersion && state.localVersion && state.remoteVersion !== state.localVersion) {
+        renderUpdateBadge();
+      }
     }
   });
   window.postMessage({ __qfAsset: 'request_font' }, '*');
-
-  async function checkForUpdate() {
-    if (!state.localVersion) return;
-    try {
-      const r = await fetch(REMOTE_MANIFEST, { cache: 'no-store' });
-      if (!r.ok) return;
-      const m = await r.json();
-      state.remoteVersion = m.version;
-      if (m.version && m.version !== state.localVersion) {
-        renderUpdateBadge();
-      }
-    } catch (e) { /* offline / blocked → silent */ }
-  }
 
   function renderUpdateBadge() {
     const actions = document.getElementById('qf-header-actions');
