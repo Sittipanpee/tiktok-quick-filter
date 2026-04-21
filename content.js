@@ -663,6 +663,7 @@
     if (fulfillUnitId) {
       state.records.set(fulfillUnitId, {
         fulfillUnitId,
+        labelStatus: rec.labelStatus || null,
         createTime: rec.createTime || null,
         shipByTime: rec.shipByTime || null,
         autoCancelTime: rec.autoCancelTime || null,
@@ -1621,10 +1622,13 @@
   }
   // Check if record's labelStatus matches current filter — needed AFTER optimistic
   // updates flip rec.labelStatus from 30 → 50, so counts drop in "ยังไม่พิมพ์".
+  // Fallback: if labelStatus is missing (record predates 1.12.1 or normalize
+  // missed the field), assume it matches the server-side filter we scanned with.
   function passesLabelStatus(id) {
     if (state.labelStatusFilter === 'all') return true;
     const rec = state.records.get(id);
-    if (!rec) return true; // records without status info always pass
+    if (!rec) return true;
+    if (rec.labelStatus == null) return true; // unknown status → trust the scan's server filter
     const target = state.labelStatusFilter === 'printed' ? LABEL_STATUS_PRINTED : LABEL_STATUS_NOT_PRINTED;
     return rec.labelStatus === target;
   }
