@@ -1921,7 +1921,7 @@
     return { bytes, pageCount };
   }
 
-  async function printIds(ids, displayLabel, sampleText, filenameHint) {
+  async function printIds(ids, displayLabel, sampleText, filenameHint, opts = {}) {
     if (isShopee()) {
       // Copy order_ids (extracted from records) to clipboard so user can paste into Shopee's search
       const orderIds = [];
@@ -1950,7 +1950,7 @@
     if (!confirmed) return false;
 
     let chunkCount = 1;
-    if (ids.length > 200) {
+    if (!opts.forceSingleFile && ids.length > 200) {
       const choice = await showChunkChoiceModal({total: ids.length});
       if (choice === null) return false;
       chunkCount = choice;
@@ -2007,12 +2007,129 @@
     return true;
   }
 
-  async function printProductLabels(productId, skuId, scenario) {
-    const ids = collectFulfillIds(productId, skuId, scenario);
+  function showSplitChoiceModal({productName, alias, variants, totalCount}) {
+    return new Promise(resolve => {
+      const overlay = document.createElement('div');
+      overlay.className = 'qf-modal-overlay qf-split-overlay';
+      const defaultPick = variants.length > 1 ? 'per-variant' : 'merge';
+      overlay.innerHTML = `
+        <div class="qf-modal qf-split-modal" role="dialog">
+          <div class="qf-modal-title">พิมพ์ "${escapeHtml(alias || productName)}"</div>
+          <div class="qf-modal-body">
+            <div class="qf-split-sub">${variants.length} ตัวเลือก · ${totalCount} ฉลากรวม</div>
+            <div class="qf-split-options">
+              <label class="qf-split-opt">
+                <input type="radio" name="qf-split" value="merge"/>
+                <div class="qf-split-opt-body">
+                  <div class="qf-split-opt-title">รวมเป็นไฟล์เดียว</div>
+                  <div class="qf-split-opt-desc">${totalCount} ฉลากในไฟล์เดียว · เหมาะกับการพิมพ์ครั้งเดียวจบ</div>
+                </div>
+              </label>
+              <label class="qf-split-opt">
+                <input type="radio" name="qf-split" value="per-variant" ${defaultPick==='per-variant'?'checked':''}/>
+                <div class="qf-split-opt-body">
+                  <div class="qf-split-opt-title">แยกตามตัวเลือก <span class="qf-split-badge">แนะนำ</span></div>
+                  <div class="qf-split-opt-desc">${variants.length} ไฟล์ · ${variants.map(v => (v.skuName||v.sellerSkuName||v.skuId).slice(0,14)).join(', ').slice(0,80)}${variants.length > 3 ? '...' : ''}</div>
+                </div>
+              </label>
+              <label class="qf-split-opt">
+                <input type="radio" name="qf-split" value="chunked"/>
+                <div class="qf-split-opt-body">
+                  <div class="qf-split-opt-title">แยกตามจำนวน</div>
+                  <div class="qf-split-opt-desc">เลือกจำนวนไฟล์เองในหน้าจอถัดไป</div>
+                </div>
+              </label>
+            </div>
+          </div>
+          <div class="qf-modal-actions">
+            <button class="qf-btn-cancel">ยกเลิก</button>
+            <button class="qf-btn-confirm">พิมพ์เลย</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+      const cleanup = (v) => { overlay.remove(); resolve(v); };
+      overlay.querySelector('.qf-btn-cancel').onclick = () => cleanup(null);
+      overlay.querySelector('.qf-btn-confirm').onclick = () => {
+        const picked = overlay.querySelector('input[name="qf-split"]:checked')?.value;
+        cleanup(picked || defaultPick);
+      };
+      overlay.onclick = e => { if (e.target === overlay) cleanup(null); };
+      const onKey = e => { if (e.key === 'Escape') { cleanup(null); document.removeEventListener('keydown', onKey); } };
+      document.addEventListener('keydown', onKey);
+    });
+  }
+
+  async function printProductByVariants(productId, scenario, variantsList) {
     const product = state.products.get(productId);
-    const variant = skuId ? product?.variants.get(skuId) : null;
     const alias = (state.aliases.get(productId) || '').trim();
     const baseName = alias || shortName(product?.productName);
+    const SUB = 200;
+    const chunks = [];
+    for (const {v, ids} of variantsList) {
+      const variantName = (v.skuName || v.sellerSkuName || v.skuId || '').trim();
+      const label = `${baseName} · ${variantName}`;
+      const fnHint = `${baseName} ${variantName}`.trim();
+      if (ids.length <= SUB) {
+        chunks.push({ids, label, filename: `${makeBaseFilename(fnHint)}.pdf`});
+      } else {
+        const subCount = Math.ceil(ids.length / SUB);
+        const subSize = Math.ceil(ids.length / subCount);
+        for (let i = 0; i < ids.length; i += subSize) {
+          const idx = chunks.filter(c => c._v === v.skuId).length + 1;
+          chunks.push({
+            _v: v.skuId,
+            ids: ids.slice(i, i + subSize),
+            label: `${label} (${idx}/${subCount})`,
+            filename: `${makeBaseFilename(fnHint)}-ชุด${idx}-${subCount}.pdf`,
+          });
+        }
+      }
+    }
+    const totalIds = chunks.reduce((s, c) => s + c.ids.length, 0);
+    const confirmed = await showPrintConfirm({
+      title: `${product?.productName || productId}`,
+      summary: `แยก ${chunks.length} ไฟล์ตามตัวเลือก`,
+      count: totalIds,
+      sampleText: `${baseName} · ...`,
+    });
+    if (!confirmed) return false;
+    return runChunkedExport(chunks, `${alias || product?.productName} (แยกตามตัวเลือก)`);
+  }
+
+  async function printProductLabels(productId, skuId, scenario) {
+    const product = state.products.get(productId);
+    const alias = (state.aliases.get(productId) || '').trim();
+    const baseName = alias || shortName(product?.productName);
+
+    // Card-level click (no skuId) + product has multiple variants with data → ask split choice
+    if (!skuId && product) {
+      const variantsList = [...product.variants.values()]
+        .map(v => ({v, ids: collectFulfillIds(productId, v.skuId, scenario)}))
+        .filter(x => x.ids.length > 0);
+      if (variantsList.length > 1) {
+        const totalCount = variantsList.reduce((s, x) => s + x.ids.length, 0);
+        const choice = await showSplitChoiceModal({
+          productName: product.productName,
+          alias,
+          variants: variantsList.map(x => x.v),
+          totalCount,
+        });
+        if (!choice) return false;
+        if (choice === 'per-variant') {
+          return printProductByVariants(productId, scenario, variantsList);
+        }
+        // 'merge' and 'chunked' fall through; 'merge' forces single file
+        const ids = collectFulfillIds(productId, null, scenario);
+        const title = `${product.productName}`;
+        const sampleQty = scenario === 'multi' ? '2+' : '1';
+        return printIds(ids, title, `${baseName} ${sampleQty}`, baseName, { forceSingleFile: choice === 'merge' });
+      }
+    }
+
+    // Default path (variant badge click or single-variant product)
+    const ids = collectFulfillIds(productId, skuId, scenario);
+    const variant = skuId ? product?.variants.get(skuId) : null;
     const variantSuffix = variant ? ` · ${variant.skuName || variant.sellerSkuName || variant.skuId}` : '';
     const scenarioLabel = scenario === 'multi' ? '(qty > 1)' : '(qty = 1)';
     const title = `${product?.productName || productId}${variantSuffix} ${scenarioLabel}`;

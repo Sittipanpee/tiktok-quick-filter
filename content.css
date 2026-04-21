@@ -1315,6 +1315,70 @@ html[data-qf-theme="shopee"] .qf-advanced-toggle:hover {
   margin-top: 6px;
   font-weight: 600;
 }
+.qf-split-modal { width: 420px; max-width: 95vw; }
+.qf-split-sub {
+  font-size: 11px;
+  color: #6b7280;
+  margin-bottom: 10px;
+}
+.qf-split-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.qf-split-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.12s, background-color 0.12s;
+}
+.qf-split-opt:hover { background: #fafbfc; border-color: #d1d5db; }
+.qf-split-opt:has(input:checked) {
+  border-color: #fe2c55;
+  background: #fff5f7;
+}
+html[data-qf-theme="shopee"] .qf-split-opt:has(input:checked) {
+  border-color: #ee4d2d;
+  background: #fff5f0;
+}
+.qf-split-opt input[type="radio"] {
+  margin-top: 2px;
+  accent-color: #fe2c55;
+  flex-shrink: 0;
+}
+html[data-qf-theme="shopee"] .qf-split-opt input[type="radio"] {
+  accent-color: #ee4d2d;
+}
+.qf-split-opt-body { flex: 1; min-width: 0; }
+.qf-split-opt-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #161823;
+  margin-bottom: 2px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.qf-split-opt-desc {
+  font-size: 11px;
+  color: #6b7280;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.qf-split-badge {
+  background: #fe2c55;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 6px;
+  letter-spacing: 0.3px;
+}
+html[data-qf-theme="shopee"] .qf-split-badge { background: #ee4d2d; }
 .qf-chunk-modal { width: 420px; }
 .qf-chunk-summary {
   font-size: 13px;
