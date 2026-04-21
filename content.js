@@ -1696,8 +1696,39 @@
   }
 
   async function printSelected() {
-    const items = [...state.selected.values()];
-    if (!items.length) { showToast('ยังไม่ได้เลือกอะไร', 1500); return; }
+    const rawItems = [...state.selected.values()];
+    if (!rawItems.length) { showToast('ยังไม่ได้เลือกอะไร', 1500); return; }
+
+    // Auto-expand product-level selections into per-variant items so each
+    // variant gets its own PDF (1 variant = 1 PDF rule).
+    const items = [];
+    for (const it of rawItems) {
+      if (it.type === 'product') {
+        const product = state.products.get(it.productId);
+        if (!product) continue;
+        const variants = [...product.variants.values()]
+          .map(v => ({v, ids: collectFulfillIds(it.productId, v.skuId, it.scenario)}))
+          .filter(x => x.ids.length > 0);
+        if (variants.length === 0) continue;
+        if (variants.length === 1) {
+          items.push(it); // product has 1 variant — keep as product-level
+        } else {
+          // Expand into per-variant items
+          for (const {v} of variants) {
+            items.push({
+              type: 'variant',
+              productId: it.productId,
+              skuId: v.skuId,
+              scenario: it.scenario,
+            });
+          }
+        }
+      } else {
+        items.push(it); // variant or combo — pass through
+      }
+    }
+
+    if (!items.length) { showToast('รายการที่เลือกไม่มีฉลาก', 2000); return; }
 
     // Build per-item chunks (1 file each = no mixing across products).
     // If a single item has >200 IDs, split it into N sub-chunks of <=200 each.
@@ -1732,8 +1763,8 @@
       + (chunks.length > 3 ? ` +อีก ${chunks.length - 3}` : '');
 
     const confirmed = await showPrintConfirm({
-      title: `พิมพ์ ${chunks.length} ไฟล์ (1 ไฟล์/รายการ)`,
-      summary: 'แยกไฟล์ตามสินค้า — ไม่ปนกัน',
+      title: `พิมพ์ ${chunks.length} ไฟล์`,
+      summary: `แยก 1 ไฟล์ต่อตัวเลือก (sub-chunk ถ้า >${SUB_CHUNK_THRESHOLD} ใบ)`,
       count: totalIds,
       sampleText: sample,
     });
@@ -1749,12 +1780,20 @@
     try {
       const ok = await runChunkedExport(exportChunks, `พิมพ์รวม ${chunks.length} ไฟล์`);
       if (ok) {
+        // Mark expanded items (variants/combos) done
         for (const c of chunks) {
           const it = c.item;
           if (it.type === 'combo') markComboDone(it.sigKey);
           else {
             const type = it.scenario === 'multi' ? 'single_sku' : 'single_item';
             markDone(it.productId, it.skuId || null, type);
+          }
+        }
+        // Also mark original product-level selections done (so product card greys out)
+        for (const it of rawItems) {
+          if (it.type === 'product') {
+            const type = it.scenario === 'multi' ? 'single_sku' : 'single_item';
+            markDone(it.productId, null, type);
           }
         }
         state.selected.clear();
