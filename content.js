@@ -979,17 +979,25 @@
   }
 
   function buildShopeeSkuList(items) {
-    return items.map(it => ({
-      productId: String(it.inner_item_ext_info?.item_id || ''),
-      skuId: String(it.inner_item_ext_info?.model_id || it.inner_item_ext_info?.item_id || ''),
-      productName: it.name || '',
-      skuName: it.model_name || it.variation_name || '',
-      sellerSkuName: it.item_sku || '',
-      productImageURL: it.image
-        ? `https://down-th.img.susercontent.com/file/${it.image}_tn`
-        : '',
-      quantity: it.amount || 1,
-    })).filter(s => s.productId);
+    return items.map(it => {
+      const modelId = it.inner_item_ext_info?.model_id;
+      return {
+        productId: String(it.inner_item_ext_info?.item_id || ''),
+        // If Shopee item has no model_id (no variants), keep skuId null
+        // rather than falling back to item_id. Reusing item_id made
+        // productId === skuId and caused variant-level alias/done checks
+        // to collide with product-level. Downstream sites already tolerate
+        // a null skuId via doneKey()/variantKey() fallbacks.
+        skuId: modelId ? String(modelId) : null,
+        productName: it.name || '',
+        skuName: it.model_name || it.variation_name || '',
+        sellerSkuName: it.item_sku || '',
+        productImageURL: it.image
+          ? `https://down-th.img.susercontent.com/file/${it.image}_tn`
+          : '',
+        quantity: it.amount || 1,
+      };
+    }).filter(s => s.productId);
   }
 
   function pushShopeeRecord({fulfillUnitId, ext, items, fulfilment, batchId, pkgExt}) {
@@ -1689,7 +1697,9 @@
   function openAliasModal(productId) {
     const product = state.products.get(productId);
     if (!product) { showToast('ไม่พบสินค้า', 1500); return; }
-    const variants = [...product.variants.values()];
+    // Exclude synthetic no-variant entries (skuId=null from Shopee items
+    // without model_id) — they're not real variants.
+    const variants = [...product.variants.values()].filter(v => v.skuId != null);
 
     document.querySelectorAll('.qf-alias-modal-overlay').forEach(e => e.remove());
     const overlay = document.createElement('div');
@@ -2475,6 +2485,7 @@
     // Card-level click (no skuId) + product has multiple variants with data → ask split choice
     if (!skuId && product) {
       const variantsList = [...product.variants.values()]
+        .filter(v => v.skuId != null) // skip synthetic no-variant entry
         .map(v => ({v, ids: collectFulfillIds(productId, v.skuId, scenario)}))
         .filter(x => x.ids.length > 0);
       if (variantsList.length > 1) {
@@ -3320,7 +3331,10 @@
           ? `${p.productName}\n\nเสร็จแล้ว${labels ? ' (พิมพ์แล้วตาม filter ปัจจุบัน)' : ' — จะหายอัตโนมัติใน 30 นาที'} (หรือคลิกเพื่อเคลียร์ทันที)`
           : p.productName;
         const variantsRaw = [...p.variants.values()].map(v => ({v, c: variantCount(v)}));
-        const variants = variantsRaw.filter(x => x.c > 0);
+        // Skip the synthetic "no-variant" entry (skuId=null) that Shopee
+        // items without model_id produce — it's product-level, not a real
+        // variant, and rendering a badge for it would show "null".
+        const variants = variantsRaw.filter(x => x.c > 0 && x.v.skuId != null);
         const hasBadges = variants.length >= 1;
         const aliasVal = labels ? (getAlias(p.productId) || '') : '';
         const showVariantToggle = labels && variants.length >= 1;
