@@ -1189,10 +1189,12 @@
     overlay.className = 'qf-progress-overlay';
     const chunkRows = chunks.map((c, i) => `
       <div class="qf-chunk-row" data-i="${i}">
-        <div class="qf-chunk-row-label">${escapeHtml(c.label || `ชุด ${i+1}/${chunks.length}`)} <span class="qf-chunk-row-count">${c.count} ใบ</span></div>
+        <div class="qf-chunk-row-top">
+          <div class="qf-chunk-row-label">${escapeHtml(c.label || `ชุด ${i+1}/${chunks.length}`)} <span class="qf-chunk-row-count">${c.count} ใบ</span></div>
+          <div class="qf-chunk-row-actions"></div>
+        </div>
         <div class="qf-chunk-row-status">รอคิว</div>
         <div class="qf-chunk-row-bar"><div class="qf-chunk-row-fill"></div></div>
-        <div class="qf-chunk-row-actions"></div>
       </div>
     `).join('');
     overlay.innerHTML = `
@@ -1201,7 +1203,6 @@
         <div class="qf-chunked-sub">${totalIds} ฉลาก • ${chunks.length} ไฟล์</div>
         <div class="qf-chunked-list">${chunkRows}</div>
         <div class="qf-chunked-footer">
-          <button class="qf-btn-open-all" disabled>ดูทั้งหมด</button>
           <button class="qf-btn-download-all" disabled>ดาวน์โหลดทั้งหมด</button>
           <button class="qf-btn-close-result" style="display:none;">ปิด</button>
         </div>
@@ -1210,7 +1211,6 @@
     document.body.appendChild(overlay);
     const cards = overlay.querySelectorAll('.qf-chunk-row');
     const blobUrls = {}; // chunkIdx → {url, filename}
-    const openAllBtn = overlay.querySelector('.qf-btn-open-all');
     const downloadAllBtn = overlay.querySelector('.qf-btn-download-all');
     const closeBtn = overlay.querySelector('.qf-btn-close-result');
 
@@ -1226,15 +1226,6 @@
         setTimeout(() => {
           const a = document.createElement('a');
           a.href = url; a.download = filename;
-          document.body.appendChild(a); a.click(); a.remove();
-        }, i * 200);
-      });
-    };
-    openAllBtn.onclick = () => {
-      Object.values(blobUrls).forEach(({url}, i) => {
-        setTimeout(() => {
-          const a = document.createElement('a');
-          a.href = url; a.target = '_blank'; a.rel = 'noopener';
           document.body.appendChild(a); a.click(); a.remove();
         }, i * 200);
       });
@@ -1279,7 +1270,6 @@
         };
         if (Object.keys(blobUrls).length > 0) {
           downloadAllBtn.disabled = false;
-          openAllBtn.disabled = false;
         }
       },
       errorChunk(i, msg) {
@@ -1666,14 +1656,31 @@
     const items = [...state.selected.values()];
     if (!items.length) { showToast('ยังไม่ได้เลือกอะไร', 1500); return; }
 
-    // Build per-item chunks (1 file each = no mixing across products)
-    const chunks = items
-      .map(it => {
-        const ids = getItemIds(it);
-        const {label, filename} = describeItem(it);
-        return {item: it, ids, label, filename};
-      })
-      .filter(c => c.ids.length > 0);
+    // Build per-item chunks (1 file each = no mixing across products).
+    // If a single item has >200 IDs, split it into N sub-chunks of <=200 each.
+    const SUB_CHUNK_THRESHOLD = 200;
+    const chunks = [];
+    for (const it of items) {
+      const ids = getItemIds(it);
+      if (!ids.length) continue;
+      const {label, filename} = describeItem(it);
+      if (ids.length <= SUB_CHUNK_THRESHOLD) {
+        chunks.push({item: it, ids, label, filename});
+      } else {
+        const subCount = Math.ceil(ids.length / SUB_CHUNK_THRESHOLD);
+        const subSize = Math.ceil(ids.length / subCount);
+        for (let i = 0; i < ids.length; i += subSize) {
+          const slice = ids.slice(i, i + subSize);
+          const idx = chunks.filter(c => c.item === it).length + 1;
+          chunks.push({
+            item: it,
+            ids: slice,
+            label: `${label} (${idx}/${subCount})`,
+            filename: `${filename}-ชุด${idx}-${subCount}`,
+          });
+        }
+      }
+    }
 
     if (!chunks.length) { showToast('รายการที่เลือกไม่มีฉลาก', 2000); return; }
 
