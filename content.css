@@ -770,14 +770,16 @@ html[data-qf-theme="shopee"] .qf-advanced-toggle:hover {
 .qf-variant-link:hover { color: #fe2c55; }
 .qf-variant-link::after { content: ' →'; opacity: 0.6; }
 .qf-modal.qf-alias-modal {
-  width: 460px;
-  max-width: 95vw;
+  width: 460px !important;
+  max-width: 95vw !important;
   max-height: 85vh;
-  display: flex;
+  display: flex !important;
   flex-direction: column;
-  padding: 0;
-  overflow: hidden;
+  padding: 0 !important;
 }
+.qf-alias-modal > .qf-alias-modal-header { flex: 0 0 auto; }
+.qf-alias-modal > .qf-alias-modal-footer { flex: 0 0 auto; }
+.qf-alias-modal > .qf-alias-modal-body { flex: 1 1 auto; min-height: 0; }
 .qf-alias-modal-header {
   display: flex;
   align-items: center;
@@ -820,8 +822,6 @@ html[data-qf-theme="shopee"] .qf-advanced-toggle:hover {
 }
 .qf-alias-modal-close:hover { color: #fe2c55; }
 .qf-alias-modal-body {
-  flex: 1 1 0;
-  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
@@ -831,8 +831,6 @@ html[data-qf-theme="shopee"] .qf-advanced-toggle:hover {
   border-bottom: 1px solid #f5f5f5;
 }
 .qf-alias-modal-section:last-child { border-bottom: none; }
-.qf-alias-modal .qf-alias-modal-header { flex: 0 0 auto; }
-.qf-alias-modal .qf-alias-modal-footer { flex: 0 0 auto; }
 .qf-alias-modal-label {
   font-size: 13px;
   font-weight: 600;
