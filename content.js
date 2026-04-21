@@ -770,9 +770,10 @@
     if (!fulfillUnitId) return;
     const skuList = buildShopeeSkuList(items);
     if (!skuList.length) return;
-    const lstatus = ext.logistics_status || 0;
-    // Shopee logistics_status values: 1 = ready to ship, 2 = arranging, 3 = shipped, 4+ = delivered/done
-    const labelStatus = lstatus >= 3 ? LABEL_STATUS_PRINTED : LABEL_STATUS_NOT_PRINTED;
+    // Shopee scan only happens on to-ship tab — every record is fair game,
+    // mark all as NOT_PRINTED so the default status filter shows them.
+    // TikTok-style label status doesn't map cleanly to Shopee's logistics_status.
+    const labelStatus = LABEL_STATUS_NOT_PRINTED;
     const sp = fulfilment || {};
     const carrierName = sp.fulfilment_channel_name || sp.masked_channel_name || 'ไม่ระบุ';
     const carrierId = String(sp.fulfilment_channel_name || ext.masked_channel_id || 'unknown');
@@ -1695,7 +1696,7 @@
               <span class="qf-modal-toggle-label">แปะลายน้ำชื่อย่อบนใบลาเบล</span>
               <span class="qf-modal-toggle-hint">ปิดถ้าอยากได้ฉลากดิบ ไม่มีตัวอักษรใต้ฉลาก</span>
             </label>
-            <div class="qf-modal-warn">⚠️ จะยิง print API ทันที — TikTok จะนับว่าฉลากถูกพิมพ์</div>
+            <div class="qf-modal-warn">ระบบจะส่งคำสั่งพิมพ์ทันที TikTok จะบันทึกว่าฉลากถูกพิมพ์</div>
           </div>
           <div class="qf-modal-actions">
             <button class="qf-btn-cancel">ยกเลิก</button>
@@ -1790,7 +1791,21 @@
 
   async function printIds(ids, displayLabel, sampleText, filenameHint) {
     if (isShopee()) {
-      showToast('Shopee: พิมพ์ฉลากผ่าน extension ยังไม่รองรับ — ใช้ปุ่มของ Shopee แทน', 5000);
+      // Copy order_ids (extracted from records) to clipboard so user can paste into Shopee's search
+      const orderIds = [];
+      for (const id of ids) {
+        const rec = state.records.get(id);
+        const oid = rec?.orderIds?.[0];
+        if (oid) orderIds.push(oid);
+      }
+      const unique = [...new Set(orderIds)];
+      const text = unique.join('\n');
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast(`คัดลอก ${unique.length} order IDs แล้ว — paste ลงช่อง "ค้นหาคำสั่งซื้อ" ของ Shopee`, 5000);
+      } catch {
+        showToast(`Shopee: รวบรวม ${unique.length} IDs (clipboard ไม่ทำงาน)`, 4000);
+      }
       return false;
     }
     if (!ids.length) { showToast('ไม่พบ ID สำหรับพิมพ์ — ลองสแกนใหม่', 3000); return false; }
@@ -2129,14 +2144,14 @@
           </label>
         </div>` : `
         <div id="qf-options-row">
-          <div class="qf-filter-block">
+          ${isTikTok() ? `<div class="qf-filter-block">
             <div class="qf-filter-label">สถานะ</div>
             <div class="qf-segmented" id="qf-status-seg">
-              <button class="qf-seg-btn ${state.labelStatusFilter==='not_printed'?'active':''}" data-val="not_printed">🖨️ ยังไม่พิมพ์</button>
-              <button class="qf-seg-btn ${state.labelStatusFilter==='printed'?'active':''}" data-val="printed">✓ พิมพ์แล้ว</button>
+              <button class="qf-seg-btn ${state.labelStatusFilter==='not_printed'?'active':''}" data-val="not_printed">ยังไม่พิมพ์</button>
+              <button class="qf-seg-btn ${state.labelStatusFilter==='printed'?'active':''}" data-val="printed">พิมพ์แล้ว</button>
               <button class="qf-seg-btn ${state.labelStatusFilter==='all'?'active':''}" data-val="all">ทั้งหมด</button>
             </div>
-          </div>
+          </div>` : ''}
           <div class="qf-filter-block" id="qf-carrier-block">
             <div class="qf-filter-label">ขนส่ง <span class="qf-filter-hint">(ไม่เลือก = ทั้งหมด)</span></div>
             <div class="qf-carrier-chips" id="qf-carrier-chips">
