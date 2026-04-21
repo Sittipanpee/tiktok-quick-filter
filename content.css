@@ -270,41 +270,83 @@ html[data-qf-theme="shopee"] .qf-result-download {
 .qf-carrier-chip.active .qf-carrier-count {
   background: rgba(254,44,85,0.15);
 }
-.qf-advanced-block {
-  border-top: 1px solid #f0f0f0;
-  padding: 8px 12px;
+/* Calendar icon (in carrier filter row) */
+.qf-filter-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
 }
-.qf-advanced-toggle {
-  display: block;
-  width: 100%;
-  padding: 7px 10px;
-  background: #fafbfc;
+.qf-cal-icon {
+  position: relative;
+  width: 24px;
+  height: 24px;
+  background: transparent;
   border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  font-size: 12px;
-  font-weight: 600;
-  color: #6b7280;
+  border-radius: 5px;
   cursor: pointer;
-  text-align: left;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
   transition: all 0.12s;
 }
-.qf-advanced-toggle::before {
-  content: '▸';
-  display: inline-block;
-  margin-right: 6px;
-  transition: transform 0.15s;
-  color: #9ca3af;
+.qf-cal-icon:hover { border-color: #fe2c55; background: #fff0f3; }
+.qf-cal-icon.active { border-color: #fe2c55; background: #fff0f3; }
+.qf-cal-icon-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+  background: #fe2c55;
+  border-radius: 50%;
+  border: 1px solid #fff;
 }
-.qf-advanced-toggle.open::before {
-  transform: rotate(90deg);
+html[data-qf-theme="shopee"] .qf-cal-icon.active,
+html[data-qf-theme="shopee"] .qf-cal-icon:hover {
+  border-color: #ee4d2d;
+  background: #fff5f0;
 }
-.qf-advanced-toggle:hover { background: #f3f4f6; color: #fe2c55; border-color: #fe2c55; }
-.qf-advanced-panel {
-  margin-top: 8px;
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  padding: 10px;
+html[data-qf-theme="shopee"] .qf-cal-icon-dot { background: #ee4d2d; }
+
+/* Calendar modal */
+.qf-cal-modal {
+  width: 380px;
+  max-width: 95vw;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+.qf-cal-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid #f0f0f0;
+}
+.qf-cal-modal-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #161823;
+}
+.qf-cal-modal-close {
+  background: none;
+  border: none;
+  font-size: 22px;
+  color: #888;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  transition: background-color 0.12s;
+}
+.qf-cal-modal-close:hover { background: rgba(0,0,0,0.06); color: #161823; }
+.qf-cal-modal-body {
+  padding: 14px 18px 18px;
+  overflow-y: auto;
 }
 .qf-cal-field-row { margin-bottom: 8px; }
 .qf-cal-field {

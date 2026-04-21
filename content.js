@@ -2261,6 +2261,14 @@
         </div>` : `
         <div id="qf-options-row">
           ${isTikTok() ? `<div class="qf-filter-block">
+            <div class="qf-filter-label">ประเภทออเดอร์</div>
+            <div class="qf-segmented" id="qf-preorder-seg">
+              <button class="qf-seg-btn ${state.preOrderFilter==='all'?'active':''}" data-val="all">ทั้งหมด</button>
+              <button class="qf-seg-btn ${state.preOrderFilter==='normal'?'active':''}" data-val="normal">ปกติ</button>
+              <button class="qf-seg-btn ${state.preOrderFilter==='preorder'?'active':''}" data-val="preorder">พรีออเดอร์</button>
+            </div>
+          </div>` : ''}
+          ${isTikTok() ? `<div class="qf-filter-block">
             <div class="qf-filter-label">สถานะ</div>
             <div class="qf-segmented" id="qf-status-seg">
               <button class="qf-seg-btn ${state.labelStatusFilter==='not_printed'?'active':''}" data-val="not_printed">ยังไม่พิมพ์</button>
@@ -2269,24 +2277,14 @@
             </div>
           </div>` : ''}
           <div class="qf-filter-block" id="qf-carrier-block">
-            <div class="qf-filter-label">ขนส่ง <span class="qf-filter-hint">(ไม่เลือก = ทั้งหมด)</span></div>
+            <div class="qf-filter-row-head">
+              <div class="qf-filter-label">ขนส่ง <span class="qf-filter-hint">(ไม่เลือก = ทั้งหมด)</span></div>
+              ${isTikTok() ? `<button id="qf-cal-icon" class="qf-cal-icon" title="กรองตามวัน">📅<span id="qf-cal-icon-dot" class="qf-cal-icon-dot" style="display:none;"></span></button>` : ''}
+            </div>
             <div class="qf-carrier-chips" id="qf-carrier-chips">
               <div class="qf-carrier-empty">— สแกนเพื่อโหลดรายการขนส่ง —</div>
             </div>
           </div>
-          ${isTikTok() ? `
-          <div class="qf-filter-block">
-            <div class="qf-filter-label">ประเภทออเดอร์</div>
-            <div class="qf-segmented" id="qf-preorder-seg">
-              <button class="qf-seg-btn ${state.preOrderFilter==='all'?'active':''}" data-val="all">ทั้งหมด</button>
-              <button class="qf-seg-btn ${state.preOrderFilter==='normal'?'active':''}" data-val="normal">ปกติ</button>
-              <button class="qf-seg-btn ${state.preOrderFilter==='preorder'?'active':''}" data-val="preorder">พรีออเดอร์</button>
-            </div>
-          </div>` : ''}
-          ${isTikTok() ? `<div class="qf-advanced-block">
-            <button id="qf-advanced-toggle" class="qf-advanced-toggle">โหมดขั้นสูง · กรองตามวัน</button>
-            <div id="qf-advanced-panel" class="qf-advanced-panel" style="display:none;"></div>
-          </div>` : ''}
           <div class="qf-tip">คลิก card → ยืนยัน → พิมพ์ฉลาก</div>
           <button id="qf-select-toggle" class="qf-select-toggle">เลือกหลายรายการ</button>
         </div>`}
@@ -2328,12 +2326,8 @@
     document.getElementById('qf-select-toggle')?.addEventListener('click', () => {
       setSelectMode(!state.selectMode);
     });
-    document.getElementById('qf-advanced-toggle')?.addEventListener('click', () => {
-      state.advancedOpen = !state.advancedOpen;
-      const tog = document.getElementById('qf-advanced-toggle');
-      tog.classList.toggle('open', state.advancedOpen);
-      tog.textContent = (state.advancedOpen ? 'ปิด' : 'โหมด') + 'ขั้นสูง · กรองตามวัน';
-      renderAdvanced();
+    document.getElementById('qf-cal-icon')?.addEventListener('click', () => {
+      openCalendarModal();
     });
     const bar = document.getElementById('qf-select-bar');
     if (bar) {
@@ -2491,12 +2485,43 @@
     return { year: d.getFullYear(), month: d.getMonth() };
   }
 
-  function renderAdvanced() {
-    const panel = document.getElementById('qf-advanced-panel');
-    if (!panel) return;
-    if (!state.advancedOpen) { panel.style.display = 'none'; return; }
-    panel.style.display = 'block';
+  function isDateFilterActive() {
+    return state.dateFilter.start !== null || state.dateFilter.end !== null;
+  }
 
+  function updateCalIconDot() {
+    const dot = document.getElementById('qf-cal-icon-dot');
+    if (dot) dot.style.display = isDateFilterActive() ? 'block' : 'none';
+    const icon = document.getElementById('qf-cal-icon');
+    if (icon) icon.classList.toggle('active', isDateFilterActive());
+  }
+
+  function openCalendarModal() {
+    document.querySelectorAll('.qf-cal-modal-overlay').forEach(e => e.remove());
+    const overlay = document.createElement('div');
+    overlay.className = 'qf-modal-overlay qf-cal-modal-overlay';
+    overlay.innerHTML = `
+      <div class="qf-modal qf-cal-modal" role="dialog">
+        <div class="qf-cal-modal-header">
+          <div class="qf-cal-modal-title">กรองตามวัน</div>
+          <button class="qf-cal-modal-close" aria-label="ปิด">×</button>
+        </div>
+        <div class="qf-cal-modal-body"></div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    renderAdvanced();
+    const cleanup = () => overlay.remove();
+    overlay.querySelector('.qf-cal-modal-close').onclick = cleanup;
+    overlay.onclick = (e) => { if (e.target === overlay) cleanup(); };
+    const onKey = (e) => { if (e.key === 'Escape') { cleanup(); document.removeEventListener('keydown', onKey); } };
+    document.addEventListener('keydown', onKey);
+  }
+
+  function renderAdvanced() {
+    // Refresh open calendar modal if present (e.g., after carrier filter change)
+    const panel = document.querySelector('.qf-cal-modal-body');
+    if (!panel) { updateCalIconDot(); return; }
     const field = state.dateFilter.field;
     const counts = buildDayCounts(field);
     const cm = getCalendarMonth();
