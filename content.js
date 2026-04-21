@@ -3332,7 +3332,7 @@
           + (state.selectMode ? ' qf-select-mode' : '')
           + (selected ? ' qf-selected' : '');
         card.title = cardDone
-          ? `${p.productName}\n\nเสร็จแล้ว${labels ? ' (พิมพ์แล้วตาม filter ปัจจุบัน)' : ' — จะหายอัตโนมัติใน 30 นาที'} (หรือคลิกเพื่อเคลียร์ทันที)`
+          ? `${p.productName}\n\nพิมพ์แล้ว — คลิกเพื่อพิมพ์ซ้ำ · Alt+คลิก เพื่อลบเครื่องหมาย ✓`
           : p.productName;
         const variantsRaw = [...p.variants.values()].map(v => ({v, c: variantCount(v)}));
         // Skip the synthetic "no-variant" entry (skuId=null) that Shopee
@@ -3397,31 +3397,36 @@
                 badge.classList.toggle('qf-selected');
                 return;
               }
-              if (isDone(p.productId, v.skuId, type)) {
+              // Alt/Option-click on a "done" badge → untag done (no print)
+              if (e.altKey && isDone(p.productId, v.skuId, type)) {
                 state.doneItems.delete(doneKey(p.productId, v.skuId, type));
                 saveDoneItems();
                 renderAll();
-              } else {
-                applyProductFilter(p.productId, v.skuId, type);
+                return;
               }
+              // Click (done or not) → print. The confirm modal gives the user
+              // a chance to cancel if they clicked a done card by mistake.
+              applyProductFilter(p.productId, v.skuId, type);
             });
             badgesEl.appendChild(badge);
           }
         }
-        card.addEventListener('click', () => {
+        card.addEventListener('click', (e) => {
           if (state.selectMode) {
             if (cardDone) return; // can't select already-printed
             toggleSelection(productItem);
             card.classList.toggle('qf-selected');
             return;
           }
-          if (cardDone) {
+          // Alt/Option-click on a "done" card → untag done (no print)
+          if (e.altKey && cardDone) {
             state.doneItems.delete(doneKey(p.productId, null, type));
             saveDoneItems();
             renderAll();
-          } else {
-            applyProductFilter(p.productId, null, type);
+            return;
           }
+          // Click (done or not) → (re)print. Confirm modal prevents accidents.
+          applyProductFilter(p.productId, null, type);
         });
         grid.appendChild(card);
       }
@@ -3468,7 +3473,7 @@
             + (state.selectMode ? ' qf-select-mode' : '')
             + (selected ? ' qf-selected' : '');
           if (comboDone) {
-            card.title = 'เสร็จแล้ว (พิมพ์แล้วตาม filter ปัจจุบัน) — หรือคลิกเพื่อเคลียร์ทันที';
+            card.title = 'พิมพ์แล้ว — คลิกเพื่อพิมพ์ซ้ำ · Alt+คลิก เพื่อลบเครื่องหมาย ✓';
           }
           const itemsHtml = combo.items.map((s, idx) => `
             ${idx > 0 ? '<span class="qf-combo-plus">+</span>' : ''}
@@ -3498,20 +3503,20 @@
               openAliasModal(pid);
             });
           });
-          card.addEventListener('click', () => {
+          card.addEventListener('click', (e) => {
             if (state.selectMode) {
               if (comboDone) return;
               toggleSelection(comboItem);
               card.classList.toggle('qf-selected');
               return;
             }
-            if (isComboDone(combo.sigKey)) {
+            if (e.altKey && isComboDone(combo.sigKey)) {
               state.doneItems.delete(comboDoneKey(combo.sigKey));
               saveDoneItems();
               renderAll();
-            } else {
-              printWeirdCombo(combo.sigKey);
+              return;
             }
+            printWeirdCombo(combo.sigKey);
           });
           grid.appendChild(card);
         }
