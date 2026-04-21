@@ -232,9 +232,15 @@
   // ==================== PAGE DETECTION ====================
   const isShopee = () => location.hostname === 'seller.shopee.co.th';
   const isTikTok = () => location.hostname === 'seller-th.tiktok.com';
+  // Shopee: every /portal/sale* page is scan-able via the same XHR-captured
+  // order/card APIs, so we treat the whole section as "labels" for routing
+  // purposes (same widget UI, same scanShopeePage flow). We also surface
+  // /portal/sale/order* as an order page so UI paths that branch on
+  // isOrderPage() don't exclude Shopee sellers.
   const isLabelsPage = () => isTikTok() && /\/shipment\/labels/.test(location.pathname)
                             || isShopee() && /\/portal\/sale/.test(location.pathname);
-  const isOrderPage  = () => isTikTok() && /\/order/.test(location.pathname);
+  const isOrderPage  = () => isTikTok() && /\/order/.test(location.pathname)
+                            || isShopee() && /\/portal\/sale\/order/.test(location.pathname);
 
   // ==================== UTIL ====================
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
