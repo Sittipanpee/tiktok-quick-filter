@@ -111,9 +111,21 @@
     carriers: new Map(),           // carrierId → {id, name, iconUrl, count}
     carrierOf: new Map(),          // fulfillUnitId → carrierId
     carrierFilter: new Set(),      // empty = all carriers
+    preOrderOf: new Map(),         // fulfillUnitId → boolean (true = pre-order)
+    preOrderFilter: 'all',         // 'all' | 'preorder' | 'normal'
     selectMode: false,
     selected: new Map(),           // key → {type, productId, skuId, scenario, sigKey}
+    overlayEnabled: loadOverlayPref(),
   };
+
+  const OVERLAY_PREF_KEY = 'qf_overlay_enabled_v1';
+  function loadOverlayPref() {
+    const v = localStorage.getItem(OVERLAY_PREF_KEY);
+    return v === null ? true : v === 'true';
+  }
+  function saveOverlayPref(enabled) {
+    localStorage.setItem(OVERLAY_PREF_KEY, String(!!enabled));
+  }
 
   function loadAliases() {
     try {
@@ -491,6 +503,7 @@
     state.weirdCombos.clear();
     state.carriers.clear();
     state.carrierOf.clear();
+    state.preOrderOf.clear();
 
     const statusEl = document.getElementById('qf-scan-status');
     const btn = document.getElementById('qf-scan-btn');
@@ -627,6 +640,7 @@
           quantity: s.quantity,
         })),
       });
+      state.preOrderOf.set(fulfillUnitId, !!rec.isPreOrder);
       // Track carrier
       const sp = rec.shippingProviderInfo || rec.deliveryInfo?.shippingProvider;
       const carrierId = rec.deliveryInfo?.shippingProvider?.id || sp?.name || 'unknown';
@@ -948,11 +962,15 @@
       productImageURL: s.product_image?.thumb_url_list?.[0] || s.product_image?.url_list?.[0] || '',
       quantity: s.quantity || 1,
     }));
+    // isPreOrder: any line marked → record is pre-order
+    const olm = rec.order_label_module || [];
+    const isPreOrder = olm.some(o => o.isPreOrder === 1 || o.is_pre_order === 1);
     return {
       fulfillUnitId: rec.fulfill_unit_id || lm.fulfill_unit_id,
       batchId: lm.batch_id,
       orderIds: lm.order_ids || rec.order_ids,
       labelStatus: lm.label_status,
+      isPreOrder,
       skuList,
       shippingProviderInfo: {
         name: sp.name,
@@ -1485,9 +1503,17 @@
     return await pdfDoc.save();
   }
 
+  function passesPreOrder(id) {
+    if (state.preOrderFilter === 'all') return true;
+    const isPre = !!state.preOrderOf.get(id);
+    return state.preOrderFilter === 'preorder' ? isPre : !isPre;
+  }
+  function passesCarrier(id) {
+    if (state.carrierFilter.size === 0) return true;
+    return state.carrierFilter.has(state.carrierOf.get(id));
+  }
   function applyCarrierFilter(ids) {
-    if (state.carrierFilter.size === 0) return ids;
-    return ids.filter(id => state.carrierFilter.has(state.carrierOf.get(id)));
+    return ids.filter(id => passesCarrier(id) && passesPreOrder(id));
   }
 
   // ==================== MULTI-SELECT ====================
@@ -1631,10 +1657,10 @@
 
   function carrierFilteredSize(idSet) {
     if (!idSet) return 0;
-    if (state.carrierFilter.size === 0) return idSet.size;
+    if (state.carrierFilter.size === 0 && state.preOrderFilter === 'all') return idSet.size;
     let n = 0;
     for (const id of idSet) {
-      if (state.carrierFilter.has(state.carrierOf.get(id))) n++;
+      if (passesCarrier(id) && passesPreOrder(id)) n++;
     }
     return n;
   }
@@ -1662,6 +1688,7 @@
     return new Promise(resolve => {
       const overlay = document.createElement('div');
       overlay.className = 'qf-modal-overlay';
+      const overlayChecked = state.overlayEnabled ? 'checked' : '';
       overlay.innerHTML = `
         <div class="qf-modal" role="dialog">
           <div class="qf-modal-title">ยืนยันพิมพ์</div>
@@ -1670,6 +1697,11 @@
             ${summary ? `<div class="qf-modal-summary">${escapeHtml(summary)}</div>` : ''}
             <div class="qf-modal-count">${count} ฉลาก</div>
             ${sampleText ? `<div class="qf-modal-sample">ลายน้ำตัวอย่าง: <b>${escapeHtml(sampleText)}</b></div>` : ''}
+            <label class="qf-modal-toggle">
+              <input type="checkbox" class="qf-overlay-toggle" ${overlayChecked}/>
+              <span class="qf-modal-toggle-label">แปะลายน้ำชื่อย่อบนใบลาเบล</span>
+              <span class="qf-modal-toggle-hint">ปิดถ้าอยากได้ฉลากดิบ ไม่มีตัวอักษรใต้ฉลาก</span>
+            </label>
             <div class="qf-modal-warn">⚠️ จะยิง print API ทันที — TikTok จะนับว่าฉลากถูกพิมพ์</div>
           </div>
           <div class="qf-modal-actions">
@@ -1679,6 +1711,11 @@
         </div>
       `;
       document.body.appendChild(overlay);
+      const overlayCheck = overlay.querySelector('.qf-overlay-toggle');
+      overlayCheck.addEventListener('change', () => {
+        state.overlayEnabled = overlayCheck.checked;
+        saveOverlayPref(state.overlayEnabled);
+      });
       const cleanup = (val) => { overlay.remove(); resolve(val); };
       overlay.querySelector('.qf-btn-cancel').onclick = () => cleanup(false);
       overlay.querySelector('.qf-btn-confirm').onclick = () => cleanup(true);
@@ -1727,14 +1764,19 @@
       update(0.20, 'ดาวน์โหลด PDF...');
       const pdfBytes = await fetch(docUrl).then(r => r.arrayBuffer());
 
-      update(0.30, 'แปะ alias...');
       let modifiedBytes;
-      try {
-        modifiedBytes = await overlayAliasOnPdf(pdfBytes, batch, (cur, totPages) => {
-          update(0.30 + 0.55 * (cur / totPages), `แปะ alias ${cur}/${totPages} หน้า`);
-        });
-      } catch (e) {
-        console.warn('[QF] overlay failed, using original:', e);
+      if (state.overlayEnabled) {
+        update(0.30, 'แปะ alias...');
+        try {
+          modifiedBytes = await overlayAliasOnPdf(pdfBytes, batch, (cur, totPages) => {
+            update(0.30 + 0.55 * (cur / totPages), `แปะ alias ${cur}/${totPages} หน้า`);
+          });
+        } catch (e) {
+          console.warn('[QF] overlay failed, using original:', e);
+          modifiedBytes = pdfBytes;
+        }
+      } else {
+        update(0.85, 'ข้ามการแปะ alias (ปิดอยู่)');
         modifiedBytes = pdfBytes;
       }
 
@@ -2108,6 +2150,15 @@
               <div class="qf-carrier-empty">— สแกนเพื่อโหลดรายการขนส่ง —</div>
             </div>
           </div>
+          ${isTikTok() ? `
+          <div class="qf-filter-block">
+            <div class="qf-filter-label">ประเภทออเดอร์</div>
+            <div class="qf-segmented" id="qf-preorder-seg">
+              <button class="qf-seg-btn ${state.preOrderFilter==='all'?'active':''}" data-val="all">ทั้งหมด</button>
+              <button class="qf-seg-btn ${state.preOrderFilter==='normal'?'active':''}" data-val="normal">ปกติ</button>
+              <button class="qf-seg-btn ${state.preOrderFilter==='preorder'?'active':''}" data-val="preorder">พรีออเดอร์</button>
+            </div>
+          </div>` : ''}
           <div class="qf-tip">คลิก card → ยืนยัน → พิมพ์ฉลาก</div>
           <button id="qf-select-toggle" class="qf-select-toggle">เลือกหลายรายการ</button>
         </div>`}
@@ -2170,6 +2221,17 @@
           showToast('กำลังสแกนใหม่ตามสถานะใหม่...', 2000);
           scanAllPages();
         }
+      });
+    });
+    document.querySelectorAll('#qf-preorder-seg .qf-seg-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const val = btn.dataset.val;
+        if (state.preOrderFilter === val) return;
+        state.preOrderFilter = val;
+        document.querySelectorAll('#qf-preorder-seg .qf-seg-btn').forEach(b => {
+          b.classList.toggle('active', b.dataset.val === val);
+        });
+        renderAll();
       });
     });
     document.querySelectorAll('.qf-tab').forEach(tab => {
