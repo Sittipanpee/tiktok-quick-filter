@@ -741,15 +741,26 @@
   }
 
   async function triggerShopeeApiCapture(statusEl) {
-    statusEl.textContent = 'รอจับ API จาก Shopee...';
-    // Click pagination 2 then 1 to force a fresh API call
-    const items = [...document.querySelectorAll('.shopee-react-pagination__item, [class*="pagination"] *')]
-      .filter(el => /^\d+$/.test((el.textContent||'').trim()));
-    const next = items.find(it => /^2$/.test((it.textContent||'').trim()));
-    const first = items.find(it => /^1$/.test((it.textContent||'').trim()));
+    statusEl.textContent = 'รอจับ API ตามแท็บที่กำลังดู...';
+    // Use any DOM element with a numeric pagination text — Shopee's pagination
+    // markup varies, so look for raw text-only nodes with width/height suggesting a button
+    const candidates = [...document.querySelectorAll('*')]
+      .filter(el => el.children.length === 0
+        && /^\d+$/.test((el.textContent||'').trim())
+        && el.offsetWidth > 5 && el.offsetWidth < 60
+        && el.offsetHeight > 5 && el.offsetHeight < 60);
+    const next = candidates.find(el => (el.textContent||'').trim() === '2');
+    const first = candidates.find(el => (el.textContent||'').trim() === '1');
     if (next) { next.click(); await sleep(2000); }
     if (first) { first.click(); await sleep(1500); }
     return await awaitShopeeApiReady(3000);
+  }
+
+  function resetShopeeCapture() {
+    _shopeeIndexUrl = null;
+    _shopeeIndexBody = null;
+    _shopeeCardUrl = null;
+    _shopeeCardBody = null;
   }
 
   function buildShopeeSkuList(items) {
@@ -891,10 +902,12 @@
   }
 
   async function scanShopeePage(statusEl) {
-    let ready = await awaitShopeeApiReady(3000);
-    if (!ready) ready = await triggerShopeeApiCapture(statusEl);
+    // Always re-capture the latest body so scan reflects the user's CURRENT
+    // tab (otherwise body cached from page load = wrong tab).
+    resetShopeeCapture();
+    const ready = await triggerShopeeApiCapture(statusEl);
     if (!ready) {
-      throw new Error('ไม่สามารถจับ API ของ Shopee — เปลี่ยนหน้าใน Shopee แล้วกลับมาลองอีกครั้ง');
+      throw new Error('ไม่สามารถจับ API ของ Shopee — คลิกแท็บใน Shopee แล้วกดสแกนใหม่');
     }
 
     statusEl.textContent = 'กำลังดึงออเดอร์...';
