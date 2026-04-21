@@ -2205,20 +2205,26 @@
 
   async function buildChunkPdf(ids, onProgress) {
     const { PDFDocument } = window.PDFLib;
-    const mergedDoc = await PDFDocument.create();
-    let pageCount = 0;
-    const total = ids.length;
 
+    // Split ids into API batches (max PRINT_BATCH_SIZE each)
+    const batches = [];
     for (let i = 0; i < ids.length; i += PRINT_BATCH_SIZE) {
-      const batch = ids.slice(i, i + PRINT_BATCH_SIZE);
-      const baseDone = i;
-      const batchSize = batch.length;
-      const update = (sub, label) => {
-        const pct = (baseDone + batchSize * sub) / total;
-        onProgress(pct, label);
-      };
+      batches.push(ids.slice(i, i + PRINT_BATCH_SIZE));
+    }
+    const batchCount = batches.length;
 
-      update(0.05, 'ส่งคำขอไป TikTok...');
+    // Per-batch progress [0..1]; averaged into single bar
+    const batchProgress = new Float64Array(batchCount);
+    const reportProgress = () => {
+      const avg = batchProgress.reduce((a, b) => a + b, 0) / batchCount;
+      onProgress(avg, batchCount > 1 ? `ประมวลผล ${batchCount} ชุดพร้อมกัน...` : '');
+    };
+
+    // Fire all batches in parallel — generate + download + overlay run concurrently
+    const batchResults = await Promise.all(batches.map(async (batch, bi) => {
+      const setP = (frac) => { batchProgress[bi] = frac; reportProgress(); };
+      setP(0.05);
+
       const body = {
         fulfill_unit_id_list: batch,
         content_type_list: [1, 2],
@@ -2234,13 +2240,14 @@
         headers: {'content-type': 'application/json'},
         body: JSON.stringify(body),
       });
+      if (resp.status === 429) {
+        const err = new Error('TikTok rate limit (HTTP 429) — ลองแบ่งเป็นชุดเล็กลง หรือรอสักครู่แล้วลองใหม่');
+        err.isRateLimit = true;
+        throw err;
+      }
       const data = await safeJson(resp, 'TikTok print');
       if (data.code !== 0) throw new Error(`print API code=${data.code} msg="${data.message || 'empty'}"`);
       const docUrl = data.data?.doc_url;
-      if (!docUrl) {
-        console.warn('[QF] generate succeeded but no doc_url:', data);
-        continue;
-      }
 
       // Optimistic update: server accepted the print for these IDs → mark them
       // as printed in local state so calendar / tab counts reflect reality
@@ -2252,37 +2259,45 @@
         state.printedUnitIds.add(id);
       }
 
-      update(0.20, 'ดาวน์โหลด PDF...');
+      if (!docUrl) {
+        console.warn('[QF] generate succeeded but no doc_url:', data);
+        setP(1.0);
+        return null;
+      }
+
+      setP(0.25);
       const pdfBytes = await fetch(docUrl).then(r => r.arrayBuffer());
+      setP(0.40);
 
       let modifiedBytes;
       if (state.overlayEnabled) {
-        update(0.30, 'แปะ alias...');
         try {
           modifiedBytes = await overlayAliasOnPdf(pdfBytes, batch, (cur, totPages) => {
-            update(0.30 + 0.55 * (cur / totPages), `แปะ alias ${cur}/${totPages} หน้า`);
+            batchProgress[bi] = 0.40 + 0.50 * (cur / totPages);
+            reportProgress();
           });
         } catch (e) {
           console.warn('[QF] overlay failed, using original:', e);
           modifiedBytes = pdfBytes;
         }
       } else {
-        update(0.85, 'ข้ามการแปะ alias (ปิดอยู่)');
         modifiedBytes = pdfBytes;
       }
 
-      update(0.90, 'รวมเข้า PDF...');
+      setP(1.0);
+      return modifiedBytes;
+    }));
+
+    // Merge pages in original batch order
+    const mergedDoc = await PDFDocument.create();
+    let pageCount = 0;
+    for (const modifiedBytes of batchResults) {
+      if (!modifiedBytes) continue;
       const partDoc = await PDFDocument.load(modifiedBytes);
       const indices = partDoc.getPageIndices();
       const copied = await mergedDoc.copyPages(partDoc, indices);
       copied.forEach(p => mergedDoc.addPage(p));
       pageCount += copied.length;
-
-      update(1.0, '');
-      // Small yield between batches inside the same chunk (only fires when a
-      // chunk has >500 labels → rare). Dropped from 200ms to 50ms — TikTok
-      // does not rate-limit the generate endpoint at this cadence.
-      if (i + PRINT_BATCH_SIZE < ids.length) await sleep(50);
     }
 
     const bytes = await mergedDoc.save();
@@ -2361,6 +2376,7 @@
         return true;
       } catch (e) {
         console.error('[QF] chunk', ci+1, 'failed:', e);
+        if (e.isRateLimit) showToast(e.message, 6000);
         result.errorChunk(ci, e.message);
         return false;
       }
@@ -2368,21 +2384,9 @@
 
     result.setRetryHandler(runChunk);
 
-    // Run chunks in parallel with a concurrency cap. Each chunk does
-    // generate → download PDF → overlay alias → merge — all of which spend
-    // most wall-time waiting on TikTok's print API + the CDN, so parallelism
-    // compounds well. Cap at 3 to stay friendly to TikTok's rate limits and
-    // to avoid memory spikes from multiple 500-label PDFs in flight at once.
-    const CHUNK_CONCURRENCY = Math.min(3, chunks.length);
-    let nextIndex = 0;
-    const workers = Array.from({ length: CHUNK_CONCURRENCY }, async () => {
-      while (true) {
-        const ci = nextIndex++;
-        if (ci >= chunks.length) return;
-        await runChunk(ci); // continues even on failure
-      }
-    });
-    await Promise.all(workers);
+    // Run all chunks fully in parallel — user can throttle by choosing fewer
+    // chunks; each chunk already fires its own batches in parallel internally.
+    await Promise.all(chunks.map((_, ci) => runChunk(ci)));
     result.allDone();
     return true;
   }
