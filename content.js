@@ -2265,9 +2265,19 @@
       wrap.innerHTML = '<div class="qf-carrier-empty">— สแกนเพื่อโหลดรายการขนส่ง —</div>';
       return;
     }
+    // Count per carrier respecting preOrderFilter so chip numbers match what's visible.
+    // Deliberately NOT applying carrierFilter here — otherwise unselected chips collapse to 0
+    // and user can't see how many each carrier would contribute.
+    const counts = new Map();
+    for (const [fulfillUnitId, cid] of state.carrierOf) {
+      if (!passesPreOrder(fulfillUnitId)) continue;
+      counts.set(cid, (counts.get(cid) || 0) + 1);
+    }
     wrap.innerHTML = '';
-    const carriers = [...state.carriers.values()].sort((a, b) => b.count - a.count);
+    const carriers = [...state.carriers.values()]
+      .sort((a, b) => (counts.get(b.id) || 0) - (counts.get(a.id) || 0));
     for (const c of carriers) {
+      const n = counts.get(c.id) || 0;
       const chip = document.createElement('button');
       const active = state.carrierFilter.has(c.id);
       chip.className = 'qf-carrier-chip' + (active ? ' active' : '');
@@ -2275,7 +2285,7 @@
       chip.innerHTML = `
         ${c.iconUrl ? `<img src="${c.iconUrl}" referrerpolicy="no-referrer"/>` : '<span class="qf-carrier-noicon">📦</span>'}
         <span class="qf-carrier-name">${escapeHtml(c.name)}</span>
-        <span class="qf-carrier-count">${c.count}</span>
+        <span class="qf-carrier-count">${n}</span>
       `;
       chip.addEventListener('click', () => {
         if (state.carrierFilter.has(c.id)) state.carrierFilter.delete(c.id);
