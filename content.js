@@ -330,7 +330,12 @@
   // A product/variant/combo is done iff every fulfillUnitId that's currently visible
   // (passes carrier + pre-order filter) has been printed this session OR was already
   // marked printed (labelStatus=50) by the API. Resets on scan.
+  //
+  // Under "พิมพ์แล้ว" filter, every visible item is inherently printed, so marking
+  // them as done/locked would block reprinting — which IS the point of that filter.
+  // Treat that filter as a dedicated reprint view: no done state applies.
   function isLabelsDone(idSet) {
+    if (state.labelStatusFilter === 'printed') return false;
     const visible = [...idSet].filter(id => passesCarrier(id) && passesPreOrder(id));
     if (!visible.length) return false;
     return visible.every(id => {
@@ -1956,6 +1961,36 @@
     renderAll();
   }
 
+  // Shown when user clicks a "done" card/badge/combo — choose reprint, unmark, or cancel
+  function showDoneActionModal(displayLabel) {
+    return new Promise(resolve => {
+      const overlay = document.createElement('div');
+      overlay.className = 'qf-modal-overlay';
+      overlay.innerHTML = `
+        <div class="qf-modal" role="dialog">
+          <div class="qf-modal-title">พิมพ์ไปแล้ว</div>
+          <div class="qf-modal-body">
+            <div class="qf-modal-target">${escapeHtml(displayLabel || '')}</div>
+            <div class="qf-modal-summary">คุณต้องการทำอะไร?</div>
+          </div>
+          <div class="qf-modal-actions qf-done-actions">
+            <button class="qf-btn-cancel">ยกเลิก</button>
+            <button class="qf-btn-unmark">ลบเครื่องหมาย ✓</button>
+            <button class="qf-btn-reprint">พิมพ์ซ้ำ</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+      const cleanup = v => { overlay.remove(); resolve(v); };
+      overlay.querySelector('.qf-btn-cancel').onclick = () => cleanup(null);
+      overlay.querySelector('.qf-btn-unmark').onclick = () => cleanup('unmark');
+      overlay.querySelector('.qf-btn-reprint').onclick = () => cleanup('reprint');
+      overlay.onclick = e => { if (e.target === overlay) cleanup(null); };
+      const onKey = e => { if (e.key === 'Escape') { cleanup(null); document.removeEventListener('keydown', onKey); } };
+      document.addEventListener('keydown', onKey);
+    });
+  }
+
   // Select all visible (non-done) items in the CURRENT tab, respecting filters.
   // Used by the "เลือกทั้งหมด" button inside the select bar.
   function selectAllVisible() {
@@ -3367,7 +3402,7 @@
           + (state.selectMode ? ' qf-select-mode' : '')
           + (selected ? ' qf-selected' : '');
         card.title = cardDone
-          ? `${p.productName}\n\nพิมพ์แล้ว — คลิกเพื่อพิมพ์ซ้ำ · Alt+คลิก เพื่อลบเครื่องหมาย ✓`
+          ? `${p.productName}\n\nพิมพ์แล้ว — คลิกเพื่อเลือก: พิมพ์ซ้ำ หรือ ลบเครื่องหมาย ✓`
           : p.productName;
         const variantsRaw = [...p.variants.values()].map(v => ({v, c: variantCount(v)}));
         // Skip the synthetic "no-variant" entry (skuId=null) that Shopee
@@ -3424,7 +3459,7 @@
             badge.textContent = `${displayName} (${c})`;
             const variantItem = {type: 'variant', productId: p.productId, skuId: v.skuId, scenario};
             if (state.selectMode && isSelected(variantItem)) badge.classList.add('qf-selected');
-            badge.addEventListener('click', (e) => {
+            badge.addEventListener('click', async (e) => {
               e.stopPropagation();
               if (state.selectMode) {
                 if (badgeDone) return;
@@ -3432,35 +3467,49 @@
                 badge.classList.toggle('qf-selected');
                 return;
               }
-              // Alt/Option-click on a "done" badge → untag done (no print)
-              if (e.altKey && isDone(p.productId, v.skuId, type)) {
-                state.doneItems.delete(doneKey(p.productId, v.skuId, type));
-                saveDoneItems();
-                renderAll();
+              if (badgeDone) {
+                const label = `${p.productName} · ${v.skuName || v.sellerSkuName || v.skuId}`;
+                const choice = await showDoneActionModal(label);
+                if (choice === 'unmark') {
+                  if (labels) {
+                    for (const id of v[idsKey] || []) state.printedUnitIds.delete(id);
+                  } else {
+                    state.doneItems.delete(doneKey(p.productId, v.skuId, type));
+                    saveDoneItems();
+                  }
+                  renderAll();
+                } else if (choice === 'reprint') {
+                  applyProductFilter(p.productId, v.skuId, type);
+                }
                 return;
               }
-              // Click (done or not) → print. The confirm modal gives the user
-              // a chance to cancel if they clicked a done card by mistake.
               applyProductFilter(p.productId, v.skuId, type);
             });
             badgesEl.appendChild(badge);
           }
         }
-        card.addEventListener('click', (e) => {
+        card.addEventListener('click', async (e) => {
           if (state.selectMode) {
             if (cardDone) return; // can't select already-printed
             toggleSelection(productItem);
             card.classList.toggle('qf-selected');
             return;
           }
-          // Alt/Option-click on a "done" card → untag done (no print)
-          if (e.altKey && cardDone) {
-            state.doneItems.delete(doneKey(p.productId, null, type));
-            saveDoneItems();
-            renderAll();
+          if (cardDone) {
+            const choice = await showDoneActionModal(p.productName);
+            if (choice === 'unmark') {
+              if (labels) {
+                for (const id of p[idsKey] || []) state.printedUnitIds.delete(id);
+              } else {
+                state.doneItems.delete(doneKey(p.productId, null, type));
+                saveDoneItems();
+              }
+              renderAll();
+            } else if (choice === 'reprint') {
+              applyProductFilter(p.productId, null, type);
+            }
             return;
           }
-          // Click (done or not) → (re)print. Confirm modal prevents accidents.
           applyProductFilter(p.productId, null, type);
         });
         grid.appendChild(card);
@@ -3508,7 +3557,7 @@
             + (state.selectMode ? ' qf-select-mode' : '')
             + (selected ? ' qf-selected' : '');
           if (comboDone) {
-            card.title = 'พิมพ์แล้ว — คลิกเพื่อพิมพ์ซ้ำ · Alt+คลิก เพื่อลบเครื่องหมาย ✓';
+            card.title = 'พิมพ์แล้ว — คลิกเพื่อเลือก: พิมพ์ซ้ำ หรือ ลบเครื่องหมาย ✓';
           }
           const itemsHtml = combo.items.map((s, idx) => `
             ${idx > 0 ? '<span class="qf-combo-plus">+</span>' : ''}
@@ -3538,17 +3587,24 @@
               openAliasModal(pid);
             });
           });
-          card.addEventListener('click', (e) => {
+          card.addEventListener('click', async () => {
             if (state.selectMode) {
               if (comboDone) return;
               toggleSelection(comboItem);
               card.classList.toggle('qf-selected');
               return;
             }
-            if (e.altKey && isComboDone(combo.sigKey)) {
-              state.doneItems.delete(comboDoneKey(combo.sigKey));
-              saveDoneItems();
-              renderAll();
+            if (comboDone) {
+              const label = combo.items.map(i => (state.aliases.get(i.productId) || '').trim() || shortName(i.productName)).join(' + ');
+              const choice = await showDoneActionModal(label);
+              if (choice === 'unmark') {
+                for (const id of combo.fulfillUnitIds) state.printedUnitIds.delete(id);
+                state.doneItems.delete(comboDoneKey(combo.sigKey));
+                saveDoneItems();
+                renderAll();
+              } else if (choice === 'reprint') {
+                printWeirdCombo(combo.sigKey);
+              }
               return;
             }
             printWeirdCombo(combo.sigKey);

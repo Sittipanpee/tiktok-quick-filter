@@ -1287,6 +1287,30 @@ html[data-qf-theme="shopee"] .qf-combo-card.qf-select-mode {
   color: #444;
 }
 .qf-btn-cancel:hover { background: #ddd; }
+.qf-btn-unmark {
+  background: #fff;
+  color: #555;
+  border: 1px solid #d1d5db;
+}
+.qf-btn-unmark:hover { background: #f3f4f6; }
+.qf-btn-reprint {
+  background: #fe2c55;
+  color: #fff;
+}
+.qf-btn-reprint:hover { background: #e02147; }
+html[data-qf-theme="shopee"] .qf-btn-reprint {
+  background: #ee4d2d !important;
+}
+html[data-qf-theme="shopee"] .qf-btn-reprint:hover {
+  background: #d4441f !important;
+}
+.qf-done-actions {
+  gap: 6px;
+}
+.qf-done-actions button {
+  padding: 8px 12px;
+  font-size: 12px;
+}
 .qf-btn-confirm {
   background: #fe2c55;
   color: #fff;
