@@ -142,6 +142,7 @@
     carrierFilter: new Set(),      // empty = all carriers
     preOrderOf: new Map(),         // fulfillUnitId → boolean (true = pre-order)
     preOrderFilter: 'all',         // 'all' | 'preorder' | 'normal'
+    printedUnitIds: new Set(),     // fulfillUnitId พิมพ์แล้วใน session นี้ (labels page only, clear on scan)
     selectMode: false,
     selected: new Map(),           // key → {type, productId, skuId, scenario, sigKey}
     dateFilter: { start: null, end: null, field: 'createTime' }, // field: createTime | shipByTime | autoCancelTime
@@ -274,6 +275,19 @@
     if (!ts) return false;
     if (Date.now() - ts > DONE_TIMEOUT_MS) { state.doneItems.delete(comboDoneKey(sigKey)); saveDoneItems(); return false; }
     return true;
+  }
+
+  // Labels-page done: computed per active filter, not stored as product-level timestamp.
+  // A product/variant/combo is done iff every fulfillUnitId that's currently visible
+  // (passes carrier + pre-order filter) has been printed this session OR was already
+  // marked printed (labelStatus=50) by the API. Resets on scan.
+  function isLabelsDone(idSet) {
+    const visible = [...idSet].filter(id => passesCarrier(id) && passesPreOrder(id));
+    if (!visible.length) return false;
+    return visible.every(id => {
+      if (state.printedUnitIds.has(id)) return true;
+      return state.records.get(id)?.labelStatus === LABEL_STATUS_PRINTED;
+    });
   }
 
   function simulateClick(el) {
@@ -625,6 +639,7 @@
     btn.disabled = true;
 
     if (isLabelsPage()) {
+      state.printedUnitIds.clear();
       try {
         statusEl.textContent = 'กำลังสแกน...';
         if (isShopee()) await scanShopeePage(statusEl);
@@ -2099,6 +2114,7 @@
       for (const id of batch) {
         const rec = state.records.get(id);
         if (rec) rec.labelStatus = 50;
+        state.printedUnitIds.add(id);
       }
 
       update(0.20, 'ดาวน์โหลด PDF...');
@@ -3166,18 +3182,17 @@
       const scenario = state.currentTab === 'single' ? 'single' : 'multi';
       for (const p of products) {
         const card = document.createElement('div');
-        const cardDone = isDone(p.productId, null, type);
+        const cardDone = labels
+          ? isLabelsDone(p[idsKey])
+          : isDone(p.productId, null, type);
         const productItem = {type: 'product', productId: p.productId, scenario};
         const selected = state.selectMode && isSelected(productItem);
         card.className = 'qf-product-card'
           + (cardDone ? ' qf-done' : '')
           + (state.selectMode ? ' qf-select-mode' : '')
           + (selected ? ' qf-selected' : '');
-        // When the green-check badge is shown, explain it auto-clears at
-        // DONE_TIMEOUT_MS (30 min) — the disappearance was confusing users
-        // who thought the state was lost unexpectedly.
         card.title = cardDone
-          ? `${p.productName}\n\nเสร็จแล้ว — จะหายอัตโนมัติใน 30 นาที (หรือคลิกเพื่อเคลียร์ทันที)`
+          ? `${p.productName}\n\nเสร็จแล้ว${labels ? ' (พิมพ์แล้วตาม filter ปัจจุบัน)' : ' — จะหายอัตโนมัติใน 30 นาที'} (หรือคลิกเพื่อเคลียร์ทันที)`
           : p.productName;
         const variantsRaw = [...p.variants.values()].map(v => ({v, c: variantCount(v)}));
         const variants = variantsRaw.filter(x => x.c > 0);
@@ -3217,7 +3232,9 @@
         if (hasBadges) {
           const badgesEl = card.querySelector('.qf-variant-badges');
           for (const {v, c} of variants) {
-            const badgeDone = isDone(p.productId, v.skuId, type);
+            const badgeDone = labels
+              ? isLabelsDone(v[idsKey])
+              : isDone(p.productId, v.skuId, type);
             const vInfo = labels ? getVariantInfo(p.productId, v.skuId) : null;
             const aliasOverride = (vInfo?.alias || '').trim();
             const originalName = v.skuName || v.sellerSkuName || v.skuId;
@@ -3302,16 +3319,15 @@
         grid.id = 'qf-weird-combo-grid';
         for (const combo of combos) {
           const card = document.createElement('div');
-          const comboDone = isComboDone(combo.sigKey);
+          const comboDone = isLabelsDone(combo.fulfillUnitIds);
           const comboItem = {type: 'combo', sigKey: combo.sigKey};
           const selected = state.selectMode && isSelected(comboItem);
           card.className = 'qf-combo-card'
             + (comboDone ? ' qf-done' : '')
             + (state.selectMode ? ' qf-select-mode' : '')
             + (selected ? ' qf-selected' : '');
-          // Same 30-min auto-clear hint for combo cards.
           if (comboDone) {
-            card.title = 'เสร็จแล้ว — จะหายอัตโนมัติใน 30 นาที (หรือคลิกเพื่อเคลียร์ทันที)';
+            card.title = 'เสร็จแล้ว (พิมพ์แล้วตาม filter ปัจจุบัน) — หรือคลิกเพื่อเคลียร์ทันที';
           }
           const itemsHtml = combo.items.map((s, idx) => `
             ${idx > 0 ? '<span class="qf-combo-plus">+</span>' : ''}
