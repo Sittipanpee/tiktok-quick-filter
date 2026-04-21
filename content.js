@@ -93,6 +93,15 @@
   // ==================== STATE ====================
   const ALIAS_STORAGE_KEY = 'qf_product_aliases_v1';
   const VARIANT_ALIAS_STORAGE_KEY = 'qf_variant_aliases_v1';
+  const OVERLAY_PREF_KEY = 'qf_overlay_enabled_v1';
+  function loadOverlayPref() {
+    const v = localStorage.getItem(OVERLAY_PREF_KEY);
+    return v === null ? true : v === 'true';
+  }
+  function saveOverlayPref(enabled) {
+    localStorage.setItem(OVERLAY_PREF_KEY, String(!!enabled));
+  }
+
   const state = {
     scanning: false,
     products: new Map(),
@@ -117,15 +126,6 @@
     selected: new Map(),           // key → {type, productId, skuId, scenario, sigKey}
     overlayEnabled: loadOverlayPref(),
   };
-
-  const OVERLAY_PREF_KEY = 'qf_overlay_enabled_v1';
-  function loadOverlayPref() {
-    const v = localStorage.getItem(OVERLAY_PREF_KEY);
-    return v === null ? true : v === 'true';
-  }
-  function saveOverlayPref(enabled) {
-    localStorage.setItem(OVERLAY_PREF_KEY, String(!!enabled));
-  }
 
   function loadAliases() {
     try {
