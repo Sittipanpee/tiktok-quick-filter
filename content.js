@@ -453,6 +453,17 @@
     return null;
   }
 
+  // If TikTok rejects our request because the body schema changed (missing
+  // field, invalid param, etc.), a stale template will fail every subsequent
+  // call forever until the user refreshes. Detect those message shapes so we
+  // can reset and re-learn on the next scan.
+  function isTemplateSchemaError(resp) {
+    if (!resp || resp.code === 0) return false;
+    const msg = String(resp.message || resp.msg || '').toLowerCase();
+    if (!msg) return false;
+    return /missing|required|invalid[_\s-]?param|invalid[_\s-]?argument|unknown field|unexpected field|bad request|param error|参数/.test(msg);
+  }
+
   async function fetchOrderBatch(offset) {
     // Use captured body as template (correct format) — override only pagination fields
     const body = _apiListBodyTemplate
@@ -463,7 +474,16 @@
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     });
-    return resp.json();
+    const data = await resp.json();
+    if (isTemplateSchemaError(data)) {
+      // Template is stale — wipe it so the fetch hook can capture a fresh one
+      // on the next user-triggered request. Show a toast so the user knows
+      // exactly what to do.
+      _apiListUrl = null;
+      _apiListBodyTemplate = null;
+      showToast('API schema เปลี่ยน — กดสแกนใหม่เพื่อจับใหม่', 4000);
+    }
+    return data;
   }
 
   function extractImageUrl(img) {
@@ -565,12 +585,22 @@
 
       // First batch to learn total_count
       statusEl.textContent = 'กำลังดึงออเดอร์...';
+      const hadTemplate = !!_apiListBodyTemplate;
       const first = await fetchOrderBatch(0);
       if (first.code !== 0) {
         const tplStatus = _apiListBodyTemplate
           ? `template OK (${Object.keys(_apiListBodyTemplate).length} fields)`
           : 'NO TEMPLATE — body fallback ขาดข้อมูล';
         console.error('[QF] order/list failed:', first, 'template:', _apiListBodyTemplate);
+        // If we did send a captured template and it was still rejected, the
+        // schema has likely changed. Drop the template so the next scan
+        // re-learns from TikTok's own request. (fetchOrderBatch only resets
+        // when the message matches known schema-error shapes; here we reset
+        // defensively on any non-zero code when a template was in use.)
+        if (hadTemplate) {
+          _apiListUrl = null;
+          _apiListBodyTemplate = null;
+        }
         throw new Error(`code=${first.code} msg="${first.message || 'empty'}" — ${tplStatus}`);
       }
 
@@ -1138,17 +1168,30 @@
 
   const PRINT_BATCH_SIZE = 500; // TikTok limit per generate call
 
+  // Dedupe concurrent font fetches when multiple chunks start in parallel —
+  // without this, 3 chunks would each fire a fetch for Sarabun-Bold.ttf (88KB)
+  // before any wins the race to cache it in state.fontBytes.
+  let _fontBytesPromise = null;
   async function ensureFontBytes() {
     if (state.fontBytes) return state.fontBytes;
-    if (!state.fontUrl) {
-      // Wait briefly for asset-bridge
-      const deadline = Date.now() + 2000;
-      while (!state.fontUrl && Date.now() < deadline) await sleep(100);
+    if (_fontBytesPromise) return _fontBytesPromise;
+    _fontBytesPromise = (async () => {
+      if (!state.fontUrl) {
+        // Wait briefly for asset-bridge
+        const deadline = Date.now() + 2000;
+        while (!state.fontUrl && Date.now() < deadline) await sleep(100);
+      }
+      if (!state.fontUrl) throw new Error('ไม่พบ font URL (asset-bridge ยังไม่ทำงาน)');
+      const r = await fetch(state.fontUrl);
+      state.fontBytes = await r.arrayBuffer();
+      return state.fontBytes;
+    })();
+    try {
+      return await _fontBytesPromise;
+    } catch (e) {
+      _fontBytesPromise = null; // allow retry on next call
+      throw e;
     }
-    if (!state.fontUrl) throw new Error('ไม่พบ font URL (asset-bridge ยังไม่ทำงาน)');
-    const r = await fetch(state.fontUrl);
-    state.fontBytes = await r.arrayBuffer();
-    return state.fontBytes;
   }
 
   function makeBaseFilename(hint) {
@@ -1975,7 +2018,10 @@
       pageCount += copied.length;
 
       update(1.0, '');
-      if (i + PRINT_BATCH_SIZE < ids.length) await sleep(200);
+      // Small yield between batches inside the same chunk (only fires when a
+      // chunk has >500 labels → rare). Dropped from 200ms to 50ms — TikTok
+      // does not rate-limit the generate endpoint at this cadence.
+      if (i + PRINT_BATCH_SIZE < ids.length) await sleep(50);
     }
 
     const bytes = await mergedDoc.save();
@@ -2061,9 +2107,21 @@
 
     result.setRetryHandler(runChunk);
 
-    for (let ci = 0; ci < chunks.length; ci++) {
-      await runChunk(ci); // continues even on failure
-    }
+    // Run chunks in parallel with a concurrency cap. Each chunk does
+    // generate → download PDF → overlay alias → merge — all of which spend
+    // most wall-time waiting on TikTok's print API + the CDN, so parallelism
+    // compounds well. Cap at 3 to stay friendly to TikTok's rate limits and
+    // to avoid memory spikes from multiple 500-label PDFs in flight at once.
+    const CHUNK_CONCURRENCY = Math.min(3, chunks.length);
+    let nextIndex = 0;
+    const workers = Array.from({ length: CHUNK_CONCURRENCY }, async () => {
+      while (true) {
+        const ci = nextIndex++;
+        if (ci >= chunks.length) return;
+        await runChunk(ci); // continues even on failure
+      }
+    });
+    await Promise.all(workers);
     result.allDone();
     return true;
   }
