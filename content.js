@@ -2360,6 +2360,18 @@
         document.querySelectorAll('#qf-preorder-seg .qf-seg-btn').forEach(b => {
           b.classList.toggle('active', b.dataset.val === val);
         });
+        // Pre-order workflow context: ฉลากมัก print ไว้ล่วงหน้าแล้วเก็บรอวันส่ง.
+        // Default status="ยังไม่พิมพ์" จะตัดออเดอร์เหล่านั้นทิ้ง → user เห็นไม่ครบ.
+        // Auto-relax status to "ทั้งหมด" + re-scan when switching to preorder.
+        if (val === 'preorder' && state.labelStatusFilter !== 'all' && state.records.size > 0) {
+          state.labelStatusFilter = 'all';
+          document.querySelectorAll('#qf-status-seg .qf-seg-btn').forEach(b => {
+            b.classList.toggle('active', b.dataset.val === 'all');
+          });
+          showToast('โหมดพรีออเดอร์: ปรับสถานะเป็น "ทั้งหมด" + กำลังสแกนใหม่', 2500);
+          scanAllPages();
+          return;
+        }
         renderAll();
       });
     });
