@@ -72,6 +72,7 @@ and **Shopee Seller Centre** (`seller.shopee.co.th`). Detection via:
 isTikTok() // hostname check
 isShopee() // hostname check
 isLabelsPage() // true on TikTok labels OR any Shopee /portal/sale
+isOrderPage()  // true on TikTok /order OR Shopee /portal/sale/order
 ```
 
 Shopee uses the **same widget UI**, but theme swaps to orange (#ee4d2d /
@@ -83,6 +84,43 @@ content.css.
 toast pointing user to Shopee's native button. The print waybill API
 hasn't been wired yet (next iteration). Scan + group + alias + variant
 override + multi-select selection all work identically to TikTok.
+
+### Cross-platform alias isolation
+
+`localStorage.qf_product_aliases_v1` and `qf_variant_aliases_v1` are
+keyed with a platform prefix (`tk:` or `sp:`) so the same numeric
+productId/skuId on TikTok and Shopee doesn't collide. Read sites on
+TikTok fall back to the legacy unprefixed key shape, so aliases saved
+before this change continue to work (they stay on the TikTok side).
+All writes go through `setAlias()` / `setVariantInfo()` which write
+prefixed keys and clear the legacy shadow on TikTok.
+
+### Shopee record → internal shape
+
+- `pushShopeeRecord()` now accepts `pkgExt` alongside `ext` and
+  `fulfilment`, and reads `logistics_status` from any of the three to
+  drive `labelStatus` (≥ 3 → PRINTED, < 3 → NOT_PRINTED).
+- Pre-order detection inspects `order_ext_info.is_pre_order`,
+  `package_ext_info.is_pre_order`, `fulfilment_info.is_pre_order`, and
+  item-level `inner_item_ext_info.is_pre_order`. If all are absent,
+  `pushShopeeRecord` dumps the first record's key list to the console
+  once per scan (`_shopeePreOrderProbeLogged`) so the real field path
+  can be identified — **needs live verification** to pin down which
+  field Shopee actually returns.
+- `buildShopeeSkuList()` returns `skuId = null` when `model_id` is
+  absent instead of reusing `item_id`; render paths filter
+  `v.skuId != null` so the synthetic no-variant entry never shows a
+  "null" badge.
+
+### Shopee scan fallback (tab safety)
+
+When the XHR hook hasn't captured the URL/body yet (e.g. single-page
+list, no pagination clicked), `scanShopeePage` calls
+`detectShopeeActiveTab()` which reads the active tab's Thai label.
+Only when the label matches ที่ต้องจัดส่ง/รอจัดส่ง/etc. do we apply
+the hardcoded to-ship default body; otherwise scan bails with a
+"กรุณาคลิกเปลี่ยนหน้า/แท็บหนึ่งครั้ง" message so the user is never
+silently served wrong-tab data.
 
 ## Critical TikTok endpoints
 
@@ -112,11 +150,12 @@ override + multi-select selection all work identically to TikTok.
 
 Field mapping (snake_case → internal camelCase):
 - `inner_item_ext_info.item_id` → `productId`
-- `inner_item_ext_info.model_id` → `skuId`
+- `inner_item_ext_info.model_id` → `skuId` (null when absent — don't fall back to item_id)
 - `name` → `productName`
 - `image` (URI) → `productImageURL` (expand to `https://down-th.img.susercontent.com/file/{uri}_tn`)
 - `amount` → `quantity`
-- `order_ext_info.logistics_status` ≥ 3 → `LABEL_STATUS_PRINTED`
+- `order_ext_info.logistics_status` ≥ 3 → `LABEL_STATUS_PRINTED` (wired in `pushShopeeRecord`)
+- `*.is_pre_order` → `state.preOrderOf` — exact field TBD; see probe log (needs live verification)
 - `fulfilment_info.fulfilment_channel_name` → carrier name (ไม่มี icon URL)
 
 ### API record structure (Labels)
