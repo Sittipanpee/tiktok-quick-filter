@@ -11,6 +11,10 @@
   let _shopeeIndexBody = null;
   let _shopeeCardUrl = null;
   let _shopeeCardBody = null;
+  // One-shot probe flag: dump first Shopee record shape to console when
+  // pre-order detection fails, so the user can report the real field name.
+  // Reset per scan in scanAllPages so probing survives across scans.
+  let _shopeePreOrderProbeLogged = false;
   const _origFetch = window.fetch;
   window.fetch = async function(...args) {
     // Extract URL + body, robust to both URL-string and Request-object call shapes
@@ -633,6 +637,8 @@
     state.carriers.clear();
     state.carrierOf.clear();
     state.preOrderOf.clear();
+    // Allow one fresh Shopee pre-order probe dump per scan
+    _shopeePreOrderProbeLogged = false;
 
     const statusEl = document.getElementById('qf-scan-status');
     const btn = document.getElementById('qf-scan-btn');
@@ -941,14 +947,51 @@
     })).filter(s => s.productId);
   }
 
-  function pushShopeeRecord({fulfillUnitId, ext, items, fulfilment, batchId}) {
+  function pushShopeeRecord({fulfillUnitId, ext, items, fulfilment, batchId, pkgExt}) {
     if (!fulfillUnitId) return;
     const skuList = buildShopeeSkuList(items);
     if (!skuList.length) return;
-    // Shopee scan only happens on to-ship tab — every record is fair game,
-    // mark all as NOT_PRINTED so the default status filter shows them.
-    // TikTok-style label status doesn't map cleanly to Shopee's logistics_status.
-    const labelStatus = LABEL_STATUS_NOT_PRINTED;
+    // Map Shopee's logistics_status → TikTok-style label status.
+    // Per CLAUDE.md: logistics_status >= 3 means label already printed/shipped.
+    // `logistics_status` lives on order_ext_info per CLAUDE.md, but fall back to
+    // pkg-level + fulfilment_info in case Shopee moves it.
+    const logisticsStatus = Number(
+      ext?.logistics_status
+      ?? pkgExt?.logistics_status
+      ?? fulfilment?.logistics_status
+      ?? 0
+    );
+    const labelStatus = logisticsStatus >= 3 ? LABEL_STATUS_PRINTED : LABEL_STATUS_NOT_PRINTED;
+
+    // Pre-order detection. CLAUDE.md lists 3 possible locations; try each.
+    // If none are present (unknown schema), dump the first record shape to
+    // the console once so the user can identify the real field and we can
+    // pin it down. Guard with a module-level flag to avoid log spam.
+    const firstItem = items?.[0] || {};
+    let isPreOrder = !!(
+      ext?.is_pre_order
+      || pkgExt?.is_pre_order
+      || fulfilment?.is_pre_order
+      || firstItem.is_pre_order
+      || firstItem.inner_item_ext_info?.is_pre_order
+      || firstItem.item_ext_info?.is_pre_order
+    );
+    // TODO (needs live verification): Shopee's exact pre-order field is not
+    // documented here. If isPreOrder stays false for every record on a tab
+    // with known pre-order items, inspect the dump below and add the right
+    // path. Dump runs once per scan — cleared in scanAllPages.
+    if (!isPreOrder && !_shopeePreOrderProbeLogged && (ext || pkgExt || fulfilment)) {
+      _shopeePreOrderProbeLogged = true;
+      try {
+        console.log('[QF Shopee pre-order probe] ext keys:', Object.keys(ext || {}));
+        console.log('[QF Shopee pre-order probe] pkgExt keys:', Object.keys(pkgExt || {}));
+        console.log('[QF Shopee pre-order probe] fulfilment keys:', Object.keys(fulfilment || {}));
+        console.log('[QF Shopee pre-order probe] item keys:', Object.keys(firstItem));
+        console.log('[QF Shopee pre-order probe] inner_item_ext_info:', firstItem.inner_item_ext_info);
+        console.log('[QF Shopee pre-order probe] full ext:', ext);
+      } catch {}
+    }
+
     const sp = fulfilment || {};
     const carrierName = sp.fulfilment_channel_name || sp.masked_channel_name || 'ไม่ระบุ';
     const carrierId = String(sp.fulfilment_channel_name || ext.masked_channel_id || 'unknown');
@@ -957,6 +1000,7 @@
       batchId: String(batchId || fulfillUnitId),
       orderIds: [String(ext.order_id || '')],
       labelStatus,
+      isPreOrder,
       skuList,
       shippingProviderInfo: { name: carrierName, iconUrl: '' },
       deliveryInfo: { shippingProvider: { id: carrierId, name: carrierName, icon_url: '' } },
@@ -976,6 +1020,7 @@
         ext,
         items,
         fulfilment: pc.fulfilment_info,
+        pkgExt: pkg,
       });
       return;
     }
@@ -991,6 +1036,7 @@
         ext,
         items,
         fulfilment: oc.fulfilment_info,
+        pkgExt: pkg,
       });
       return;
     }
@@ -1007,6 +1053,7 @@
           ext,
           items,
           fulfilment: pkg.fulfilment_info,
+          pkgExt: pkgInfo,
         });
       }
     }
