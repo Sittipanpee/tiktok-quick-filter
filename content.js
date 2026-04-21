@@ -901,13 +901,41 @@
     })).filter(r => r.order_id || r.package_number);
   }
 
+  // Hardcoded fallback for to-ship tab (works without any prior API capture)
+  const SHOPEE_TOSHIP_DEFAULT = {
+    indexUrl: '/api/v3/order/search_order_list_index?SPC_CDS_VER=2',
+    indexBody: {
+      order_list_tab: 300,
+      entity_type: 1,
+      pagination: { from_page_number: 1, page_number: 1, page_size: 40 },
+      filter: { fulfillment_type: 0, is_drop_off: 0, fulfillment_source: 0, action_filter: 0, shipping_priority: 0 },
+      sort: { sort_type: 2, ascending: true },
+    },
+    cardUrl: '/api/v3/order/get_order_list_card_list?SPC_CDS_VER=2',
+    cardBody: {
+      order_list_tab: 300,
+      need_count_down_desc: true,
+      order_param_list: [],
+    },
+  };
+
   async function scanShopeePage(statusEl) {
-    // Always re-capture the latest body so scan reflects the user's CURRENT
-    // tab (otherwise body cached from page load = wrong tab).
+    // Re-capture so body reflects the user's current Shopee tab/filter view.
     resetShopeeCapture();
-    const ready = await triggerShopeeApiCapture(statusEl);
-    if (!ready) {
-      throw new Error('ไม่สามารถจับ API ของ Shopee — คลิกแท็บใน Shopee แล้วกดสแกนใหม่');
+    statusEl.textContent = 'รอจับ API ตามแท็บที่กำลังดู...';
+    await triggerShopeeApiCapture(statusEl);
+
+    // If still nothing captured (no pagination on the page, or single-page list),
+    // fall back to a sensible default targeting the to-ship tab. This makes
+    // scan work even if the user just opened the page and clicked Scan.
+    if (!_shopeeIndexUrl || !_shopeeIndexBody) {
+      _shopeeIndexUrl = SHOPEE_TOSHIP_DEFAULT.indexUrl;
+      _shopeeIndexBody = SHOPEE_TOSHIP_DEFAULT.indexBody;
+      statusEl.textContent = 'ใช้ฟิลเตอร์เริ่มต้น (ที่ต้องจัดส่ง)...';
+    }
+    if (!_shopeeCardUrl || !_shopeeCardBody) {
+      _shopeeCardUrl = SHOPEE_TOSHIP_DEFAULT.cardUrl;
+      _shopeeCardBody = SHOPEE_TOSHIP_DEFAULT.cardBody;
     }
 
     statusEl.textContent = 'กำลังดึงออเดอร์...';
