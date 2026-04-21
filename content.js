@@ -102,13 +102,33 @@
     localStorage.setItem(OVERLAY_PREF_KEY, String(!!enabled));
   }
 
+  const DONE_STORAGE_KEY = 'qf_done_items_v1';
+  function loadDoneItems() {
+    try {
+      const raw = localStorage.getItem(DONE_STORAGE_KEY);
+      if (!raw) return new Map();
+      const obj = JSON.parse(raw);
+      const m = new Map();
+      const cutoff = Date.now() - (30 * 60 * 1000);
+      for (const [k, ts] of Object.entries(obj)) {
+        if (typeof ts === 'number' && ts >= cutoff) m.set(k, ts);
+      }
+      return m;
+    } catch { return new Map(); }
+  }
+  function saveDoneItems() {
+    try {
+      localStorage.setItem(DONE_STORAGE_KEY, JSON.stringify(Object.fromEntries(state.doneItems)));
+    } catch {}
+  }
+
   const state = {
     scanning: false,
     products: new Map(),
     weirdOrders: [],
     currentTab: 'single',
     autoSelectAll: true,
-    doneItems: new Map(),          // key: "type:productId:skuId" → timestamp
+    doneItems: loadDoneItems(),    // key: "type:productId:skuId" → timestamp; persisted
     labelStatusFilter: 'not_printed', // 'all' | 'not_printed' | 'printed'
     aliases: loadAliases(),        // productId → aliasText (string)
     variantAliases: loadVariantAliases(), // `${productId}:${skuId}` → {alias: string, replace: boolean}
@@ -214,14 +234,15 @@
   async function safeJson(resp, label = 'API') {
     const text = await resp.text();
     if (!text) {
-      throw new Error(`${label} ตอบกลับว่าง (HTTP ${resp.status}) — เซิร์ฟเวอร์อาจ overload หรือ session หมดอายุ`);
+      throw new Error('เซิร์ฟเวอร์ตอบไม่ทัน ลองกดลองใหม่อีกครั้ง');
     }
     try { return JSON.parse(text); }
     catch {
-      const preview = text.slice(0, 80).replace(/\s+/g, ' ');
       const isHtml = /^\s*<(!doctype|html)/i.test(text);
-      const hint = isHtml ? ' — น่าจะ session หมดอายุ ลอง refresh หน้าใหม่' : '';
-      throw new Error(`${label} ตอบกลับไม่ใช่ JSON (HTTP ${resp.status}): ${preview}${hint}`);
+      if (isHtml) {
+        throw new Error('การเชื่อมต่อสะดุด ลองกดลองใหม่ ถ้ายังไม่ได้ให้ refresh หน้านี้แล้วลองอีกครั้ง');
+      }
+      throw new Error(`เซิร์ฟเวอร์ตอบผิดรูปแบบ ลองกดลองใหม่ (${label})`);
     }
   }
 
@@ -232,22 +253,23 @@
 
   function markDone(productId, skuId, type) {
     state.doneItems.set(doneKey(productId, skuId, type), Date.now());
+    saveDoneItems();
   }
 
   function isDone(productId, skuId, type) {
     const key = doneKey(productId, skuId, type);
     const ts = state.doneItems.get(key);
     if (!ts) return false;
-    if (Date.now() - ts > DONE_TIMEOUT_MS) { state.doneItems.delete(key); return false; }
+    if (Date.now() - ts > DONE_TIMEOUT_MS) { state.doneItems.delete(key); saveDoneItems(); return false; }
     return true;
   }
 
   function comboDoneKey(sigKey) { return `combo::${sigKey}`; }
-  function markComboDone(sigKey) { state.doneItems.set(comboDoneKey(sigKey), Date.now()); }
+  function markComboDone(sigKey) { state.doneItems.set(comboDoneKey(sigKey), Date.now()); saveDoneItems(); }
   function isComboDone(sigKey) {
     const ts = state.doneItems.get(comboDoneKey(sigKey));
     if (!ts) return false;
-    if (Date.now() - ts > DONE_TIMEOUT_MS) { state.doneItems.delete(comboDoneKey(sigKey)); return false; }
+    if (Date.now() - ts > DONE_TIMEOUT_MS) { state.doneItems.delete(comboDoneKey(sigKey)); saveDoneItems(); return false; }
     return true;
   }
 
@@ -504,7 +526,7 @@
     state.scanning = true;
     state.products.clear();
     state.weirdOrders = [];
-    state.doneItems.clear();
+    // Keep doneItems across scans so "ที่พิมพ์แล้ว" markers survive page refresh
     state.records.clear();
     state.weirdFulfillUnitIds.clear();
     state.weirdCombos.clear();
@@ -2495,6 +2517,7 @@
               }
               if (isDone(p.productId, v.skuId, type)) {
                 state.doneItems.delete(doneKey(p.productId, v.skuId, type));
+                saveDoneItems();
                 renderAll();
               } else {
                 applyProductFilter(p.productId, v.skuId, type);
@@ -2512,6 +2535,7 @@
           }
           if (cardDone) {
             state.doneItems.delete(doneKey(p.productId, null, type));
+            saveDoneItems();
             renderAll();
           } else {
             applyProductFilter(p.productId, null, type);
@@ -2599,6 +2623,7 @@
             }
             if (isComboDone(combo.sigKey)) {
               state.doneItems.delete(comboDoneKey(combo.sigKey));
+              saveDoneItems();
               renderAll();
             } else {
               printWeirdCombo(combo.sigKey);
