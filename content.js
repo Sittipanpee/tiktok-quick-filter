@@ -163,7 +163,7 @@
     advancedOpen: false,
     calendarMonth: null, // {year, month} cursor for the visible month
     overlayEnabled: loadOverlayPref(),
-    workers: loadWorkers(),          // [{id, name, color}] คนแพ็ค
+    workers: loadWorkers(),          // [{id, name, icon}] คนแพ็ค
   };
 
   function loadAliases() {
@@ -190,10 +190,21 @@
     localStorage.setItem(VARIANT_ALIAS_STORAGE_KEY, JSON.stringify(obj));
   }
 
+  const WORKER_ICONS = ['★', '♥', '♦', '♣', '♠', '●', '■', '▲', '◆', '✿', '☀', '♪'];
+  const WORKER_COLOR_TO_ICON = { '#2563eb': '★', '#16a34a': '♥', '#ea580c': '♦', '#dc2626': '■', '#9333ea': '▲' };
+
   function loadWorkers() {
     try {
       const raw = localStorage.getItem(WORKERS_STORAGE_KEY);
-      return raw ? JSON.parse(raw) : [];
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      const migrated = arr.map(w => {
+        if (w.icon) return w;
+        const icon = WORKER_COLOR_TO_ICON[w.color] || '●';
+        const { color: _drop, ...rest } = w;
+        return { ...rest, icon };
+      });
+      return migrated;
     } catch { return []; }
   }
 
@@ -351,9 +362,7 @@
                 </div>
                 <div class="qf-history-meta">${e.chunks.length} ไฟล์ · ${e.totalLabels} ใบ</div>
                 ${e.workerName ? `<div class="qf-history-packer">
-                  <span class="qf-history-packer-dot" style="background:${escapeHtml(
-                    (state.workers.find(w => w.id === e.workerId) || {}).color || '#999'
-                  )};"></span>แพ็ค: ${escapeHtml(e.workerName)}</div>` : ''}
+                  <span class="qf-history-packer-icon">${escapeHtml((state.workers.find(w => w.id === e.workerId) || {}).icon || '')}</span>แพ็ค: ${escapeHtml(e.workerName)}</div>` : ''}
               </div>
               <div class="qf-history-row-actions">
                 <button class="qf-history-redownload" data-id="${escapeHtml(e.id)}">ดาวน์โหลดใหม่</button>
@@ -2241,7 +2250,7 @@
     return { mode: 'multi', text: parts.join(' + ') };
   }
 
-  async function overlayAliasOnPdf(pdfBytes, fulfillUnitIds, onProgress, workerName) {
+  async function overlayAliasOnPdf(pdfBytes, fulfillUnitIds, onProgress, workerName, workerIcon) {
     if (!window.PDFLib) return pdfBytes;
     const { PDFDocument, rgb } = window.PDFLib;
     const fontBytes = await ensureFontBytes();
@@ -2292,7 +2301,7 @@
       if (workerName) {
         const { width: pw, height: ph } = page.getSize();
         const wSize = Math.min(ph * 0.03, 14);
-        const wText = `แพ็ค: ${workerName}`;
+        const wText = workerIcon ? `แพ็ค: ${workerIcon} ${workerName}` : `แพ็ค: ${workerName}`;
         page.drawText(wText, {
           x: 6, y: ph - wSize - 4, size: wSize, font,
           color: rgb(0, 0, 0), opacity: 0.4,
@@ -2560,6 +2569,7 @@
         totalLabels: totalIds,
         workerId: confirm.workerId,
         workerName: confirm.workerName,
+        workerIcon: confirm.workerIcon,
       });
       if (ok) {
         // Mark expanded items (variants/combos) done
@@ -2647,8 +2657,8 @@
           <span class="qf-packer-label">ใครแพ็ค?</span>
           <div class="qf-packer-pills">
             ${state.workers.map(w => `
-              <button type="button" class="qf-packer-pill" data-worker-id="${escapeHtml(w.id)}" data-worker-name="${escapeHtml(w.name)}" data-worker-color="${escapeHtml(w.color)}">
-                <span class="qf-packer-pill-dot" style="background:${escapeHtml(w.color)};"></span>${escapeHtml(w.name)}
+              <button type="button" class="qf-packer-pill" data-worker-id="${escapeHtml(w.id)}" data-worker-name="${escapeHtml(w.name)}">
+                <span class="qf-packer-pill-icon">${escapeHtml(w.icon)}</span>${escapeHtml(w.name)}
               </button>
             `).join('')}
             <button type="button" class="qf-packer-pill qf-packer-pill-skip active" data-worker-id="" data-worker-name="">— ข้าม</button>
@@ -2687,35 +2697,27 @@
       if (hasWorkers) {
         overlay.querySelectorAll('.qf-packer-pill').forEach(pill => {
           pill.addEventListener('click', () => {
-            overlay.querySelectorAll('.qf-packer-pill').forEach(p => {
-              p.classList.remove('active');
-              p.style.background = '';
-              p.style.borderColor = '';
-              p.style.color = '';
-            });
+            overlay.querySelectorAll('.qf-packer-pill').forEach(p => p.classList.remove('active'));
             pill.classList.add('active');
-            const color = pill.dataset.workerColor;
-            if (color) {
-              pill.style.borderColor = color;
-              pill.style.background = color + '22';
-              pill.style.color = color;
-            }
           });
         });
       }
       const getSelectedWorker = () => {
-        if (!hasWorkers) return { workerId: null, workerName: null };
+        if (!hasWorkers) return { workerId: null, workerName: null, workerIcon: null };
         const active = overlay.querySelector('.qf-packer-pill.active');
+        const wid = active?.dataset.workerId || null;
+        const worker = wid ? state.workers.find(w => w.id === wid) : null;
         return {
-          workerId: active?.dataset.workerId || null,
+          workerId: wid,
           workerName: active?.dataset.workerName || null,
+          workerIcon: worker?.icon || null,
         };
       };
       const cleanup = (ok) => {
         overlay.remove();
         if (!ok) { resolve(false); return; }
-        const { workerId, workerName } = getSelectedWorker();
-        resolve({ ok: true, workerId: workerId || null, workerName: workerName || null });
+        const { workerId, workerName, workerIcon } = getSelectedWorker();
+        resolve({ ok: true, workerId: workerId || null, workerName: workerName || null, workerIcon: workerIcon || null });
       };
       overlay.querySelector('.qf-btn-cancel').onclick = () => cleanup(false);
       overlay.querySelector('.qf-btn-confirm').onclick = () => cleanup(true);
@@ -2725,7 +2727,7 @@
     });
   }
 
-  async function buildChunkPdf(ids, onProgress, workerName) {
+  async function buildChunkPdf(ids, onProgress, workerName, workerIcon) {
     const { PDFDocument } = window.PDFLib;
 
     // Split ids into API batches (max PRINT_BATCH_SIZE each)
@@ -2797,7 +2799,7 @@
           modifiedBytes = await overlayAliasOnPdf(pdfBytes, batch, (cur, totPages) => {
             batchProgress[bi] = 0.40 + 0.50 * (cur / totPages);
             reportProgress();
-          }, workerName);
+          }, workerName, workerIcon);
         } catch (e) {
           console.warn('[QF] overlay failed, using original:', e);
           modifiedBytes = pdfBytes;
@@ -2853,7 +2855,7 @@
       sampleText,
     });
     if (!confirm) return false;
-    const { workerId, workerName } = confirm;
+    const { workerId, workerName, workerIcon } = confirm;
 
     let chunkCount = 1;
     if (!opts.forceSingleFile && ids.length > 200) {
@@ -2881,6 +2883,7 @@
       totalLabels: ids.length,
       workerId,
       workerName,
+      workerIcon,
     });
   }
 
@@ -2889,6 +2892,7 @@
   //   historyMeta = {baseFilename, totalLabels, workerId?, workerName?} → save entry after allDone
   async function runChunkedExport(chunks, displayTitle, historyMeta) {
     const workerName = historyMeta?.workerName || null;
+    const workerIcon = historyMeta?.workerIcon || null;
     const totalIds = chunks.reduce((a, c) => a + c.ids.length, 0);
     const result = showChunkedResult({
       title: displayTitle,
@@ -2901,7 +2905,7 @@
       try {
         const { bytes, pageCount } = await buildChunkPdf(chunks[ci].ids, (pct, label) => {
           result.updateChunkProgress(ci, pct, label);
-        }, workerName);
+        }, workerName, workerIcon);
         const blob = new Blob([bytes], {type: 'application/pdf'});
         const url = URL.createObjectURL(blob);
         result.completeChunk(ci, {url, pageCount});
@@ -3348,19 +3352,19 @@
   function buildHistoryCsv(entries) {
     const q = (v) => '"' + String(v == null ? '' : v).replace(/[\r\n]+/g, ' ').replace(/"/g, '""') + '"';
     const pad = n => String(n).padStart(2, '0');
-    const header = [q('วันที่'), q('เวลา'), q('คนแพ็ค'), q('สี'), q('platform'), q('ชื่อสินค้า'), q('จำนวน'), q('fulfillUnitIds')].join(',');
+    const header = [q('วันที่'), q('เวลา'), q('คนแพ็ค'), q('ไอคอน'), q('platform'), q('ชื่อสินค้า'), q('จำนวน'), q('fulfillUnitIds')].join(',');
     const rows = entries.map(e => {
       const d = new Date(e.timestamp);
       const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
       const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
       const worker = state.workers.find(w => w.id === e.workerId);
       const workerName = e.workerName || '';
-      const workerColor = worker ? worker.color : '';
+      const workerIcon = worker ? worker.icon : '';
       const platform = e.platform || 'tiktok';
       const title = e.title || '';
       const totalLabels = e.totalLabels != null ? e.totalLabels : '';
       const ids = e.chunks.flatMap(c => c.ids).join(';');
-      return [q(date), q(time), q(workerName), q(workerColor), q(platform), q(title), q(totalLabels), q(ids)].join(',');
+      return [q(date), q(time), q(workerName), q(workerIcon), q(platform), q(title), q(totalLabels), q(ids)].join(',');
     });
     return '\ufeff' + [header, ...rows].join('\r\n');
   }
@@ -3452,21 +3456,13 @@
   }
 
   // ==================== WORKERS MODAL ====================
-  const WORKER_COLORS = [
-    { hex: '#2563eb', label: 'น้ำเงิน' },
-    { hex: '#16a34a', label: 'เขียว' },
-    { hex: '#ea580c', label: 'ส้ม' },
-    { hex: '#dc2626', label: 'แดง' },
-    { hex: '#9333ea', label: 'ม่วง' },
-  ];
-
   function openWorkersModal() {
     document.querySelectorAll('.qf-workers-overlay').forEach(e => e.remove());
     const overlay = document.createElement('div');
     overlay.className = 'qf-modal-overlay qf-workers-overlay';
     document.body.appendChild(overlay);
 
-    function render(editingId = null, formName = '', formColor = WORKER_COLORS[0].hex) {
+    function render(editingId = null, formName = '', formIcon = WORKER_ICONS[0]) {
       overlay.innerHTML = `
         <div class="qf-modal qf-workers-modal" role="dialog">
           <div class="qf-workers-header">
@@ -3478,7 +3474,7 @@
               ? '<div class="qf-workers-empty">ยังไม่มีคนแพ็ค</div>'
               : state.workers.map(w => `
                 <div class="qf-workers-row" data-id="${escapeHtml(w.id)}">
-                  <span class="qf-worker-dot" style="background:${escapeHtml(w.color)};"></span>
+                  <span class="qf-worker-icon">${escapeHtml(w.icon)}</span>
                   <span class="qf-worker-name">${escapeHtml(w.name)}</span>
                   <button class="qf-workers-edit" data-id="${escapeHtml(w.id)}">แก้</button>
                   <button class="qf-workers-del" data-id="${escapeHtml(w.id)}">ลบ</button>
@@ -3492,11 +3488,11 @@
                 value="${escapeHtml(formName)}" placeholder="ชื่อคนแพ็ค" />
             </div>
             <div class="qf-workers-form-row">
-              <label class="qf-workers-form-label">สี</label>
-              <div class="qf-workers-colors">
-                ${WORKER_COLORS.map(c => `
-                  <button class="qf-workers-color-btn${c.hex === formColor ? ' active' : ''}"
-                    data-color="${c.hex}" style="background:${c.hex};" title="${c.label}"></button>`).join('')}
+              <label class="qf-workers-form-label">ไอคอน</label>
+              <div class="qf-workers-icons">
+                ${WORKER_ICONS.map(ic => `
+                  <button class="qf-workers-icon-btn${ic === formIcon ? ' active' : ''}"
+                    data-icon="${ic}">${ic}</button>`).join('')}
               </div>
             </div>
             <div class="qf-workers-form-actions">
@@ -3525,20 +3521,20 @@
       overlay.querySelectorAll('.qf-workers-edit').forEach(btn => {
         btn.addEventListener('click', () => {
           const worker = state.workers.find(w => w.id === btn.dataset.id);
-          if (worker) render(worker.id, worker.name, worker.color);
+          if (worker) render(worker.id, worker.name, worker.icon);
         });
       });
 
       overlay.querySelector('.qf-workers-add-btn')?.addEventListener('click', () => {
-        render('__new__', '', WORKER_COLORS[0].hex);
+        render('__new__', '', WORKER_ICONS[0]);
       });
 
       if (editingId !== null) {
-        let selectedColor = formColor;
-        overlay.querySelectorAll('.qf-workers-color-btn').forEach(btn => {
+        let selectedIcon = formIcon;
+        overlay.querySelectorAll('.qf-workers-icon-btn').forEach(btn => {
           btn.addEventListener('click', () => {
-            selectedColor = btn.dataset.color;
-            overlay.querySelectorAll('.qf-workers-color-btn').forEach(b => b.classList.toggle('active', b.dataset.color === selectedColor));
+            selectedIcon = btn.dataset.icon;
+            overlay.querySelectorAll('.qf-workers-icon-btn').forEach(b => b.classList.toggle('active', b.dataset.icon === selectedIcon));
           });
         });
 
@@ -3549,9 +3545,9 @@
           if (!name) { showToast('กรุณากรอกชื่อ', 1800); return; }
           if (editingId === '__new__') {
             const id = Math.random().toString(36).slice(2, 10);
-            state.workers = [...state.workers, { id, name, color: selectedColor }];
+            state.workers = [...state.workers, { id, name, icon: selectedIcon }];
           } else {
-            state.workers = state.workers.map(w => w.id === editingId ? { ...w, name, color: selectedColor } : w);
+            state.workers = state.workers.map(w => w.id === editingId ? { ...w, name, icon: selectedIcon } : w);
           }
           saveWorkers();
           render(null);
@@ -3687,7 +3683,6 @@
     });
     const planBtn = document.getElementById('qf-menu-plan');
     if (planBtn) {
-      updatePlanBtnState();
       planBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
         settingsMenu.style.display = 'none';
@@ -4081,15 +4076,6 @@
     }
   }
 
-  function updatePlanBtnState() {
-    const planBtn = document.getElementById('qf-menu-plan');
-    if (!planBtn) return;
-    const hasRecords = state.records.size > 0;
-    const hasWorkers = state.workers.length > 0;
-    planBtn.disabled = !hasRecords || !hasWorkers;
-    planBtn.title = !hasRecords ? 'scan ก่อน' : (!hasWorkers ? 'เพิ่มคนแพ็คก่อน' : '');
-  }
-
   function renderAll() {
     const labelsPg = isLabelsPage();
     const singleCount = labelsPg
@@ -4122,7 +4108,6 @@
       }
     }
     updateSelectionBar();
-    updatePlanBtnState();
   }
 
   function renderContent() {
@@ -4419,7 +4404,15 @@
       if (Date.now() > s.expiresAt) { localStorage.removeItem(PLANNING_SESSION_KEY); return null; }
       const platform = isShopee() ? 'sp' : 'tk';
       if (s.platform !== platform) return null;
-      return s;
+      // Migrate old columns that have workerColor but no workerIcon
+      const columns = {};
+      for (const [wid, col] of Object.entries(s.columns || {})) {
+        if (col.workerIcon || !col.workerColor) { columns[wid] = col; continue; }
+        const worker = state.workers.find(w => w.id === wid);
+        const { workerColor: _drop, ...rest } = col;
+        columns[wid] = { ...rest, workerIcon: worker?.icon || WORKER_COLOR_TO_ICON[col.workerColor] || '●' };
+      }
+      return { ...s, columns };
     } catch { return null; }
   }
 
@@ -4536,7 +4529,7 @@
             <div class="qf-plan-workers-check">
               ${allWorkers.map(w => `
                 <label class="qf-plan-worker-toggle${session.columns[w.id] ? ' active' : ''}" data-id="${escapeHtml(w.id)}">
-                  <span class="qf-plan-worker-dot" style="background:${escapeHtml(w.color)};"></span>
+                  <span class="qf-plan-worker-icon">${escapeHtml(w.icon)}</span>
                   ${escapeHtml(w.name)}
                   <input type="checkbox" style="display:none;" value="${escapeHtml(w.id)}" ${session.columns[w.id] ? 'checked' : ''}/>
                 </label>
@@ -4584,7 +4577,7 @@
         const chunk = ids.slice(offset, offset + perWorker);
         offset += perWorker;
         if (!chunk.length) break;
-        const col = newSession.columns[w.id] || { workerId: w.id, workerName: w.name, workerColor: w.color, fulfillUnitIds: [], printedIds: [], failedIds: [], status: 'pending', lastPrintAt: null, errorMsg: null, retryCount: 0 };
+        const col = newSession.columns[w.id] || { workerId: w.id, workerName: w.name, workerIcon: w.icon, fulfillUnitIds: [], printedIds: [], failedIds: [], status: 'pending', lastPrintAt: null, errorMsg: null, retryCount: 0 };
         newSession.columns[w.id] = { ...col, fulfillUnitIds: [...col.fulfillUnitIds, ...chunk] };
       }
       newSession.unassignedIds = ids.slice(offset);
@@ -4603,7 +4596,7 @@
       for (const [, groupIds] of groups) {
         workerCounts.sort((a, b) => a.count - b.count);
         const { w } = workerCounts[0];
-        const col = newSession.columns[w.id] || { workerId: w.id, workerName: w.name, workerColor: w.color, fulfillUnitIds: [], printedIds: [], failedIds: [], status: 'pending', lastPrintAt: null, errorMsg: null, retryCount: 0 };
+        const col = newSession.columns[w.id] || { workerId: w.id, workerName: w.name, workerIcon: w.icon, fulfillUnitIds: [], printedIds: [], failedIds: [], status: 'pending', lastPrintAt: null, errorMsg: null, retryCount: 0 };
         newSession.columns[w.id] = { ...col, fulfillUnitIds: [...col.fulfillUnitIds, ...groupIds] };
         workerCounts[0].count += groupIds.length;
       }
@@ -4640,6 +4633,7 @@
         totalLabels: printIds_.length,
         workerId: col.workerId,
         workerName: col.workerName,
+        workerIcon: col.workerIcon || null,
       });
 
       const updatedCol = {
@@ -4669,12 +4663,32 @@
   function openPlanningPanel(initialSession) {
     document.querySelectorAll('.qf-plan-overlay').forEach(e => e.remove());
 
+    if (state.records.size === 0) {
+      const overlay = document.createElement('div');
+      overlay.className = 'qf-plan-overlay';
+      overlay.innerHTML = `<div class="qf-plan-panel qf-plan-empty-panel"><div class="qf-plan-empty-msg">ยังไม่ได้ scan — กด Scan ก่อน</div><button class="qf-plan-close-empty">ปิด</button></div>`;
+      document.body.appendChild(overlay);
+      overlay.querySelector('.qf-plan-close-empty').onclick = () => overlay.remove();
+      overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+      return;
+    }
+
+    if (state.workers.length === 0) {
+      const overlay = document.createElement('div');
+      overlay.className = 'qf-plan-overlay';
+      overlay.innerHTML = `<div class="qf-plan-panel qf-plan-empty-panel"><div class="qf-plan-empty-msg">ยังไม่มีคนแพ็ค</div><button class="qf-plan-add-workers-cta">+ เพิ่มคนแพ็ค</button></div>`;
+      document.body.appendChild(overlay);
+      overlay.querySelector('.qf-plan-add-workers-cta').onclick = () => { overlay.remove(); openWorkersModal(); };
+      overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+      return;
+    }
+
     let session = initialSession || newPlanningSession();
 
     // Ensure all current workers have a column entry
     for (const w of state.workers) {
       if (!session.columns[w.id]) {
-        session = { ...session, columns: { ...session.columns, [w.id]: { workerId: w.id, workerName: w.name, workerColor: w.color, fulfillUnitIds: [], printedIds: [], failedIds: [], status: 'pending', lastPrintAt: null, errorMsg: null, retryCount: 0 } } };
+        session = { ...session, columns: { ...session.columns, [w.id]: { workerId: w.id, workerName: w.name, workerIcon: w.icon, fulfillUnitIds: [], printedIds: [], failedIds: [], status: 'pending', lastPrintAt: null, errorMsg: null, retryCount: 0 } } };
       }
     }
 
@@ -4740,7 +4754,7 @@
     const renderColumn = (wid, col, s) => {
       const locked = col.status === 'printing' || col.status === 'done';
       const statusLabel = { pending: 'รอพิมพ์', printing: 'กำลังพิมพ์...', done: 'เสร็จ', partial: 'บางส่วน', error: 'ผิดพลาด' }[col.status] || col.status;
-      const dot = col.workerColor ? `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${escapeHtml(col.workerColor)};margin-right:4px;vertical-align:middle;flex-shrink:0;"></span>` : '';
+      const dot = col.workerIcon ? `<span style="margin-right:4px;font-style:normal;">${escapeHtml(col.workerIcon)}</span>` : '';
 
       let btns = '';
       if (col.status === 'pending') btns = `<button class="qf-plan-zone-btn primary" data-action="print" data-wid="${escapeHtml(wid)}">🖨 พิมพ์</button>`;
