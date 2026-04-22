@@ -7920,6 +7920,1152 @@
 
   window.__qfPlanningSession = () => null;
 
+  // ==================== PDF TEMPLATE BUILDER (Phase 2) ====================
+  //
+  // Provides a WYSIWYG editor that layers CUSTOMIZABLE elements (logo, text,
+  // variables, placeholders) on top of the carrier's LOCKED zones defined by
+  // J_AND_T_LAYOUT. Users save up to MAX_PDF_TEMPLATES templates; one is
+  // marked "active" and automatically applied in the print pipeline AFTER
+  // overlayAliasOnPdf — so the alias watermark remains visible unless the
+  // template deliberately covers it.
+  //
+  // Data is persisted to localStorage. LOCKED regions are enforced in the
+  // editor (drag/drop/resize cannot intersect) so the barcode/QR/route code
+  // a carrier needs for scanning remain untouched. Phase 2 is grayscale only.
+
+  const PDF_TEMPLATES_KEY = 'qf_pdf_templates_v1';
+  const PDF_ACTIVE_TEMPLATE_KEY = 'qf_pdf_active_template_v1';
+  const MAX_PDF_TEMPLATES = 3;
+  const PDF_TEMPLATE_GRID_PT = 4; // snap grid in PDF points
+  const PDF_TEMPLATE_SCALE = 2;   // editor canvas: 2x page points
+
+  // Baseline carrier layout — from .claude/samples/jnt_layout.json.
+  // Coordinates are PDF points with bottom-left origin. Editor converts
+  // to top-left origin for display.
+  const J_AND_T_LAYOUT = {
+    carrier: 'jnt',
+    pageSize: { w: 298, h: 420 },
+    // LOCKED regions — drop/resize into these is rejected.
+    locked: [
+      { id: 'orderId',        label: 'Order ID',        x: 42.86,  y: 162.83, w: 150, h: 22 },
+      { id: 'trackingNumber', label: 'Tracking',        x: 105.86, y: 341.5,  w: 160, h: 24 },
+      { id: 'sortCode',       label: 'Sort Code',       x: 188.18, y: 402,    w: 90,  h: 28 },
+      { id: 'routeCode',      label: 'Route',           x: 164.38, y: 300,    w: 125, h: 40 },
+      { id: 'subZoneCode',    label: 'Sub-Zone',        x: 204.54, y: 282,    w: 80,  h: 22 },
+      { id: 'serviceType',    label: 'Service',         x: 215.62, y: 178,    w: 75,  h: 20 },
+      { id: 'codLabel',       label: 'COD',             x: 53.28,  y: 174,    w: 130, h: 26 },
+      { id: 'barcodeLeft',    label: 'Side barcode L',  x: 4,      y: 180,    w: 24,  h: 220 },
+      { id: 'barcodeRight',   label: 'Side barcode R',  x: 270,    y: 78,     w: 24,  h: 322 },
+    ],
+    // SHRINKABLE regions — user can toggle via zones flags.
+    shrinkable: [
+      { id: 'skuTable',     label: 'SKU Table',     x: 0, y: 78.94, w: 298, h: 51.57 },
+      { id: 'addressBlock', label: 'Address Block', x: 0, y: 147,   w: 298, h: 126 },
+    ],
+    // Header zone (above LOCKED area) is where users typically drop their
+    // logo + shop branding. y values are for guidance; editor enforces LOCKED.
+    headerZone: { x: 0, y: 0, w: 298, h: 40 }, // top strip (in top-left editor coords)
+  };
+
+  function loadPdfTemplates() {
+    try {
+      const raw = localStorage.getItem(PDF_TEMPLATES_KEY);
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) return [];
+      return arr.map(validatePdfTemplate).filter(Boolean);
+    } catch (_e) {
+      return [];
+    }
+  }
+
+  function savePdfTemplates(arr) {
+    if (!Array.isArray(arr)) throw new Error('templates must be array');
+    const normalized = arr.map(validatePdfTemplate).filter(Boolean);
+    if (normalized.length > MAX_PDF_TEMPLATES) {
+      throw new Error(`ครบ ${MAX_PDF_TEMPLATES} เทมเพลตแล้ว`);
+    }
+    try {
+      localStorage.setItem(PDF_TEMPLATES_KEY, JSON.stringify(normalized));
+    } catch (e) {
+      throw new Error('บันทึกไม่สำเร็จ (อาจเพราะ localStorage เต็ม — ลดขนาดโลโก้): ' + e.message);
+    }
+    return normalized;
+  }
+
+  function validatePdfTemplate(tpl) {
+    if (!tpl || typeof tpl !== 'object') return null;
+    const pageW = J_AND_T_LAYOUT.pageSize.w;
+    const pageH = J_AND_T_LAYOUT.pageSize.h;
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, Number(v) || 0));
+    const elements = Array.isArray(tpl.elements) ? tpl.elements : [];
+    const safeElements = elements.map(el => {
+      if (!el || typeof el !== 'object') return null;
+      const x = clamp(el.x, 0, pageW);
+      const y = clamp(el.y, 0, pageH);
+      const w = clamp(el.w ?? 40, 4, pageW);
+      const h = clamp(el.h ?? 16, 4, pageH);
+      const type = ['text', 'image', 'qrPlaceholder', 'variable'].includes(el.type) ? el.type : 'text';
+      return {
+        id: String(el.id || `el_${Math.random().toString(36).slice(2, 9)}`),
+        type,
+        x, y, w, h,
+        size: typeof el.size === 'number' ? clamp(el.size, 4, 72) : 10,
+        text: typeof el.text === 'string' ? el.text.slice(0, 200) : '',
+        variable: typeof el.variable === 'string' ? el.variable.slice(0, 40) : '',
+        dataUrl: typeof el.dataUrl === 'string' ? el.dataUrl.slice(0, 300000) : '',
+        align: ['left', 'center', 'right'].includes(el.align) ? el.align : 'left',
+        bold: !!el.bold,
+      };
+    }).filter(Boolean);
+    return {
+      id: String(tpl.id || `tpl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`),
+      name: String(tpl.name || 'เทมเพลตใหม่').slice(0, 60),
+      createdAt: Number(tpl.createdAt) || Date.now(),
+      updatedAt: Number(tpl.updatedAt) || Date.now(),
+      brand: {
+        logoDataUrl: typeof tpl.brand?.logoDataUrl === 'string' ? tpl.brand.logoDataUrl : null,
+        shopName: typeof tpl.brand?.shopName === 'string' ? tpl.brand.shopName.slice(0, 60) : '',
+        tagline: typeof tpl.brand?.tagline === 'string' ? tpl.brand.tagline.slice(0, 100) : '',
+      },
+      elements: safeElements,
+      zones: {
+        shrinkHeaderLogos: !!tpl.zones?.shrinkHeaderLogos,
+        hideSkuTable: !!tpl.zones?.hideSkuTable,
+        maskPhone: !!tpl.zones?.maskPhone,
+        maskAddress: !!tpl.zones?.maskAddress,
+      },
+    };
+  }
+
+  function getActivePdfTemplate() {
+    try {
+      const id = localStorage.getItem(PDF_ACTIVE_TEMPLATE_KEY);
+      if (!id) return null;
+      const tpls = loadPdfTemplates();
+      return tpls.find(t => t.id === id) || null;
+    } catch (_e) { return null; }
+  }
+
+  function setActivePdfTemplate(id) {
+    try {
+      if (id == null) localStorage.removeItem(PDF_ACTIVE_TEMPLATE_KEY);
+      else localStorage.setItem(PDF_ACTIVE_TEMPLATE_KEY, String(id));
+    } catch (_e) {}
+  }
+
+  function addPdfTemplate(tpl) {
+    const tpls = loadPdfTemplates();
+    if (tpls.length >= MAX_PDF_TEMPLATES) throw new Error(`ครบ ${MAX_PDF_TEMPLATES} เทมเพลตแล้ว`);
+    const normalized = validatePdfTemplate(tpl);
+    if (!normalized) throw new Error('เทมเพลตไม่ถูกต้อง');
+    normalized.createdAt = Date.now();
+    normalized.updatedAt = Date.now();
+    const next = [...tpls, normalized];
+    savePdfTemplates(next);
+    return normalized;
+  }
+
+  function updatePdfTemplate(tpl) {
+    const tpls = loadPdfTemplates();
+    const idx = tpls.findIndex(t => t.id === tpl.id);
+    if (idx < 0) return addPdfTemplate(tpl);
+    const normalized = validatePdfTemplate({ ...tpl, createdAt: tpls[idx].createdAt });
+    if (!normalized) throw new Error('เทมเพลตไม่ถูกต้อง');
+    normalized.updatedAt = Date.now();
+    const next = [...tpls.slice(0, idx), normalized, ...tpls.slice(idx + 1)];
+    savePdfTemplates(next);
+    return normalized;
+  }
+
+  function deletePdfTemplate(id) {
+    const tpls = loadPdfTemplates();
+    const next = tpls.filter(t => t.id !== id);
+    savePdfTemplates(next);
+    if (localStorage.getItem(PDF_ACTIVE_TEMPLATE_KEY) === id) {
+      setActivePdfTemplate(null);
+    }
+  }
+
+  function duplicatePdfTemplate(id) {
+    const tpls = loadPdfTemplates();
+    const src = tpls.find(t => t.id === id);
+    if (!src) throw new Error('ไม่พบเทมเพลต');
+    if (tpls.length >= MAX_PDF_TEMPLATES) throw new Error(`ครบ ${MAX_PDF_TEMPLATES} เทมเพลตแล้ว`);
+    const copy = JSON.parse(JSON.stringify(src));
+    copy.id = `tpl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    copy.name = `${src.name} (สำเนา)`.slice(0, 60);
+    copy.createdAt = Date.now();
+    copy.updatedAt = Date.now();
+    return addPdfTemplate(copy);
+  }
+
+  // Build mock record data from a batch of fulfillUnitIds — used both at
+  // render time (real printing) and in the editor preview.
+  function buildTemplateRecordData(batchIds) {
+    const data = {
+      alias: '',
+      orderId: '',
+      date: formatThaiDate(new Date()),
+      shopName: '',
+      customerName: '',
+      trackingNumber: '',
+    };
+    try {
+      if (Array.isArray(batchIds) && batchIds.length) {
+        const firstId = batchIds[0];
+        const rec = state.records?.get?.(firstId);
+        if (rec) {
+          data.orderId = String(rec.orderIds?.[0] || rec.orderId || '');
+          data.trackingNumber = String(rec.trackingNumber || '');
+          data.customerName = String(rec.customerName || rec.recipient?.name || '');
+          const firstSku = rec.skuList?.[0];
+          if (firstSku && typeof getAlias === 'function') {
+            try { data.alias = getAlias(firstSku.productId) || ''; } catch (_e) {}
+          }
+        }
+      }
+    } catch (_e) {}
+    return data;
+  }
+
+  function mockTemplateRecordData(tpl) {
+    return {
+      alias: 'แดง1',
+      orderId: '583619604412662802',
+      date: formatThaiDate(new Date()),
+      shopName: tpl?.brand?.shopName || 'ร้านตัวอย่าง',
+      customerName: 'คุณลูกค้า ตัวอย่าง',
+      trackingNumber: '795500112243',
+    };
+  }
+
+  function formatThaiDate(d) {
+    const months = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+    return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear() + 543}`;
+  }
+
+  function resolveTemplateVariable(varName, recordData) {
+    if (!varName) return '';
+    const key = varName.replace(/^\{|\}$/g, '');
+    return String(recordData?.[key] ?? '');
+  }
+
+  // Check intersection of a rect with any LOCKED region. Coordinates are in
+  // top-left editor space (x, y, w, h) — but LOCKED regions are stored in
+  // PDF bottom-left space. This helper takes top-left coords.
+  function intersectsLocked(rectTL) {
+    const pageH = J_AND_T_LAYOUT.pageSize.h;
+    for (const loc of J_AND_T_LAYOUT.locked) {
+      // convert locked (bottom-left y) to top-left y
+      const lockTLy = pageH - loc.y - loc.h;
+      if (rectsOverlap(rectTL, { x: loc.x, y: lockTLy, w: loc.w, h: loc.h })) return loc;
+    }
+    return null;
+  }
+
+  function rectsOverlap(a, b) {
+    return !(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y);
+  }
+
+  function snapToGrid(v, grid = PDF_TEMPLATE_GRID_PT) {
+    return Math.round(v / grid) * grid;
+  }
+
+  // ==================== PDF TEMPLATE RENDER PIPELINE ====================
+
+  async function applyPdfTemplate(pdfBytes, template, recordData) {
+    if (!window.PDFLib || !template) return pdfBytes;
+    try {
+      const { PDFDocument, rgb } = window.PDFLib;
+      const fontBytes = await ensureFontBytes();
+      const pdfDoc = await PDFDocument.load(pdfBytes);
+      if (window.fontkit) pdfDoc.registerFontkit(window.fontkit);
+      const font = await pdfDoc.embedFont(fontBytes, { subset: true });
+      const pages = pdfDoc.getPages();
+      if (!pages.length) return pdfBytes;
+
+      // Embed logo once (shared across pages).
+      let logoImg = null;
+      if (template.brand?.logoDataUrl) {
+        try {
+          const dataUrl = template.brand.logoDataUrl;
+          const mimeMatch = dataUrl.match(/^data:image\/(png|jpeg|jpg);base64,/i);
+          if (mimeMatch) {
+            const b64 = dataUrl.split(',')[1];
+            const bin = atob(b64);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            if (/png/i.test(mimeMatch[1])) {
+              logoImg = await pdfDoc.embedPng(bytes);
+            } else {
+              logoImg = await pdfDoc.embedJpg(bytes);
+            }
+          }
+        } catch (e) {
+          console.warn('[QF] template logo embed failed:', e);
+        }
+      }
+
+      // Embed custom element images.
+      const elementImages = new Map();
+      for (const el of template.elements || []) {
+        if (el.type === 'image' && el.dataUrl) {
+          try {
+            const mm = el.dataUrl.match(/^data:image\/(png|jpeg|jpg);base64,/i);
+            if (!mm) continue;
+            const b64 = el.dataUrl.split(',')[1];
+            const bin = atob(b64);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            const img = /png/i.test(mm[1])
+              ? await pdfDoc.embedPng(bytes)
+              : await pdfDoc.embedJpg(bytes);
+            elementImages.set(el.id, img);
+          } catch (_e) {}
+        }
+      }
+
+      for (const page of pages) {
+        const { width: pw, height: ph } = page.getSize();
+
+        // Zone transforms — cover original elements with white rectangles.
+        // SAFETY: we only mask SHRINKABLE / address / sku table areas. Never
+        // touch LOCKED zones (barcode/QR).
+        if (template.zones?.hideSkuTable) {
+          const z = J_AND_T_LAYOUT.shrinkable.find(s => s.id === 'skuTable');
+          if (z) page.drawRectangle({ x: z.x, y: z.y, width: z.w, height: z.h, color: rgb(1, 1, 1) });
+        }
+        if (template.zones?.maskAddress) {
+          const z = J_AND_T_LAYOUT.shrinkable.find(s => s.id === 'addressBlock');
+          if (z) page.drawRectangle({ x: z.x, y: z.y, width: z.w, height: z.h, color: rgb(1, 1, 1), opacity: 0.85 });
+        }
+        if (template.zones?.maskPhone) {
+          // Phone row sits just above the COD label — rough band.
+          page.drawRectangle({ x: 10, y: 268, width: 140, height: 14, color: rgb(1, 1, 1) });
+        }
+        if (template.zones?.shrinkHeaderLogos) {
+          // Blank the very top header band (TikTok/carrier logos) above all
+          // LOCKED text. We avoid sort code area (x >= 180).
+          page.drawRectangle({ x: 0, y: ph - 30, width: 180, height: 30, color: rgb(1, 1, 1) });
+        }
+
+        // Brand area (logo + shopName + tagline) in freed header region.
+        // Position: top-left of page (PDF bottom-left origin: y near ph).
+        const brand = template.brand || {};
+        if (logoImg) {
+          const targetH = 24;
+          const ratio = logoImg.width / logoImg.height;
+          const drawW = targetH * ratio;
+          page.drawImage(logoImg, {
+            x: 6, y: ph - targetH - 4, width: drawW, height: targetH, opacity: 0.85,
+          });
+        }
+        if (brand.shopName) {
+          page.drawText(String(brand.shopName), {
+            x: logoImg ? 40 : 6, y: ph - 14, size: 9, font,
+            color: rgb(0, 0, 0),
+          });
+        }
+        if (brand.tagline) {
+          page.drawText(String(brand.tagline), {
+            x: logoImg ? 40 : 6, y: ph - 24, size: 7, font,
+            color: rgb(0.2, 0.2, 0.2),
+          });
+        }
+
+        // Custom elements. Coordinates stored in TOP-LEFT editor space —
+        // convert to PDF bottom-left.
+        for (const el of template.elements || []) {
+          const pdfX = el.x;
+          const pdfY = ph - el.y - el.h;
+          if (el.type === 'text') {
+            const size = Math.max(4, Math.min(el.size || 10, 48));
+            const text = String(el.text || '');
+            const tw = font.widthOfTextAtSize(text, size);
+            let x = pdfX;
+            if (el.align === 'center') x = pdfX + (el.w - tw) / 2;
+            else if (el.align === 'right') x = pdfX + el.w - tw;
+            page.drawText(text, {
+              x, y: pdfY + Math.max(2, el.h - size - 2),
+              size, font, color: rgb(0, 0, 0),
+            });
+          } else if (el.type === 'variable') {
+            const size = Math.max(4, Math.min(el.size || 10, 48));
+            const val = resolveTemplateVariable(el.variable, recordData);
+            if (!val) continue;
+            const tw = font.widthOfTextAtSize(val, size);
+            let x = pdfX;
+            if (el.align === 'center') x = pdfX + (el.w - tw) / 2;
+            else if (el.align === 'right') x = pdfX + el.w - tw;
+            page.drawText(val, {
+              x, y: pdfY + Math.max(2, el.h - size - 2),
+              size, font, color: rgb(0, 0, 0),
+            });
+          } else if (el.type === 'image') {
+            const img = elementImages.get(el.id);
+            if (img) {
+              page.drawImage(img, {
+                x: pdfX, y: pdfY, width: el.w, height: el.h, opacity: 0.9,
+              });
+            }
+          } else if (el.type === 'qrPlaceholder') {
+            // Draw a grayscale placeholder box (real QR generation deferred).
+            page.drawRectangle({
+              x: pdfX, y: pdfY, width: el.w, height: el.h,
+              borderColor: rgb(0, 0, 0), borderWidth: 1, color: rgb(0.95, 0.95, 0.95),
+            });
+            const label = 'QR';
+            page.drawText(label, {
+              x: pdfX + el.w / 2 - 6, y: pdfY + el.h / 2 - 4,
+              size: 8, font, color: rgb(0, 0, 0),
+            });
+          }
+        }
+      }
+
+      return await pdfDoc.save();
+    } catch (e) {
+      console.warn('[QF] applyPdfTemplate error:', e);
+      return pdfBytes;
+    }
+  }
+
+  // ==================== PDF TEMPLATE MANAGER MODAL ====================
+
+  function openPdfTemplateManager() {
+    document.querySelectorAll('.qf-pdf-tpl-mgr-overlay').forEach(e => e.remove());
+    const overlay = document.createElement('div');
+    overlay.className = 'qf-modal-overlay qf-pdf-tpl-mgr-overlay';
+
+    const render = () => {
+      const tpls = loadPdfTemplates();
+      const activeId = localStorage.getItem(PDF_ACTIVE_TEMPLATE_KEY);
+      const fmt = t => new Date(t).toLocaleString('th-TH', { dateStyle: 'short', timeStyle: 'short' });
+      const rows = tpls.map(t => {
+        const isActive = t.id === activeId;
+        return `
+          <div class="qf-pdf-tpl-row ${isActive ? 'qf-pdf-tpl-row-active' : ''}" data-id="${escapeHtml(t.id)}">
+            <div class="qf-pdf-tpl-thumb" data-tpl="${escapeHtml(t.id)}"></div>
+            <div class="qf-pdf-tpl-info">
+              <div class="qf-pdf-tpl-name">${escapeHtml(t.name)}${isActive ? ' <span class="qf-pdf-tpl-active-tag">ใช้งานอยู่</span>' : ''}</div>
+              <div class="qf-pdf-tpl-meta">อัพเดต ${escapeHtml(fmt(t.updatedAt))} · ${t.elements.length} elements</div>
+            </div>
+            <div class="qf-pdf-tpl-actions">
+              <button class="qf-pdf-tpl-btn qf-pdf-tpl-edit">แก้ไข</button>
+              <button class="qf-pdf-tpl-btn qf-pdf-tpl-dup">คัดลอก</button>
+              <button class="qf-pdf-tpl-btn qf-pdf-tpl-activate">${isActive ? 'เลิกใช้' : 'ใช้งาน'}</button>
+              <button class="qf-pdf-tpl-btn qf-pdf-tpl-export">Export JSON</button>
+              <button class="qf-pdf-tpl-btn qf-pdf-tpl-del">🗑</button>
+            </div>
+          </div>
+        `;
+      }).join('');
+      const full = tpls.length >= MAX_PDF_TEMPLATES;
+      overlay.innerHTML = `
+        <div class="qf-modal qf-pdf-tpl-mgr-modal" role="dialog">
+          <div class="qf-workers-header">
+            <div class="qf-modal-title" style="margin-bottom:0;">📄 เทมเพลต PDF (${tpls.length}/${MAX_PDF_TEMPLATES})</div>
+            <button class="qf-workers-close qf-pdf-tpl-close">×</button>
+          </div>
+          <div class="qf-modal-body qf-pdf-tpl-mgr-body">
+            <div class="qf-pdf-tpl-mgr-toolbar">
+              <button class="qf-btn-confirm qf-pdf-tpl-new" ${full ? 'disabled title="ครบ 3 แล้ว — ลบก่อน"' : ''}>+ สร้างเทมเพลตใหม่</button>
+              <button class="qf-pdf-tpl-btn qf-pdf-tpl-import">📥 Import JSON</button>
+            </div>
+            <div class="qf-pdf-tpl-list">
+              ${tpls.length === 0 ? '<div class="qf-pdf-tpl-empty">ยังไม่มีเทมเพลต — กดปุ่ม "สร้างเทมเพลตใหม่" เพื่อเริ่ม</div>' : rows}
+            </div>
+            <div class="qf-pdf-tpl-note">เทมเพลตที่ "ใช้งาน" จะถูกซ้อนบน PDF ฉลากหลัง alias watermark (ขาวดำเท่านั้น)</div>
+          </div>
+        </div>
+      `;
+      // Render thumbnails after DOM insertion.
+      setTimeout(() => {
+        overlay.querySelectorAll('.qf-pdf-tpl-thumb[data-tpl]').forEach(el => {
+          const id = el.dataset.tpl;
+          const tpl = tpls.find(t => t.id === id);
+          if (tpl) renderTemplateThumbnail(el, tpl);
+        });
+      }, 0);
+    };
+
+    const cleanup = () => overlay.remove();
+    overlay.onclick = (e) => { if (e.target === overlay) cleanup(); };
+    const onKey = (e) => { if (e.key === 'Escape') { cleanup(); document.removeEventListener('keydown', onKey); } };
+    document.addEventListener('keydown', onKey);
+
+    overlay.addEventListener('click', (e) => {
+      const row = e.target.closest('.qf-pdf-tpl-row');
+      if (e.target.closest('.qf-pdf-tpl-close')) { cleanup(); return; }
+      if (e.target.closest('.qf-pdf-tpl-new')) {
+        if (loadPdfTemplates().length >= MAX_PDF_TEMPLATES) {
+          showToast(`ครบ ${MAX_PDF_TEMPLATES} แล้ว — ลบก่อน`, 2500);
+          return;
+        }
+        cleanup();
+        openPdfTemplateEditor();
+        return;
+      }
+      if (e.target.closest('.qf-pdf-tpl-import')) {
+        importPdfTemplateFlow(() => render());
+        return;
+      }
+      if (!row) return;
+      const id = row.dataset.id;
+      if (e.target.closest('.qf-pdf-tpl-edit')) { cleanup(); openPdfTemplateEditor(id); return; }
+      if (e.target.closest('.qf-pdf-tpl-dup')) {
+        try { duplicatePdfTemplate(id); render(); showToast('คัดลอกแล้ว', 1500); }
+        catch (err) { showToast(err.message, 2500); }
+        return;
+      }
+      if (e.target.closest('.qf-pdf-tpl-activate')) {
+        const currentActive = localStorage.getItem(PDF_ACTIVE_TEMPLATE_KEY);
+        setActivePdfTemplate(currentActive === id ? null : id);
+        render();
+        return;
+      }
+      if (e.target.closest('.qf-pdf-tpl-export')) {
+        const tpl = loadPdfTemplates().find(t => t.id === id);
+        if (tpl) exportPdfTemplateJson(tpl);
+        return;
+      }
+      if (e.target.closest('.qf-pdf-tpl-del')) {
+        if (!confirm('ลบเทมเพลตนี้? (ไม่สามารถย้อนกลับได้)')) return;
+        try { deletePdfTemplate(id); render(); showToast('ลบแล้ว', 1500); }
+        catch (err) { showToast(err.message, 2500); }
+      }
+    });
+
+    document.body.appendChild(overlay);
+    render();
+  }
+
+  function exportPdfTemplateJson(tpl) {
+    const blob = new Blob([JSON.stringify(tpl, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `pdf-template-${tpl.name.replace(/[^\w\u0E00-\u0E7F]+/g, '_')}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function importPdfTemplateFlow(onDone) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'application/json,.json';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const parsed = JSON.parse(text);
+        parsed.id = `tpl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        addPdfTemplate(parsed);
+        showToast('Import สำเร็จ', 1500);
+        onDone?.();
+      } catch (err) {
+        showToast('Import ล้มเหลว: ' + err.message, 3000);
+      }
+    };
+    input.click();
+  }
+
+  function renderTemplateThumbnail(container, tpl) {
+    // Simple canvas thumbnail — scaled-down layout preview.
+    const w = 80, h = 112;
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, w, h);
+    ctx.strokeStyle = '#d0d5dd';
+    ctx.strokeRect(0, 0, w, h);
+    // LOCKED regions as grey
+    const sx = w / J_AND_T_LAYOUT.pageSize.w;
+    const sy = h / J_AND_T_LAYOUT.pageSize.h;
+    ctx.fillStyle = '#e5e7eb';
+    for (const loc of J_AND_T_LAYOUT.locked) {
+      const ty = h - (loc.y + loc.h) * sy;
+      ctx.fillRect(loc.x * sx, ty, loc.w * sx, loc.h * sy);
+    }
+    // Elements
+    ctx.fillStyle = '#111';
+    for (const el of tpl.elements || []) {
+      ctx.fillStyle = el.type === 'image' ? '#6b7280' : (el.type === 'qrPlaceholder' ? '#374151' : '#111');
+      ctx.fillRect(el.x * sx, el.y * sy, Math.max(2, el.w * sx), Math.max(2, el.h * sy));
+    }
+    // Shop name top-left
+    if (tpl.brand?.shopName) {
+      ctx.fillStyle = '#111';
+      ctx.font = '7px sans-serif';
+      ctx.fillText(String(tpl.brand.shopName).slice(0, 12), 2, 9);
+    }
+    container.innerHTML = '';
+    container.appendChild(canvas);
+  }
+
+  // ==================== PDF TEMPLATE EDITOR ====================
+
+  function openPdfTemplateEditor(templateId) {
+    document.querySelectorAll('.qf-pdf-editor-overlay').forEach(e => e.remove());
+    const existing = templateId ? loadPdfTemplates().find(t => t.id === templateId) : null;
+    if (templateId && !existing) {
+      showToast('ไม่พบเทมเพลต', 2000);
+      return;
+    }
+
+    // Working draft (mutable during edit).
+    let tpl = existing ? JSON.parse(JSON.stringify(existing)) : {
+      id: null,
+      name: 'เทมเพลตใหม่',
+      brand: { logoDataUrl: null, shopName: '', tagline: '' },
+      elements: [],
+      zones: { shrinkHeaderLogos: false, hideSkuTable: false, maskPhone: false, maskAddress: false },
+    };
+    let selectedId = null;
+    let showGrid = true;
+    const history = [JSON.parse(JSON.stringify(tpl))];
+    const maxHistory = 10;
+
+    const pushHistory = () => {
+      history.push(JSON.parse(JSON.stringify(tpl)));
+      while (history.length > maxHistory) history.shift();
+    };
+    const undo = () => {
+      if (history.length > 1) {
+        history.pop();
+        tpl = JSON.parse(JSON.stringify(history[history.length - 1]));
+        selectedId = null;
+        rerender();
+      }
+    };
+
+    const overlay = document.createElement('div');
+    overlay.className = 'qf-modal-overlay qf-pdf-editor-overlay';
+    const canvasW = J_AND_T_LAYOUT.pageSize.w * PDF_TEMPLATE_SCALE;
+    const canvasH = J_AND_T_LAYOUT.pageSize.h * PDF_TEMPLATE_SCALE;
+
+    overlay.innerHTML = `
+      <div class="qf-modal qf-pdf-editor-modal" role="dialog">
+        <div class="qf-workers-header">
+          <div class="qf-modal-title" style="margin-bottom:0;">✏️ เทมเพลต PDF — <input class="qf-pdf-editor-name" value="${escapeHtml(tpl.name)}" /></div>
+          <button class="qf-workers-close qf-pdf-editor-close">×</button>
+        </div>
+        <div class="qf-pdf-editor-grid">
+          <aside class="qf-pdf-editor-left">
+            <div class="qf-pdf-editor-section-title">Elements</div>
+            <button class="qf-pdf-editor-add" data-add="text">+ ข้อความ</button>
+            <button class="qf-pdf-editor-add" data-add="image">+ รูปภาพ</button>
+            <button class="qf-pdf-editor-add" data-add="logo">+ โลโก้ร้าน</button>
+            <button class="qf-pdf-editor-add" data-add="qrPlaceholder">+ QR</button>
+            <div class="qf-pdf-editor-section-title">ตัวแปร</div>
+            <button class="qf-pdf-editor-add" data-addvar="alias">+ {alias}</button>
+            <button class="qf-pdf-editor-add" data-addvar="orderId">+ {orderId}</button>
+            <button class="qf-pdf-editor-add" data-addvar="date">+ {date}</button>
+            <button class="qf-pdf-editor-add" data-addvar="shopName">+ {shopName}</button>
+            <button class="qf-pdf-editor-add" data-addvar="customerName">+ {customerName}</button>
+            <button class="qf-pdf-editor-add" data-addvar="trackingNumber">+ {trackingNumber}</button>
+            <div class="qf-pdf-editor-section-title">แบรนด์</div>
+            <label class="qf-pdf-editor-field">ชื่อร้าน
+              <input class="qf-pdf-editor-shopname" value="${escapeHtml(tpl.brand.shopName || '')}" />
+            </label>
+            <label class="qf-pdf-editor-field">Tagline
+              <input class="qf-pdf-editor-tagline" value="${escapeHtml(tpl.brand.tagline || '')}" />
+            </label>
+            <label class="qf-pdf-editor-field">โลโก้ (PNG)
+              <input class="qf-pdf-editor-logo" type="file" accept="image/png,image/jpeg" />
+            </label>
+            <div class="qf-pdf-editor-logo-preview"></div>
+          </aside>
+          <div class="qf-pdf-editor-center">
+            <div class="qf-pdf-editor-toolbar">
+              <label><input type="checkbox" class="qf-pdf-editor-grid-toggle" ${showGrid ? 'checked' : ''}> Grid</label>
+              <button class="qf-pdf-editor-undo">↶ Undo</button>
+              <span class="qf-pdf-editor-hint">คลิก = เลือก · ลาก = ย้าย · Delete = ลบ · Arrow = เลื่อน</span>
+            </div>
+            <div class="qf-pdf-editor-canvas-wrap">
+              <div class="qf-pdf-editor-canvas" style="width:${canvasW}px;height:${canvasH}px;"></div>
+            </div>
+          </div>
+          <aside class="qf-pdf-editor-right">
+            <div class="qf-pdf-editor-section-title">Properties</div>
+            <div class="qf-pdf-editor-props">— เลือก element เพื่อแก้ไข —</div>
+            <div class="qf-pdf-editor-section-title">Zones</div>
+            <label class="qf-pdf-editor-check"><input type="checkbox" class="qf-pdf-editor-zone" data-zone="shrinkHeaderLogos" ${tpl.zones.shrinkHeaderLogos ? 'checked' : ''}> ซ่อน TikTok/carrier logos</label>
+            <label class="qf-pdf-editor-check"><input type="checkbox" class="qf-pdf-editor-zone" data-zone="hideSkuTable" ${tpl.zones.hideSkuTable ? 'checked' : ''}> ซ่อน SKU table</label>
+            <label class="qf-pdf-editor-check"><input type="checkbox" class="qf-pdf-editor-zone" data-zone="maskPhone" ${tpl.zones.maskPhone ? 'checked' : ''}> ปกปิดเบอร์โทร</label>
+            <label class="qf-pdf-editor-check"><input type="checkbox" class="qf-pdf-editor-zone" data-zone="maskAddress" ${tpl.zones.maskAddress ? 'checked' : ''}> ปกปิดที่อยู่</label>
+          </aside>
+        </div>
+        <div class="qf-pdf-editor-bottom">
+          <button class="qf-btn-cancel qf-pdf-editor-cancel">ยกเลิก</button>
+          <button class="qf-pdf-editor-saveas">บันทึกเป็นเทมเพลตใหม่</button>
+          <button class="qf-btn-confirm qf-pdf-editor-save">${existing ? 'บันทึก' : 'สร้าง'}</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const canvasEl = overlay.querySelector('.qf-pdf-editor-canvas');
+
+    // ====== Rendering ======
+    const rerender = () => {
+      canvasEl.innerHTML = '';
+      // Grid
+      if (showGrid) {
+        canvasEl.classList.add('qf-pdf-editor-canvas-grid');
+      } else {
+        canvasEl.classList.remove('qf-pdf-editor-canvas-grid');
+      }
+
+      // LOCKED regions — draw as red translucent boxes.
+      const pageH = J_AND_T_LAYOUT.pageSize.h;
+      for (const loc of J_AND_T_LAYOUT.locked) {
+        const tlY = pageH - loc.y - loc.h;
+        const box = document.createElement('div');
+        box.className = 'qf-pdf-editor-locked';
+        box.style.left = (loc.x * PDF_TEMPLATE_SCALE) + 'px';
+        box.style.top = (tlY * PDF_TEMPLATE_SCALE) + 'px';
+        box.style.width = (loc.w * PDF_TEMPLATE_SCALE) + 'px';
+        box.style.height = (loc.h * PDF_TEMPLATE_SCALE) + 'px';
+        box.title = `LOCKED: ${loc.label}`;
+        box.textContent = loc.label;
+        canvasEl.appendChild(box);
+      }
+
+      // Header zone hint
+      const hz = J_AND_T_LAYOUT.headerZone;
+      const hzEl = document.createElement('div');
+      hzEl.className = 'qf-pdf-editor-headerzone';
+      hzEl.style.left = (hz.x * PDF_TEMPLATE_SCALE) + 'px';
+      hzEl.style.top = (hz.y * PDF_TEMPLATE_SCALE) + 'px';
+      hzEl.style.width = (hz.w * PDF_TEMPLATE_SCALE) + 'px';
+      hzEl.style.height = (hz.h * PDF_TEMPLATE_SCALE) + 'px';
+      hzEl.textContent = 'Header zone — วางโลโก้/ข้อความแบรนด์';
+      canvasEl.appendChild(hzEl);
+
+      // Custom elements
+      for (const el of tpl.elements) {
+        const node = document.createElement('div');
+        node.className = 'qf-pdf-editor-el qf-pdf-editor-el-' + el.type;
+        if (el.id === selectedId) node.classList.add('qf-pdf-editor-el-selected');
+        node.dataset.id = el.id;
+        node.style.left = (el.x * PDF_TEMPLATE_SCALE) + 'px';
+        node.style.top = (el.y * PDF_TEMPLATE_SCALE) + 'px';
+        node.style.width = (el.w * PDF_TEMPLATE_SCALE) + 'px';
+        node.style.height = (el.h * PDF_TEMPLATE_SCALE) + 'px';
+        if (el.type === 'text') {
+          node.textContent = el.text || '(ข้อความ)';
+          node.style.fontSize = (el.size * PDF_TEMPLATE_SCALE * 0.75) + 'px';
+          node.style.textAlign = el.align || 'left';
+          if (el.bold) node.style.fontWeight = '700';
+        } else if (el.type === 'variable') {
+          node.textContent = '{' + el.variable + '}';
+          node.style.fontSize = (el.size * PDF_TEMPLATE_SCALE * 0.75) + 'px';
+          node.style.textAlign = el.align || 'left';
+          if (el.bold) node.style.fontWeight = '700';
+        } else if (el.type === 'image') {
+          if (el.dataUrl) {
+            const img = document.createElement('img');
+            img.src = el.dataUrl;
+            img.draggable = false;
+            node.appendChild(img);
+          } else {
+            node.textContent = '[รูปภาพ]';
+          }
+        } else if (el.type === 'qrPlaceholder') {
+          node.textContent = 'QR';
+        }
+        // Resize handle (bottom-right)
+        const handle = document.createElement('div');
+        handle.className = 'qf-pdf-editor-resize';
+        node.appendChild(handle);
+        canvasEl.appendChild(node);
+      }
+
+      // Properties panel
+      const propsEl = overlay.querySelector('.qf-pdf-editor-props');
+      const sel = tpl.elements.find(e => e.id === selectedId);
+      if (!sel) {
+        propsEl.innerHTML = '— เลือก element เพื่อแก้ไข —';
+      } else {
+        propsEl.innerHTML = `
+          <div class="qf-pdf-editor-prop-grid">
+            <label>x <input type="number" class="qf-pdf-prop" data-k="x" value="${Math.round(sel.x)}" /></label>
+            <label>y <input type="number" class="qf-pdf-prop" data-k="y" value="${Math.round(sel.y)}" /></label>
+            <label>w <input type="number" class="qf-pdf-prop" data-k="w" value="${Math.round(sel.w)}" /></label>
+            <label>h <input type="number" class="qf-pdf-prop" data-k="h" value="${Math.round(sel.h)}" /></label>
+          </div>
+          ${sel.type === 'text' || sel.type === 'variable' ? `
+            <label class="qf-pdf-editor-field">ขนาดตัวอักษร (pt)
+              <input type="number" class="qf-pdf-prop" data-k="size" value="${sel.size}" min="4" max="72" />
+            </label>
+            ${sel.type === 'text' ? `
+              <label class="qf-pdf-editor-field">ข้อความ
+                <input type="text" class="qf-pdf-prop" data-k="text" value="${escapeHtml(sel.text)}" />
+              </label>` : `
+              <label class="qf-pdf-editor-field">ตัวแปร
+                <select class="qf-pdf-prop" data-k="variable">
+                  ${['alias','orderId','date','shopName','customerName','trackingNumber'].map(v =>
+                    `<option value="${v}" ${sel.variable === v ? 'selected' : ''}>{${v}}</option>`
+                  ).join('')}
+                </select>
+              </label>`}
+            <div class="qf-pdf-editor-align-row">
+              <label><input type="radio" name="qf-pdf-align" class="qf-pdf-prop" data-k="align" value="left" ${sel.align === 'left' ? 'checked' : ''}> ซ้าย</label>
+              <label><input type="radio" name="qf-pdf-align" class="qf-pdf-prop" data-k="align" value="center" ${sel.align === 'center' ? 'checked' : ''}> กลาง</label>
+              <label><input type="radio" name="qf-pdf-align" class="qf-pdf-prop" data-k="align" value="right" ${sel.align === 'right' ? 'checked' : ''}> ขวา</label>
+            </div>
+            <label class="qf-pdf-editor-check"><input type="checkbox" class="qf-pdf-prop" data-k="bold" ${sel.bold ? 'checked' : ''}> ตัวหนา</label>
+          ` : ''}
+          ${sel.type === 'image' ? `
+            <label class="qf-pdf-editor-field">เลือกรูป (PNG/JPG, ≤200KB)
+              <input type="file" class="qf-pdf-img-upload" accept="image/png,image/jpeg" />
+            </label>` : ''}
+          <button class="qf-pdf-editor-delete">🗑 ลบ element</button>
+        `;
+      }
+
+      // Logo preview
+      const logoPrev = overlay.querySelector('.qf-pdf-editor-logo-preview');
+      if (tpl.brand.logoDataUrl) {
+        logoPrev.innerHTML = `<img src="${tpl.brand.logoDataUrl}" style="max-width:100%;max-height:60px;"> <button class="qf-pdf-editor-logo-remove">ลบโลโก้</button>`;
+      } else {
+        logoPrev.innerHTML = '<div style="color:#64748b;font-size:11px;">ยังไม่มีโลโก้</div>';
+      }
+    };
+    rerender();
+
+    // ====== Add elements ======
+    const addElement = (type, opts = {}) => {
+      const id = `el_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
+      const defaults = {
+        text: { x: 10, y: 6, w: 120, h: 14, size: 10, text: 'ข้อความ', align: 'left' },
+        image: { x: 10, y: 6, w: 60, h: 30 },
+        qrPlaceholder: { x: 10, y: 6, w: 40, h: 40 },
+        variable: { x: 10, y: 6, w: 120, h: 14, size: 10, variable: opts.variable || 'alias', align: 'left' },
+      };
+      const base = defaults[type] || defaults.text;
+      const newEl = { id, type, ...base, dataUrl: '', bold: false };
+      // Shift into non-LOCKED zone if initial spot overlaps.
+      while (intersectsLocked(newEl)) {
+        newEl.y += 4;
+        if (newEl.y > J_AND_T_LAYOUT.pageSize.h - newEl.h) { newEl.y = 4; newEl.x += 4; }
+        if (newEl.x > J_AND_T_LAYOUT.pageSize.w - newEl.w) { newEl.x = 4; break; }
+      }
+      tpl.elements.push(newEl);
+      selectedId = id;
+      pushHistory();
+      rerender();
+    };
+
+    overlay.querySelectorAll('.qf-pdf-editor-add').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const kind = btn.dataset.add;
+        const v = btn.dataset.addvar;
+        if (v) { addElement('variable', { variable: v }); return; }
+        if (kind === 'logo') {
+          // "logo" shortcut: inserts an image placeholder and asks for PNG upload.
+          addElement('image');
+          setTimeout(() => {
+            const input = overlay.querySelector('.qf-pdf-img-upload');
+            input?.click();
+          }, 50);
+          return;
+        }
+        addElement(kind);
+      });
+    });
+
+    // ====== Canvas drag / select / resize ======
+    let dragState = null;
+    canvasEl.addEventListener('mousedown', (e) => {
+      const elNode = e.target.closest('.qf-pdf-editor-el');
+      if (!elNode) { selectedId = null; rerender(); return; }
+      const id = elNode.dataset.id;
+      selectedId = id;
+      const el = tpl.elements.find(x => x.id === id);
+      if (!el) return;
+      const isResize = e.target.classList.contains('qf-pdf-editor-resize');
+      const startX = e.clientX;
+      const startY = e.clientY;
+      dragState = {
+        id,
+        mode: isResize ? 'resize' : 'move',
+        startX, startY,
+        origX: el.x, origY: el.y, origW: el.w, origH: el.h,
+      };
+      rerender();
+      e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!dragState) return;
+      const el = tpl.elements.find(x => x.id === dragState.id);
+      if (!el) return;
+      const dx = (e.clientX - dragState.startX) / PDF_TEMPLATE_SCALE;
+      const dy = (e.clientY - dragState.startY) / PDF_TEMPLATE_SCALE;
+      let newX = el.x, newY = el.y, newW = el.w, newH = el.h;
+      if (dragState.mode === 'move') {
+        newX = snapToGrid(dragState.origX + dx);
+        newY = snapToGrid(dragState.origY + dy);
+        newW = el.w; newH = el.h;
+      } else {
+        newW = Math.max(8, snapToGrid(dragState.origW + dx));
+        newH = Math.max(8, snapToGrid(dragState.origH + dy));
+      }
+      // Clamp to page.
+      newX = Math.max(0, Math.min(J_AND_T_LAYOUT.pageSize.w - newW, newX));
+      newY = Math.max(0, Math.min(J_AND_T_LAYOUT.pageSize.h - newH, newY));
+      // LOCKED check.
+      const probe = { x: newX, y: newY, w: newW, h: newH };
+      const lockedHit = intersectsLocked(probe);
+      if (lockedHit) {
+        // Flash the locked region red and reject the move.
+        flashLockedRegion(lockedHit.id);
+        return;
+      }
+      el.x = newX; el.y = newY; el.w = newW; el.h = newH;
+      rerender();
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (dragState) {
+        pushHistory();
+        dragState = null;
+      }
+    });
+
+    const flashLockedRegion = (lockId) => {
+      const nodes = canvasEl.querySelectorAll('.qf-pdf-editor-locked');
+      nodes.forEach(n => {
+        if (n.textContent && J_AND_T_LAYOUT.locked.find(l => l.id === lockId)?.label === n.textContent) {
+          n.classList.add('qf-pdf-editor-locked-flash');
+          setTimeout(() => n.classList.remove('qf-pdf-editor-locked-flash'), 300);
+        }
+      });
+    };
+
+    // ====== Keyboard ======
+    const onEditorKey = (e) => {
+      if (!document.body.contains(overlay)) return;
+      // Don't hijack typing into form fields.
+      const tgt = e.target;
+      if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'SELECT' || tgt.tagName === 'TEXTAREA')) return;
+      if (e.key === 'Escape') {
+        cleanup();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        undo();
+        return;
+      }
+      if (!selectedId) return;
+      const el = tpl.elements.find(x => x.id === selectedId);
+      if (!el) return;
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        tpl.elements = tpl.elements.filter(x => x.id !== selectedId);
+        selectedId = null;
+        pushHistory();
+        rerender();
+        e.preventDefault();
+        return;
+      }
+      const step = e.shiftKey ? PDF_TEMPLATE_GRID_PT : 1;
+      let dx = 0, dy = 0;
+      if (e.key === 'ArrowLeft') dx = -step;
+      else if (e.key === 'ArrowRight') dx = step;
+      else if (e.key === 'ArrowUp') dy = -step;
+      else if (e.key === 'ArrowDown') dy = step;
+      else return;
+      const newX = Math.max(0, Math.min(J_AND_T_LAYOUT.pageSize.w - el.w, el.x + dx));
+      const newY = Math.max(0, Math.min(J_AND_T_LAYOUT.pageSize.h - el.h, el.y + dy));
+      const probe = { x: newX, y: newY, w: el.w, h: el.h };
+      const hit = intersectsLocked(probe);
+      if (hit) { flashLockedRegion(hit.id); e.preventDefault(); return; }
+      el.x = newX; el.y = newY;
+      pushHistory();
+      rerender();
+      e.preventDefault();
+    };
+    document.addEventListener('keydown', onEditorKey);
+
+    // ====== Properties edits ======
+    // Use 'change' for text/number (avoid re-render on every keystroke) and
+    // 'input' only for checkbox/radio. This keeps typing smooth without
+    // losing caret position.
+    const handlePropChange = (e) => {
+      const target = e.target;
+      if (!target.classList.contains('qf-pdf-prop')) return;
+      const el = tpl.elements.find(x => x.id === selectedId);
+      if (!el) return;
+      const k = target.dataset.k;
+      let v;
+      if (target.type === 'checkbox') v = target.checked;
+      else if (target.type === 'radio') { if (!target.checked) return; v = target.value; }
+      else if (target.type === 'number') v = Number(target.value) || 0;
+      else v = target.value;
+      if (['x', 'y', 'w', 'h'].includes(k)) {
+        const probe = { x: el.x, y: el.y, w: el.w, h: el.h, [k]: v };
+        const hit = intersectsLocked(probe);
+        if (hit) {
+          flashLockedRegion(hit.id);
+          target.value = el[k];
+          return;
+        }
+      }
+      el[k] = v;
+      pushHistory();
+      rerender();
+    };
+    overlay.addEventListener('change', handlePropChange);
+    // Radios + checkboxes don't fire 'change' reliably without blur — also
+    // bind 'input' but filter out text/number to avoid focus loss.
+    overlay.addEventListener('input', (e) => {
+      const t = e.target;
+      if (!t.classList.contains('qf-pdf-prop')) return;
+      if (t.type === 'text' || t.type === 'number') return;
+      handlePropChange(e);
+    });
+
+    // Delete button in properties
+    overlay.addEventListener('click', (e) => {
+      if (e.target.closest('.qf-pdf-editor-delete')) {
+        tpl.elements = tpl.elements.filter(x => x.id !== selectedId);
+        selectedId = null;
+        pushHistory();
+        rerender();
+      }
+    });
+
+    // Image upload
+    overlay.addEventListener('change', async (e) => {
+      if (e.target.classList.contains('qf-pdf-img-upload')) {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        if (file.size > 200 * 1024) { showToast('รูปเกิน 200KB — บีบอัดก่อนนะ', 2500); return; }
+        const dataUrl = await new Promise((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => resolve(r.result);
+          r.onerror = reject;
+          r.readAsDataURL(file);
+        });
+        const el = tpl.elements.find(x => x.id === selectedId);
+        if (el && el.type === 'image') {
+          el.dataUrl = dataUrl;
+          pushHistory();
+          rerender();
+        }
+      }
+      if (e.target.classList.contains('qf-pdf-editor-logo')) {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        if (file.size > 200 * 1024) { showToast('โลโก้เกิน 200KB — บีบอัดก่อนนะ', 2500); return; }
+        const dataUrl = await new Promise((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => resolve(r.result);
+          r.onerror = reject;
+          r.readAsDataURL(file);
+        });
+        tpl.brand.logoDataUrl = dataUrl;
+        pushHistory();
+        rerender();
+      }
+      if (e.target.classList.contains('qf-pdf-editor-zone')) {
+        const z = e.target.dataset.zone;
+        tpl.zones[z] = e.target.checked;
+        pushHistory();
+      }
+    });
+
+    overlay.addEventListener('click', (e) => {
+      if (e.target.classList.contains('qf-pdf-editor-logo-remove')) {
+        tpl.brand.logoDataUrl = null;
+        pushHistory();
+        rerender();
+      }
+    });
+
+    // Shop name / tagline / template name
+    overlay.querySelector('.qf-pdf-editor-shopname').addEventListener('input', (e) => {
+      tpl.brand.shopName = e.target.value;
+    });
+    overlay.querySelector('.qf-pdf-editor-tagline').addEventListener('input', (e) => {
+      tpl.brand.tagline = e.target.value;
+    });
+    overlay.querySelector('.qf-pdf-editor-name').addEventListener('input', (e) => {
+      tpl.name = e.target.value;
+    });
+    overlay.querySelector('.qf-pdf-editor-grid-toggle').addEventListener('change', (e) => {
+      showGrid = e.target.checked;
+      rerender();
+    });
+    overlay.querySelector('.qf-pdf-editor-undo').addEventListener('click', (e) => {
+      e.stopPropagation(); undo();
+    });
+
+    // Save / Cancel
+    const cleanup = () => {
+      document.removeEventListener('keydown', onEditorKey);
+      overlay.remove();
+    };
+    overlay.querySelector('.qf-pdf-editor-close').addEventListener('click', cleanup);
+    overlay.querySelector('.qf-pdf-editor-cancel').addEventListener('click', cleanup);
+    overlay.querySelector('.qf-pdf-editor-save').addEventListener('click', () => {
+      try {
+        if (existing) {
+          tpl.id = existing.id;
+          updatePdfTemplate(tpl);
+          showToast('บันทึกเทมเพลตแล้ว', 2000);
+        } else {
+          addPdfTemplate(tpl);
+          showToast('สร้างเทมเพลตใหม่แล้ว', 2000);
+        }
+        cleanup();
+        openPdfTemplateManager();
+      } catch (err) {
+        showToast(err.message, 3000);
+      }
+    });
+    overlay.querySelector('.qf-pdf-editor-saveas').addEventListener('click', () => {
+      try {
+        const copy = JSON.parse(JSON.stringify(tpl));
+        copy.id = null;
+        copy.name = (tpl.name || 'เทมเพลต') + ' (ใหม่)';
+        addPdfTemplate(copy);
+        showToast('บันทึกเป็นเทมเพลตใหม่แล้ว', 2000);
+        cleanup();
+        openPdfTemplateManager();
+      } catch (err) {
+        showToast(err.message, 3000);
+      }
+    });
+  }
+
+  // Expose for debugging / external smoke-test scripts.
+  window.__qfPdfTemplates = {
+    load: loadPdfTemplates,
+    save: savePdfTemplates,
+    getActive: getActivePdfTemplate,
+    setActive: setActivePdfTemplate,
+    add: addPdfTemplate,
+    update: updatePdfTemplate,
+    delete: deletePdfTemplate,
+    duplicate: duplicatePdfTemplate,
+    apply: applyPdfTemplate,
+    openEditor: openPdfTemplateEditor,
+    openManager: openPdfTemplateManager,
+    mockData: mockTemplateRecordData,
+  };
+
+  // ==================== END PDF TEMPLATE BUILDER ====================
+
   // ==================== INIT ====================
   function init() {
     if (!isOrderPage() && !isLabelsPage()) return;
