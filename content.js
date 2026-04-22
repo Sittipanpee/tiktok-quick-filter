@@ -904,6 +904,13 @@
 
   async function scanAllPages() {
     if (state.scanning) return;
+    // Warn user if an active planning session exists — scan would invalidate its IDs
+    if (loadPlanningSession()) {
+      const ok = await confirmInline('มีแผนค้างอยู่ — ละทิ้งแผนและ scan ใหม่?', 'ละทิ้ง');
+      if (!ok) return;
+      deletePlanningSession();
+      document.getElementById('qf-plan-recovery')?.remove();
+    }
     state.scanning = true;
     state.products.clear();
     state.weirdOrders = [];
@@ -3573,6 +3580,7 @@
             <div id="qf-settings-menu" class="qf-settings-menu" style="display:none;">
               <button id="qf-menu-workers">จัดการคนแพ็ค</button>
               <button id="qf-menu-csv">ดาวน์โหลดประวัติ CSV</button>
+              <button id="qf-menu-plan">🎨 วางแผน</button>
             </div>
           </div>
           <button id="qf-toggle-btn" title="ย่อ/ขยาย">−</button>
@@ -3677,6 +3685,22 @@
       settingsMenu.style.display = 'none';
       openCsvExportModal();
     });
+    const planBtn = document.getElementById('qf-menu-plan');
+    if (planBtn) {
+      const updatePlanBtn = () => {
+        const hasRecords = state.records.size > 0;
+        const hasWorkers = state.workers.length > 0;
+        planBtn.disabled = !hasRecords || !hasWorkers;
+        planBtn.title = !hasRecords ? 'scan ก่อน' : (!hasWorkers ? 'เพิ่มคนแพ็คก่อน' : '');
+      };
+      updatePlanBtn();
+      planBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        settingsMenu.style.display = 'none';
+        const existing = loadPlanningSession();
+        openPlanningPanel(existing);
+      });
+    }
     renderHistoryBadge();
     document.getElementById('qf-scan-btn').addEventListener('click', scanAllPages);
     document.getElementById('qf-select-toggle')?.addEventListener('click', () => {
@@ -4095,6 +4119,13 @@
       }
     }
     updateSelectionBar();
+    const planBtn = document.getElementById('qf-menu-plan');
+    if (planBtn) {
+      const hasRecords = state.records.size > 0;
+      const hasWorkers = state.workers.length > 0;
+      planBtn.disabled = !hasRecords || !hasWorkers;
+      planBtn.title = !hasRecords ? 'scan ก่อน' : (!hasWorkers ? 'เพิ่มคนแพ็คก่อน' : '');
+    }
   }
 
   function renderContent() {
@@ -4377,10 +4408,551 @@
     }[c]));
   }
 
+  // ==================== PLANNING PANEL ====================
+  const PLANNING_SESSION_KEY = 'qf_planning_session_v1';
+  const PLANNING_STUCK_TIMEOUT = 60 * 1000;
+  let _planSaveTimer = null;
+
+  function loadPlanningSession() {
+    try {
+      const raw = localStorage.getItem(PLANNING_SESSION_KEY);
+      if (!raw) return null;
+      const s = JSON.parse(raw);
+      if (!s || s.version !== 1) return null;
+      if (Date.now() > s.expiresAt) { localStorage.removeItem(PLANNING_SESSION_KEY); return null; }
+      const platform = isShopee() ? 'sp' : 'tk';
+      if (s.platform !== platform) return null;
+      return s;
+    } catch { return null; }
+  }
+
+  function savePlanningSession(session) {
+    try { localStorage.setItem(PLANNING_SESSION_KEY, JSON.stringify(session)); } catch {}
+  }
+
+  function deletePlanningSession() {
+    localStorage.removeItem(PLANNING_SESSION_KEY);
+  }
+
+  function debouncedSavePlan(session) {
+    clearTimeout(_planSaveTimer);
+    _planSaveTimer = setTimeout(() => savePlanningSession(session), 200);
+  }
+
+  function newPlanningSession() {
+    const platform = isShopee() ? 'sp' : 'tk';
+    const sessionId = 'sess_' + Math.random().toString(36).slice(2, 10);
+    const now = Date.now();
+    const allIds = [...state.records.keys()];
+    return {
+      version: 1,
+      sessionId,
+      platform,
+      scannedAt: now,
+      expiresAt: now + 24 * 60 * 60 * 1000,
+      unassignedIds: allIds,
+      columns: {},
+    };
+  }
+
+  function planTotalIds(session) {
+    const assigned = Object.values(session.columns).flatMap(c => c.fulfillUnitIds);
+    return session.unassignedIds.length + assigned.length;
+  }
+
+  function planPrintedIds(session) {
+    return Object.values(session.columns).flatMap(c => c.printedIds);
+  }
+
+  // Build card data from session — one card per unique productId:skuId combo in the given id list
+  function buildPlanCards(ids) {
+    const map = new Map(); // "productId:skuId" → {key, productId, skuId, name, count, ids}
+    for (const id of ids) {
+      const rec = state.records.get(id);
+      if (!rec?.skuList?.length) continue;
+      const s = rec.skuList[0];
+      const key = `${s.productId}:${s.skuId}`;
+      if (!map.has(key)) {
+        const alias = (getAlias(s.productId) || '').trim();
+        map.set(key, { key, productId: s.productId, skuId: s.skuId, name: alias || shortName(s.productName), count: 0, ids: [] });
+      }
+      map.get(key).count++;
+      map.get(key).ids.push(id);
+    }
+    return [...map.values()];
+  }
+
+  function showPlanChunkPopup(workerName, totalAvailable) {
+    return new Promise(resolve => {
+      if (totalAvailable === 0) { resolve(0); return; }
+      const overlay = document.createElement('div');
+      overlay.className = 'qf-modal-overlay';
+      overlay.innerHTML = `
+        <div class="qf-modal qf-plan-chunk-popup" role="dialog">
+          <div class="qf-plan-chunk-body">
+            <div class="qf-plan-chunk-label">กี่ใบให้ ${escapeHtml(workerName)}?</div>
+            <div class="qf-plan-chunk-row">
+              <input type="number" class="qf-plan-chunk-input" min="1" max="${totalAvailable}" value="${totalAvailable}"/>
+              <button class="qf-plan-chunk-all-btn">ทั้งหมด ${totalAvailable}</button>
+            </div>
+          </div>
+          <div class="qf-modal-actions">
+            <button class="qf-btn-cancel">ยกเลิก</button>
+            <button class="qf-btn-confirm">ตกลง</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+      const inp = overlay.querySelector('.qf-plan-chunk-input');
+      const cleanup = v => { overlay.remove(); resolve(v); };
+      overlay.querySelector('.qf-plan-chunk-all-btn').onclick = () => { inp.value = totalAvailable; };
+      overlay.querySelector('.qf-btn-cancel').onclick = () => cleanup(null);
+      overlay.querySelector('.qf-btn-confirm').onclick = () => {
+        const n = Math.max(1, Math.min(totalAvailable, parseInt(inp.value) || totalAvailable));
+        cleanup(n);
+      };
+      overlay.onclick = e => { if (e.target === overlay) cleanup(null); };
+      const onKey = e => { if (e.key === 'Escape') { cleanup(null); document.removeEventListener('keydown', onKey); } };
+      document.addEventListener('keydown', onKey);
+    });
+  }
+
+  function showPlanAutoSplitModal(session) {
+    return new Promise(resolve => {
+      const workers = state.workers.filter(w => session.columns[w.id]);
+      const allWorkers = state.workers;
+      if (!allWorkers.length) { resolve(null); return; }
+      const overlay = document.createElement('div');
+      overlay.className = 'qf-modal-overlay';
+      overlay.innerHTML = `
+        <div class="qf-modal qf-plan-split-modal" role="dialog">
+          <div class="qf-modal-title">วิธีแบ่งอัตโนมัติ</div>
+          <div class="qf-plan-split-body">
+            <div class="qf-plan-split-opt">
+              <input type="radio" name="qf-split-mode" value="even" checked/>
+              <span>เฉลี่ยทุกใบ (หาร /คน)</span>
+            </div>
+            <div class="qf-plan-split-opt">
+              <input type="radio" name="qf-split-mode" value="sku"/>
+              <span>แยกตาม SKU</span>
+            </div>
+            <div style="margin-top:10px;font-size:12px;font-weight:600;color:#555;">แบ่งให้:</div>
+            <div class="qf-plan-workers-check">
+              ${allWorkers.map(w => `
+                <label class="qf-plan-worker-toggle${session.columns[w.id] ? ' active' : ''}" data-id="${escapeHtml(w.id)}">
+                  <span class="qf-plan-worker-dot" style="background:${escapeHtml(w.color)};"></span>
+                  ${escapeHtml(w.name)}
+                  <input type="checkbox" style="display:none;" value="${escapeHtml(w.id)}" ${session.columns[w.id] ? 'checked' : ''}/>
+                </label>
+              `).join('')}
+            </div>
+          </div>
+          <div class="qf-modal-actions">
+            <button class="qf-btn-cancel">ยกเลิก</button>
+            <button class="qf-btn-confirm">ใช้</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+      overlay.querySelectorAll('.qf-plan-worker-toggle').forEach(lbl => {
+        lbl.addEventListener('click', () => {
+          const chk = lbl.querySelector('input[type=checkbox]');
+          chk.checked = !chk.checked;
+          lbl.classList.toggle('active', chk.checked);
+        });
+      });
+      const cleanup = v => { overlay.remove(); resolve(v); };
+      overlay.querySelector('.qf-btn-cancel').onclick = () => cleanup(null);
+      overlay.querySelector('.qf-btn-confirm').onclick = () => {
+        const mode = overlay.querySelector('input[name="qf-split-mode"]:checked').value;
+        const selected = [...overlay.querySelectorAll('.qf-plan-worker-toggle input[type=checkbox]:checked')]
+          .map(el => el.value);
+        cleanup({ mode, workerIds: selected });
+      };
+      overlay.onclick = e => { if (e.target === overlay) cleanup(null); };
+      const onKey = e => { if (e.key === 'Escape') { cleanup(null); document.removeEventListener('keydown', onKey); } };
+      document.addEventListener('keydown', onKey);
+    });
+  }
+
+  function applyAutoSplit(session, mode, workerIds) {
+    const workers = workerIds.map(id => state.workers.find(w => w.id === id)).filter(Boolean);
+    if (!workers.length || !session.unassignedIds.length) return session;
+    let newSession = { ...session, columns: { ...session.columns }, unassignedIds: [...session.unassignedIds] };
+
+    if (mode === 'even') {
+      const ids = [...newSession.unassignedIds];
+      const perWorker = Math.ceil(ids.length / workers.length);
+      let offset = 0;
+      for (const w of workers) {
+        const chunk = ids.slice(offset, offset + perWorker);
+        offset += perWorker;
+        if (!chunk.length) break;
+        const col = newSession.columns[w.id] || { workerId: w.id, workerName: w.name, workerColor: w.color, fulfillUnitIds: [], printedIds: [], failedIds: [], status: 'pending', lastPrintAt: null, errorMsg: null, retryCount: 0 };
+        newSession.columns[w.id] = { ...col, fulfillUnitIds: [...col.fulfillUnitIds, ...chunk] };
+      }
+      newSession.unassignedIds = ids.slice(offset);
+    } else {
+      // by SKU: group unassigned ids by productId:skuId
+      const groups = new Map();
+      for (const id of newSession.unassignedIds) {
+        const rec = state.records.get(id);
+        const s = rec?.skuList?.[0];
+        const k = s ? `${s.productId}:${s.skuId}` : 'unknown';
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k).push(id);
+      }
+      // Assign each group to worker with fewest current ids (greedy)
+      const workerCounts = workers.map(w => ({ w, count: (newSession.columns[w.id]?.fulfillUnitIds || []).length }));
+      for (const [, groupIds] of groups) {
+        workerCounts.sort((a, b) => a.count - b.count);
+        const { w } = workerCounts[0];
+        const col = newSession.columns[w.id] || { workerId: w.id, workerName: w.name, workerColor: w.color, fulfillUnitIds: [], printedIds: [], failedIds: [], status: 'pending', lastPrintAt: null, errorMsg: null, retryCount: 0 };
+        newSession.columns[w.id] = { ...col, fulfillUnitIds: [...col.fulfillUnitIds, ...groupIds] };
+        workerCounts[0].count += groupIds.length;
+      }
+      newSession.unassignedIds = [];
+    }
+    return newSession;
+  }
+
+  async function printPlanColumn(session, workerId, ids, renderFn) {
+    const col = session.columns[workerId];
+    if (!col) return;
+    const newCol = { ...col, status: 'printing', lastPrintAt: Date.now(), errorMsg: null };
+    const newSession = { ...session, columns: { ...session.columns, [workerId]: newCol } };
+    debouncedSavePlan(newSession);
+    renderFn(newSession);
+
+    try {
+      const printIds_ = ids.filter(id => !col.printedIds.includes(id));
+      if (!printIds_.length) { renderFn({ ...newSession, columns: { ...newSession.columns, [workerId]: { ...newCol, status: 'done' } } }); return; }
+
+      const baseFilename = makeBaseFilename(col.workerName || 'plan');
+      const chunks = [];
+      const CHUNK_SZ = 200;
+      for (let i = 0; i < printIds_.length; i += CHUNK_SZ) {
+        const sl = printIds_.slice(i, i + CHUNK_SZ);
+        chunks.push({ ids: sl, label: col.workerName || 'แผน', filename: `${baseFilename}.pdf` });
+      }
+      const ok = await runChunkedExport(chunks, `พิมพ์: ${col.workerName}`, {
+        baseFilename,
+        totalLabels: printIds_.length,
+        workerId: col.workerId,
+        workerName: col.workerName,
+      });
+
+      const success = ok;
+      const updatedCol = {
+        ...newCol,
+        status: success ? 'done' : 'error',
+        printedIds: success ? [...col.printedIds, ...printIds_] : col.printedIds,
+        failedIds: success ? [] : printIds_,
+        lastPrintAt: Date.now(),
+        errorMsg: success ? null : 'พิมพ์ไม่สำเร็จ ลองใหม่',
+        retryCount: success ? col.retryCount : col.retryCount + 1,
+      };
+      if (success) {
+        for (const id of printIds_) state.printedUnitIds.add(id);
+      }
+      const finalSession = { ...newSession, columns: { ...newSession.columns, [workerId]: updatedCol } };
+      debouncedSavePlan(finalSession);
+      renderFn(finalSession);
+    } catch (e) {
+      console.error('[QF] plan print failed:', e);
+      const errCol = { ...newCol, status: 'error', errorMsg: e.message || 'ผิดพลาด', retryCount: col.retryCount + 1 };
+      const errSession = { ...newSession, columns: { ...newSession.columns, [workerId]: errCol } };
+      debouncedSavePlan(errSession);
+      renderFn(errSession);
+    }
+  }
+
+  function openPlanningPanel(initialSession) {
+    document.querySelectorAll('.qf-plan-overlay').forEach(e => e.remove());
+
+    let session = initialSession || newPlanningSession();
+
+    // Ensure all current workers have a column entry
+    for (const w of state.workers) {
+      if (!session.columns[w.id]) {
+        session = { ...session, columns: { ...session.columns, [w.id]: { workerId: w.id, workerName: w.name, workerColor: w.color, fulfillUnitIds: [], printedIds: [], failedIds: [], status: 'pending', lastPrintAt: null, errorMsg: null, retryCount: 0 } } };
+      }
+    }
+
+    // Fix stuck printing columns on load
+    for (const [wid, col] of Object.entries(session.columns)) {
+      if (col.status === 'printing' && col.lastPrintAt && Date.now() - col.lastPrintAt > PLANNING_STUCK_TIMEOUT) {
+        session = { ...session, columns: { ...session.columns, [wid]: { ...col, status: 'error', errorMsg: 'อาจถูกขัดจังหวะ กดพิมพ์ซ้ำ' } } };
+      }
+    }
+
+    debouncedSavePlan(session);
+    window.__qfPlanningSession = () => session;
+
+    const overlay = document.createElement('div');
+    overlay.className = 'qf-plan-overlay';
+    document.body.appendChild(overlay);
+
+    let _dragCardKey = null;
+    let _dragSourceZone = null; // 'unassigned' | workerId
+
+    const render = (s) => {
+      session = s;
+      window.__qfPlanningSession = () => session;
+      const total = planTotalIds(session);
+      const printed = planPrintedIds(session).length;
+      const anyPrinting = Object.values(session.columns).some(c => c.status === 'printing');
+
+      overlay.innerHTML = `
+        <div class="qf-plan-panel">
+          <div class="qf-plan-header">
+            <span class="qf-plan-title">🎨 แผนงานแพ็ค — ${total} ใบ · ${printed} พิมพ์แล้ว</span>
+            <button class="qf-plan-header-btn qf-plan-auto-btn" title="แบ่งอัตโนมัติ">💡 auto</button>
+            <button class="qf-plan-header-btn qf-plan-printall-btn" ${anyPrinting ? 'disabled' : ''}>🖨 พิมพ์ทั้งหมด</button>
+            <button class="qf-plan-close">✕</button>
+          </div>
+          <div class="qf-plan-body">
+            <div class="qf-plan-zone" id="qf-plan-zone-unassigned">
+              <div class="qf-plan-zone-header">
+                <span class="qf-plan-zone-title">📦 ยังไม่มอบหมาย (${session.unassignedIds.length} ใบ)</span>
+              </div>
+              <div class="qf-plan-cards" id="qf-plan-cards-unassigned" data-zone="unassigned">
+                ${renderPlanCards(session.unassignedIds)}
+              </div>
+            </div>
+            ${Object.entries(session.columns).map(([wid, col]) => renderColumn(wid, col, session)).join('')}
+          </div>
+        </div>
+      `;
+
+      attachPlanEvents(overlay, session, render);
+    };
+
+    const renderPlanCards = (ids) => {
+      const cards = buildPlanCards(ids);
+      if (!cards.length) return `<div class="qf-plan-empty-hint">ว่าง — ลากการ์ดมาวางที่นี่</div>`;
+      return cards.map(c => `
+        <div class="qf-plan-card" draggable="true" data-card-key="${escapeHtml(c.key)}" data-card-count="${c.count}" title="${escapeHtml(c.name)} (${c.count} ใบ)">
+          ${escapeHtml(c.name)}<span class="qf-plan-card-count">${c.count}</span>
+        </div>
+      `).join('');
+    };
+
+    const renderColumn = (wid, col, s) => {
+      const locked = col.status === 'printing' || col.status === 'done';
+      const statusLabel = { pending: 'รอพิมพ์', printing: 'กำลังพิมพ์...', done: 'เสร็จ', partial: 'บางส่วน', error: 'ผิดพลาด', stale: 'คนแพ็คถูกลบ' }[col.status] || col.status;
+      const dot = col.workerColor ? `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${escapeHtml(col.workerColor)};margin-right:4px;vertical-align:middle;flex-shrink:0;"></span>` : '';
+
+      let btns = '';
+      if (col.status === 'pending') btns = `<button class="qf-plan-zone-btn primary" data-action="print" data-wid="${escapeHtml(wid)}">🖨 พิมพ์</button>`;
+      else if (col.status === 'done') btns = `<button class="qf-plan-zone-btn primary" data-action="reprint" data-wid="${escapeHtml(wid)}">🖨 พิมพ์ซ้ำ</button><button class="qf-plan-zone-btn" data-action="reset" data-wid="${escapeHtml(wid)}">↻ รีเซ็ต</button>`;
+      else if (col.status === 'partial') {
+        const failCount = col.failedIds.length;
+        btns = `<button class="qf-plan-zone-btn primary" data-action="retry" data-wid="${escapeHtml(wid)}">🔁 ลองอีกครั้ง ${failCount}</button><button class="qf-plan-zone-btn" data-action="return" data-wid="${escapeHtml(wid)}">↩ คืน</button>`;
+      } else if (col.status === 'error') {
+        btns = col.retryCount < 3
+          ? `<button class="qf-plan-zone-btn primary" data-action="retry" data-wid="${escapeHtml(wid)}">🔁 Retry</button><button class="qf-plan-zone-btn" data-action="return" data-wid="${escapeHtml(wid)}">↩ คืน</button>`
+          : `<button class="qf-plan-zone-btn" data-action="return" data-wid="${escapeHtml(wid)}">↩ คืน</button>`;
+      } else if (col.status === 'printing') {
+        btns = `<span class="qf-plan-zone-btn" style="cursor:default;">⏳</span>`;
+      }
+
+      const errHtml = col.errorMsg ? `<div style="font-size:10px;color:#991b1b;margin-top:4px;">${escapeHtml(col.errorMsg)}</div>` : '';
+
+      return `
+        <div class="qf-plan-zone" data-wzone="${escapeHtml(wid)}">
+          <div class="qf-plan-zone-header">
+            <span class="qf-plan-zone-title">${dot}${escapeHtml(col.workerName)} (${col.fulfillUnitIds.length})</span>
+            <span class="qf-plan-zone-status ${col.status}">${statusLabel}</span>
+            ${btns}
+          </div>
+          ${errHtml}
+          <div class="qf-plan-cards" id="qf-plan-cards-${escapeHtml(wid)}" data-zone="${escapeHtml(wid)}" data-locked="${locked ? '1' : '0'}">
+            ${renderPlanCards(col.fulfillUnitIds)}
+          </div>
+        </div>
+      `;
+    };
+
+    const attachPlanEvents = (root, s, rerender) => {
+      root.querySelector('.qf-plan-close').onclick = () => {
+        const anyPrinting = Object.values(s.columns).some(c => c.status === 'printing');
+        if (anyPrinting) { showToast('กำลังพิมพ์อยู่ — รอให้เสร็จก่อนปิด', 2500); return; }
+        overlay.remove();
+        renderRecoveryBanner();
+      };
+
+      root.querySelector('.qf-plan-auto-btn').onclick = async () => {
+        const result = await showPlanAutoSplitModal(s);
+        if (!result || !result.workerIds.length) return;
+        const next = applyAutoSplit(s, result.mode, result.workerIds);
+        debouncedSavePlan(next);
+        rerender(next);
+      };
+
+      root.querySelector('.qf-plan-printall-btn').onclick = async () => {
+        const nonDone = Object.entries(s.columns).filter(([, c]) => c.status !== 'done' && c.status !== 'printing' && c.fulfillUnitIds.length > 0);
+        if (!nonDone.length) { showToast('ทุกคอลัมน์พิมพ์แล้วหรือว่างอยู่', 2000); return; }
+        const breakdown = nonDone.map(([, c]) => `${c.workerName}: ${c.fulfillUnitIds.length} ใบ`).join(', ');
+        const ok = await confirmInline(`พิมพ์ทั้งหมด? ${breakdown}`, 'พิมพ์');
+        if (!ok) return;
+        for (const [wid, col] of nonDone) {
+          printPlanColumn(s, wid, col.fulfillUnitIds, ns => { rerender(ns); s = ns; });
+        }
+      };
+
+      root.querySelectorAll('[data-action]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const action = btn.dataset.action;
+          const wid = btn.dataset.wid;
+          const col = s.columns[wid];
+          if (!col) return;
+
+          if (action === 'print' || action === 'reprint') {
+            const ids = action === 'reprint' ? col.fulfillUnitIds : col.fulfillUnitIds.filter(id => !col.printedIds.includes(id));
+            printPlanColumn(s, wid, ids, ns => { rerender(ns); s = ns; });
+          } else if (action === 'retry') {
+            const ids = col.failedIds.length > 0 ? col.failedIds : col.fulfillUnitIds;
+            printPlanColumn(s, wid, ids, ns => { rerender(ns); s = ns; });
+          } else if (action === 'return') {
+            const returnIds = col.failedIds.length > 0 ? col.failedIds : col.fulfillUnitIds;
+            const updatedCol = { ...col, fulfillUnitIds: col.fulfillUnitIds.filter(id => !returnIds.includes(id)), failedIds: [], status: 'pending', errorMsg: null };
+            const next = { ...s, columns: { ...s.columns, [wid]: updatedCol }, unassignedIds: [...s.unassignedIds, ...returnIds] };
+            debouncedSavePlan(next);
+            rerender(next);
+          } else if (action === 'reset') {
+            const updatedCol = { ...col, status: 'pending', printedIds: [], failedIds: [], errorMsg: null, retryCount: 0 };
+            const next = { ...s, columns: { ...s.columns, [wid]: updatedCol } };
+            debouncedSavePlan(next);
+            rerender(next);
+          }
+        });
+      });
+
+      // Drag-drop
+      root.querySelectorAll('.qf-plan-card[draggable]').forEach(card => {
+        card.addEventListener('dragstart', e => {
+          _dragCardKey = card.dataset.cardKey;
+          _dragSourceZone = card.closest('[data-zone]')?.dataset.zone;
+          card.classList.add('qf-dragging');
+          e.dataTransfer.effectAllowed = 'move';
+        });
+        card.addEventListener('dragend', () => {
+          card.classList.remove('qf-dragging');
+          root.querySelectorAll('.qf-plan-cards').forEach(el => el.classList.remove('qf-drag-over'));
+        });
+      });
+
+      root.querySelectorAll('.qf-plan-cards').forEach(dropZone => {
+        dropZone.addEventListener('dragover', e => {
+          const locked = dropZone.dataset.locked === '1';
+          if (locked && dropZone.dataset.zone !== _dragSourceZone) return;
+          e.preventDefault();
+          dropZone.classList.add('qf-drag-over');
+        });
+        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('qf-drag-over'));
+        dropZone.addEventListener('drop', async e => {
+          e.preventDefault();
+          dropZone.classList.remove('qf-drag-over');
+          const targetZone = dropZone.dataset.zone;
+          if (!_dragCardKey || targetZone === _dragSourceZone) return;
+
+          const srcZone = _dragSourceZone;
+          const cardKey = _dragCardKey;
+
+          // Find ids for this card in source zone
+          const srcIds = srcZone === 'unassigned' ? s.unassignedIds : (s.columns[srcZone]?.fulfillUnitIds || []);
+          const cardObj = buildPlanCards(srcIds).find(c => c.key === cardKey);
+          if (!cardObj) return;
+
+          const totalAvail = cardObj.count;
+          let qty = totalAvail;
+
+          // Skip popup for qty=1 or dropping back to unassigned
+          if (qty > 1 && targetZone !== 'unassigned') {
+            const targetWorker = state.workers.find(w => w.id === targetZone);
+            const workerName = targetWorker?.name || targetZone;
+            const chosen = await showPlanChunkPopup(workerName, totalAvail);
+            if (chosen === null) return;
+            qty = chosen;
+          }
+
+          // Transfer 'qty' ids of this card from srcZone to targetZone
+          let idsToMove = cardObj.ids.slice(0, qty);
+          const remaining = cardObj.ids.slice(qty);
+
+          let next = { ...s, unassignedIds: [...s.unassignedIds], columns: { ...s.columns } };
+
+          if (srcZone === 'unassigned') {
+            next.unassignedIds = s.unassignedIds.filter(id => !idsToMove.includes(id));
+          } else {
+            const srcCol = s.columns[srcZone];
+            next.columns[srcZone] = { ...srcCol, fulfillUnitIds: srcCol.fulfillUnitIds.filter(id => !idsToMove.includes(id)) };
+          }
+
+          if (targetZone === 'unassigned') {
+            next.unassignedIds = [...next.unassignedIds, ...idsToMove];
+          } else {
+            const existingCol = next.columns[targetZone];
+            if (!existingCol) return;
+            next.columns[targetZone] = { ...existingCol, fulfillUnitIds: [...existingCol.fulfillUnitIds, ...idsToMove] };
+          }
+
+          debouncedSavePlan(next);
+          rerender(next);
+        });
+      });
+    };
+
+    // beforeunload guard
+    const beforeUnloadHandler = (e) => {
+      const anyPrinting = Object.values(session.columns).some(c => c.status === 'printing');
+      if (anyPrinting) { e.preventDefault(); e.returnValue = 'กำลังพิมพ์อยู่ — แน่ใจหรือว่าจะออก?'; return e.returnValue; }
+    };
+    window.addEventListener('beforeunload', beforeUnloadHandler);
+    overlay.addEventListener('remove', () => window.removeEventListener('beforeunload', beforeUnloadHandler), { once: true });
+
+    render(session);
+  }
+
+  function renderRecoveryBanner() {
+    document.getElementById('qf-plan-recovery')?.remove();
+    const session = loadPlanningSession();
+    if (!session) return;
+    const total = planTotalIds(session);
+    const workerCount = Object.keys(session.columns).length;
+    if (!total) return;
+    const banner = document.createElement('div');
+    banner.id = 'qf-plan-recovery';
+    banner.className = 'qf-plan-recovery';
+    banner.innerHTML = `
+      <span class="qf-plan-recovery-msg">🎨 มีแผนงานค้างอยู่ (${total} ใบ, ${workerCount} คน)</span>
+      <button class="qf-plan-recovery-btn qf-plan-recovery-open">เปิด</button>
+      <button class="qf-plan-recovery-btn qf-plan-recovery-discard">ละทิ้ง</button>
+    `;
+    const body = document.getElementById('qf-body');
+    if (!body) return;
+    body.insertBefore(banner, body.firstChild);
+    banner.querySelector('.qf-plan-recovery-open').onclick = () => {
+      banner.remove();
+      openPlanningPanel(session);
+    };
+    banner.querySelector('.qf-plan-recovery-discard').onclick = () => {
+      deletePlanningSession();
+      banner.remove();
+    };
+  }
+
+  // ==================== END PLANNING PANEL ====================
+
+  window.__qfPlanningSession = () => null;
+
   // ==================== INIT ====================
   function init() {
     if (!isOrderPage() && !isLabelsPage()) return;
     buildWidget();
+    // Show recovery banner after widget is built (DOM must exist)
+    setTimeout(renderRecoveryBanner, 0);
   }
 
   if (document.readyState === 'loading') {
