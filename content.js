@@ -179,6 +179,245 @@
     localStorage.setItem(VARIANT_ALIAS_STORAGE_KEY, JSON.stringify(obj));
   }
 
+  // ==================== PRINT HISTORY ====================
+  // History stores fulfillUnitId arrays + metadata (NOT PDF bytes). Re-download
+  // rebuilds the PDF by re-calling TikTok's generate API with the same IDs —
+  // no extra quota cost since it's the same request TikTok already accepted.
+  const HISTORY_KEY = 'qf_print_history_v1';
+  const HISTORY_MAX_ENTRIES = 200;
+  const HISTORY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+  const HISTORY_TRIM_ON_QUOTA = 50;
+
+  function loadHistory() {
+    try {
+      const raw = localStorage.getItem(HISTORY_KEY);
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) return [];
+      const cutoff = Date.now() - HISTORY_MAX_AGE_MS;
+      return arr.filter(e => e && typeof e.timestamp === 'number' && e.timestamp >= cutoff);
+    } catch { return []; }
+  }
+
+  function saveHistory(arr) {
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(arr));
+    } catch (e) {
+      // Quota exceeded → trim aggressively and retry
+      try {
+        const trimmed = arr.slice(0, HISTORY_TRIM_ON_QUOTA);
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(trimmed));
+      } catch (e2) {
+        console.warn('[QF] history save failed even after trim:', e2);
+      }
+    }
+  }
+
+  function addHistoryEntry(entry) {
+    const arr = loadHistory();
+    arr.unshift(entry);
+    const capped = arr.slice(0, HISTORY_MAX_ENTRIES);
+    saveHistory(capped);
+  }
+
+  function deleteHistoryEntry(id) {
+    const arr = loadHistory().filter(e => e.id !== id);
+    saveHistory(arr);
+  }
+
+  function clearAllHistory() {
+    saveHistory([]);
+  }
+
+  function historyRecentCount(windowMs = 24 * 60 * 60 * 1000) {
+    const cutoff = Date.now() - windowMs;
+    return loadHistory().filter(e => e.timestamp >= cutoff).length;
+  }
+
+  function renderHistoryBadge() {
+    const btn = document.getElementById('qf-history-btn');
+    if (!btn) return;
+    const badge = btn.querySelector('.qf-history-badge');
+    if (!badge) return;
+    const n = historyRecentCount();
+    if (n > 0) {
+      badge.textContent = n > 99 ? '99+' : String(n);
+      badge.style.display = '';
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+
+  function formatHistoryDayHeader(ts) {
+    const d = new Date(ts);
+    const now = new Date();
+    const isSameDay = (a, b) => a.getFullYear() === b.getFullYear()
+      && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    if (isSameDay(d, now)) return 'วันนี้';
+    if (isSameDay(d, yesterday)) return 'เมื่อวาน';
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+  }
+
+  function formatHistoryTime(ts) {
+    const d = new Date(ts);
+    const pad = n => String(n).padStart(2, '0');
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  // Group history entries by day key (YYYY-MM-DD), preserving newest-first order.
+  function groupHistoryByDay(entries) {
+    const groups = [];
+    let currentKey = null;
+    let currentEntries = null;
+    for (const e of entries) {
+      const d = new Date(e.timestamp);
+      const key = `${d.getFullYear()}-${d.getMonth()+1}-${d.getDate()}`;
+      if (key !== currentKey) {
+        currentKey = key;
+        currentEntries = [];
+        groups.push({ key, header: formatHistoryDayHeader(e.timestamp), entries: currentEntries });
+      }
+      currentEntries.push(e);
+    }
+    return groups;
+  }
+
+  function openHistoryModal() {
+    document.querySelectorAll('.qf-history-modal-overlay').forEach(e => e.remove());
+    const overlay = document.createElement('div');
+    overlay.className = 'qf-modal-overlay qf-history-modal-overlay';
+    overlay.innerHTML = `
+      <div class="qf-modal qf-history-modal" role="dialog">
+        <div class="qf-history-modal-header">
+          <div class="qf-history-modal-title">ประวัติการพิมพ์</div>
+          <button class="qf-history-modal-close" aria-label="ปิด">×</button>
+        </div>
+        <div class="qf-history-modal-body"></div>
+        <div class="qf-history-modal-footer">
+          <button class="qf-history-clear-all">ล้างทั้งหมด</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const body = overlay.querySelector('.qf-history-modal-body');
+    const clearAllBtn = overlay.querySelector('.qf-history-clear-all');
+
+    const cleanup = () => { overlay.remove(); };
+
+    const render = () => {
+      const entries = loadHistory();
+      if (entries.length === 0) {
+        body.innerHTML = `<div class="qf-history-empty">ยังไม่มีประวัติ — เริ่มพิมพ์เพื่อเก็บประวัติอัตโนมัติ</div>`;
+        clearAllBtn.style.display = 'none';
+        return;
+      }
+      clearAllBtn.style.display = '';
+      const groups = groupHistoryByDay(entries);
+      body.innerHTML = groups.map(g => `
+        <div class="qf-history-day">
+          <div class="qf-history-day-header">${escapeHtml(g.header)}</div>
+          ${g.entries.map(e => `
+            <div class="qf-history-row" data-id="${escapeHtml(e.id)}">
+              <div class="qf-history-row-info">
+                <div class="qf-history-row-top">
+                  <span class="qf-history-time">${formatHistoryTime(e.timestamp)}</span>
+                  <span class="qf-history-title" title="${escapeHtml(e.title)}">${escapeHtml(e.title)}</span>
+                </div>
+                <div class="qf-history-meta">${e.chunks.length} ไฟล์ · ${e.totalLabels} ใบ</div>
+              </div>
+              <div class="qf-history-row-actions">
+                <button class="qf-history-redownload" data-id="${escapeHtml(e.id)}">ดาวน์โหลดใหม่</button>
+                <button class="qf-history-delete" data-id="${escapeHtml(e.id)}" title="ลบ" aria-label="ลบ">🗑</button>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      `).join('');
+
+      body.querySelectorAll('.qf-history-redownload').forEach(btn => {
+        btn.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          const id = btn.dataset.id;
+          const entry = loadHistory().find(x => x.id === id);
+          if (!entry) { showToast('ไม่พบรายการในประวัติ', 1500); return; }
+          // Close history modal; new chunked result modal replaces it.
+          cleanup();
+          const chunks = entry.chunks.map(c => ({
+            ids: c.ids,
+            label: c.label,
+            filename: c.filename,
+          }));
+          try {
+            // Pass null historyMeta to prevent duplicate entries.
+            await runChunkedExport(chunks, entry.title, null);
+          } catch (err) {
+            console.error('[QF] re-download failed:', err);
+            showErrorToast('ดาวน์โหลดซ้ำไม่สำเร็จ: ' + (err?.message || err), {
+              source: 'historyRedownload',
+              error: String(err && (err.stack || err.message || err)),
+            });
+          }
+        });
+      });
+
+      body.querySelectorAll('.qf-history-delete').forEach(btn => {
+        btn.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          deleteHistoryEntry(btn.dataset.id);
+          render();
+          renderHistoryBadge();
+        });
+      });
+    };
+
+    render();
+
+    overlay.querySelector('.qf-history-modal-close').onclick = (e) => {
+      e.stopPropagation();
+      cleanup();
+    };
+    clearAllBtn.onclick = async (e) => {
+      e.stopPropagation();
+      const ok = await confirmInline('ล้างประวัติทั้งหมด?', 'ล้าง');
+      if (ok) {
+        clearAllHistory();
+        renderHistoryBadge();
+        render();
+      }
+    };
+    overlay.onclick = (e) => { if (e.target === overlay) cleanup(); };
+    const onKey = (e) => { if (e.key === 'Escape') { cleanup(); document.removeEventListener('keydown', onKey); } };
+    document.addEventListener('keydown', onKey);
+  }
+
+  // Small inline confirm used by history "ล้างทั้งหมด". Matches qf-modal style.
+  function confirmInline(title, dangerLabel) {
+    return new Promise(resolve => {
+      const overlay = document.createElement('div');
+      overlay.className = 'qf-modal-overlay';
+      overlay.innerHTML = `
+        <div class="qf-modal" role="dialog">
+          <div class="qf-modal-title">${escapeHtml(title)}</div>
+          <div class="qf-modal-actions">
+            <button class="qf-btn-cancel">ยกเลิก</button>
+            <button class="qf-btn-confirm qf-btn-danger">${escapeHtml(dangerLabel || 'ยืนยัน')}</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+      const cleanup = v => { overlay.remove(); resolve(v); };
+      overlay.querySelector('.qf-btn-cancel').onclick = (e) => { e.stopPropagation(); cleanup(false); };
+      overlay.querySelector('.qf-btn-confirm').onclick = (e) => { e.stopPropagation(); cleanup(true); };
+      overlay.onclick = e => { if (e.target === overlay) cleanup(false); };
+      const onKey = e => { if (e.key === 'Escape') { cleanup(false); document.removeEventListener('keydown', onKey); } };
+      document.addEventListener('keydown', onKey);
+    });
+  }
+
   // Platform-prefixed alias keys keep TikTok and Shopee aliases separate
   // when the same numeric productId/skuId collides across the two platforms.
   // Migration: existing (unprefixed) keys are read as TikTok-side legacy;
@@ -1523,8 +1762,9 @@
   function showChunkedResult({title, totalIds, chunks}) {
     // chunks: [{count, label, filename}]
     document.querySelectorAll('.qf-progress-overlay').forEach(e => e.remove());
+    document.querySelectorAll('.qf-chunked-bubble').forEach(e => e.remove());
     const overlay = document.createElement('div');
-    overlay.className = 'qf-progress-overlay';
+    overlay.className = 'qf-progress-overlay qf-chunked-overlay';
     const chunkRows = chunks.map((c, i) => `
       <div class="qf-chunk-row" data-i="${i}">
         <div class="qf-chunk-row-top">
@@ -1537,7 +1777,13 @@
     `).join('');
     overlay.innerHTML = `
       <div class="qf-progress-card qf-chunked-card">
-        <div class="qf-progress-title">${escapeHtml(title)}</div>
+        <div class="qf-chunked-header">
+          <div class="qf-progress-title">${escapeHtml(title)}</div>
+          <div class="qf-chunked-header-actions">
+            <button class="qf-btn-minimize-result" title="ย่อ">ย่อ</button>
+            <button class="qf-btn-x-result" aria-label="ปิด" style="display:none;">×</button>
+          </div>
+        </div>
         <div class="qf-chunked-sub">${totalIds} ฉลาก • ${chunks.length} ไฟล์</div>
         <div class="qf-chunked-list">${chunkRows}</div>
         <div class="qf-chunked-footer">
@@ -1548,25 +1794,121 @@
     `;
     document.body.appendChild(overlay);
     const cards = overlay.querySelectorAll('.qf-chunk-row');
-    const blobUrls = {}; // chunkIdx → {url, filename}
+    // chunkIdx → {url, filename, downloaded}
+    const blobUrls = {};
+    const totalChunks = chunks.length;
     const downloadAllBtn = overlay.querySelector('.qf-btn-download-all');
     const closeBtn = overlay.querySelector('.qf-btn-close-result');
+    const xBtn = overlay.querySelector('.qf-btn-x-result');
+    const minBtn = overlay.querySelector('.qf-btn-minimize-result');
+    let bubble = null;
+    let allDoneFlag = false;
 
-    const cleanup = () => {
-      Object.values(blobUrls).forEach(({url}) => URL.revokeObjectURL(url));
-      overlay.remove();
+    const markDownloaded = (i) => {
+      if (blobUrls[i]) blobUrls[i].downloaded = true;
+      const row = cards[i];
+      if (row) row.classList.add('qf-chunk-downloaded');
+      updateBubbleLabel();
     };
-    closeBtn.onclick = cleanup;
-    overlay.onclick = (e) => { if (e.target === overlay && closeBtn.style.display !== 'none') cleanup(); };
+
+    const countUndownloaded = () => {
+      return Object.values(blobUrls).filter(b => b && !b.downloaded).length;
+    };
+    const countPending = () => {
+      // Chunks that don't yet have a blob (not completed) and not errored
+      let pending = 0;
+      for (let i = 0; i < totalChunks; i++) {
+        if (!blobUrls[i]) {
+          const row = cards[i];
+          if (!row.classList.contains('qf-chunk-error')) pending++;
+        }
+      }
+      return pending;
+    };
+
+    const doCleanup = () => {
+      Object.values(blobUrls).forEach(({url}) => { try { URL.revokeObjectURL(url); } catch {} });
+      overlay.remove();
+      if (bubble) { bubble.remove(); bubble = null; }
+    };
+
+    const tryClose = () => {
+      const undownloaded = countUndownloaded();
+      if (undownloaded > 0) {
+        showCloseUndownloadedConfirm(undownloaded).then(ok => {
+          if (ok) doCleanup();
+        });
+      } else {
+        doCleanup();
+      }
+    };
+
+    closeBtn.onclick = tryClose;
+    xBtn.onclick = tryClose;
+
+    // P0: removed background-click dismiss — users were accidentally losing
+    // rendered PDFs by clicking outside the modal. Close is now explicit.
 
     downloadAllBtn.onclick = () => {
-      Object.values(blobUrls).forEach(({url, filename}, i) => {
+      const entries = Object.entries(blobUrls);
+      entries.forEach(([i, {url, filename}], idx) => {
         setTimeout(() => {
           const a = document.createElement('a');
           a.href = url; a.download = filename;
           document.body.appendChild(a); a.click(); a.remove();
-        }, i * 200);
+          markDownloaded(parseInt(i, 10));
+        }, idx * 200);
       });
+    };
+
+    const updateBubbleLabel = () => {
+      if (!bubble) return;
+      const ready = Object.keys(blobUrls).length;
+      const undownloaded = countUndownloaded();
+      const pending = countPending();
+      const txt = bubble.querySelector('.qf-chunked-bubble-text');
+      if (!txt) return;
+      if (pending > 0) {
+        txt.textContent = `กำลังพิมพ์ ${ready}/${totalChunks}`;
+      } else if (undownloaded > 0) {
+        txt.textContent = `พร้อมโหลด ${undownloaded} ไฟล์`;
+      } else {
+        txt.textContent = `เสร็จแล้ว ${totalChunks} ไฟล์`;
+      }
+    };
+
+    const showBubble = () => {
+      if (bubble) return;
+      bubble = document.createElement('div');
+      bubble.className = 'qf-chunked-bubble';
+      bubble.innerHTML = `
+        <span class="qf-chunked-bubble-icon">📄</span>
+        <span class="qf-chunked-bubble-text">${escapeHtml(title)}</span>
+        <button class="qf-chunked-bubble-close" aria-label="ปิด">×</button>
+      `;
+      document.body.appendChild(bubble);
+      // Expand on bubble click (but not on × click)
+      bubble.addEventListener('click', (e) => {
+        if (e.target.closest('.qf-chunked-bubble-close')) return;
+        hideBubble();
+        overlay.style.display = '';
+      });
+      bubble.querySelector('.qf-chunked-bubble-close').addEventListener('click', (e) => {
+        e.stopPropagation();
+        tryClose();
+      });
+      updateBubbleLabel();
+    };
+
+    const hideBubble = () => {
+      if (!bubble) return;
+      bubble.remove();
+      bubble = null;
+    };
+
+    minBtn.onclick = () => {
+      overlay.style.display = 'none';
+      showBubble();
     };
 
     return {
@@ -1574,6 +1916,7 @@
         const row = cards[i];
         row.querySelector('.qf-chunk-row-status').textContent = 'กำลังทำ...';
         row.classList.add('qf-chunk-active');
+        updateBubbleLabel();
       },
       updateChunkProgress(i, pct, label) {
         const row = cards[i];
@@ -1583,7 +1926,7 @@
       completeChunk(i, {url, pageCount}) {
         const row = cards[i];
         const filename = chunks[i].filename || `chunk-${i+1}.pdf`;
-        blobUrls[i] = {url, filename};
+        blobUrls[i] = {url, filename, downloaded: false};
         row.querySelector('.qf-chunk-row-fill').style.width = '100%';
         row.querySelector('.qf-chunk-row-status').textContent = `${pageCount} หน้า`;
         row.classList.remove('qf-chunk-active');
@@ -1593,22 +1936,27 @@
           <button class="qf-chunk-btn qf-chunk-open">เปิด</button>
           <button class="qf-chunk-btn qf-chunk-download">ดาวน์โหลด</button>
         `;
-        actions.querySelector('.qf-chunk-open').onclick = () => {
+        actions.querySelector('.qf-chunk-open').onclick = (e) => {
+          e.stopPropagation();
           const w = window.open(url, '_blank');
           if (!w) {
             const a = document.createElement('a');
             a.href = url; a.target = '_blank'; a.rel = 'noopener';
             document.body.appendChild(a); a.click(); a.remove();
           }
+          markDownloaded(i);
         };
-        actions.querySelector('.qf-chunk-download').onclick = () => {
+        actions.querySelector('.qf-chunk-download').onclick = (e) => {
+          e.stopPropagation();
           const a = document.createElement('a');
           a.href = url; a.download = filename;
           document.body.appendChild(a); a.click(); a.remove();
+          markDownloaded(i);
         };
         if (Object.keys(blobUrls).length > 0) {
           downloadAllBtn.disabled = false;
         }
+        updateBubbleLabel();
       },
       errorChunk(i, msg) {
         const row = cards[i];
@@ -1617,17 +1965,51 @@
         row.classList.add('qf-chunk-error');
         const actions = row.querySelector('.qf-chunk-row-actions');
         actions.innerHTML = `<button class="qf-chunk-btn qf-chunk-retry">ลองใหม่</button>`;
-        actions.querySelector('.qf-chunk-retry').onclick = async () => {
+        actions.querySelector('.qf-chunk-retry').onclick = async (e) => {
+          e.stopPropagation();
           // External retry handler — set via setRetryHandler
           if (this._retry) await this._retry(i);
         };
+        updateBubbleLabel();
       },
       setRetryHandler(fn) { this._retry = fn; },
       allDone() {
+        allDoneFlag = true;
         closeBtn.style.display = '';
+        xBtn.style.display = '';
+        updateBubbleLabel();
       },
-      cleanup,
+      cleanup: doCleanup,
     };
+  }
+
+  // Confirm dialog when closing chunked result with undownloaded files.
+  // Reassures user that their history tab can recover the files.
+  function showCloseUndownloadedConfirm(undownloadedCount) {
+    return new Promise(resolve => {
+      const overlay = document.createElement('div');
+      overlay.className = 'qf-modal-overlay';
+      overlay.innerHTML = `
+        <div class="qf-modal" role="dialog">
+          <div class="qf-modal-title">ยังมีไฟล์ที่ยังไม่ได้ดาวน์โหลด</div>
+          <div class="qf-modal-body">
+            <div class="qf-modal-target">มี <b>${undownloadedCount}</b> ไฟล์ที่สร้างแล้วแต่ยังไม่ได้เปิด/ดาวน์โหลด</div>
+            <div class="qf-modal-summary">ทิ้งไฟล์เหล่านี้ไป? (เปิดย้อนหลังได้จากปุ่ม ⏱ ประวัติ)</div>
+          </div>
+          <div class="qf-modal-actions">
+            <button class="qf-btn-cancel">ยกเลิก</button>
+            <button class="qf-btn-confirm qf-btn-danger">ทิ้ง</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+      const cleanup = (v) => { overlay.remove(); resolve(v); };
+      overlay.querySelector('.qf-btn-cancel').onclick = (e) => { e.stopPropagation(); cleanup(false); };
+      overlay.querySelector('.qf-btn-confirm').onclick = (e) => { e.stopPropagation(); cleanup(true); };
+      overlay.onclick = (e) => { if (e.target === overlay) cleanup(false); };
+      const onKey = (e) => { if (e.key === 'Escape') { cleanup(false); document.removeEventListener('keydown', onKey); } };
+      document.addEventListener('keydown', onKey);
+    });
   }
 
   function showProgress(title) {
@@ -2154,7 +2536,10 @@
     }));
 
     try {
-      const ok = await runChunkedExport(exportChunks, `พิมพ์รวม ${chunks.length} ไฟล์`);
+      const ok = await runChunkedExport(exportChunks, `พิมพ์รวม ${chunks.length} ไฟล์`, {
+        baseFilename: makeBaseFilename(`พิมพ์รวม-${chunks.length}ไฟล์`),
+        totalLabels: totalIds,
+      });
       if (ok) {
         // Mark expanded items (variants/combos) done
         for (const c of chunks) {
@@ -2421,10 +2806,16 @@
         label: chunkCount === 1 ? 'ไฟล์เดียว' : `ชุด ${idx}/${chunkCount}`,
       });
     }
-    return runChunkedExport(chunks, displayLabel || 'พิมพ์ฉลาก');
+    return runChunkedExport(chunks, displayLabel || 'พิมพ์ฉลาก', {
+      baseFilename,
+      totalLabels: ids.length,
+    });
   }
 
-  async function runChunkedExport(chunks, displayTitle) {
+  // runChunkedExport(chunks, title, historyMeta)
+  //   historyMeta = null → skip history (e.g., re-download from history itself)
+  //   historyMeta = {baseFilename, totalLabels} → save entry after allDone
+  async function runChunkedExport(chunks, displayTitle, historyMeta) {
     const totalIds = chunks.reduce((a, c) => a + c.ids.length, 0);
     const result = showChunkedResult({
       title: displayTitle,
@@ -2456,6 +2847,30 @@
     // chunks; each chunk already fires its own batches in parallel internally.
     await Promise.all(chunks.map((_, ci) => runChunk(ci)));
     result.allDone();
+
+    // Save history entry for TikTok prints only. Shopee print isn't wired
+    // yet, and re-downloads (historyMeta=null) must not create duplicate
+    // entries.
+    if (historyMeta && !isShopee()) {
+      try {
+        addHistoryEntry({
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          timestamp: Date.now(),
+          title: displayTitle,
+          baseFilename: historyMeta.baseFilename || displayTitle,
+          totalLabels: historyMeta.totalLabels || totalIds,
+          chunks: chunks.map(c => ({
+            label: c.label,
+            filename: c.filename,
+            ids: [...c.ids],
+          })),
+          platform: 'tiktok',
+        });
+        renderHistoryBadge();
+      } catch (e) {
+        console.warn('[QF] failed to save history:', e);
+      }
+    }
     return true;
   }
 
@@ -2546,7 +2961,10 @@
       sampleText: `${baseName} · ...`,
     });
     if (!confirmed) return false;
-    return runChunkedExport(chunks, `${alias || product?.productName} (แยกตามตัวเลือก)`);
+    return runChunkedExport(chunks, `${alias || product?.productName} (แยกตามตัวเลือก)`, {
+      baseFilename: makeBaseFilename(baseName),
+      totalLabels: totalIds,
+    });
   }
 
   async function printProductLabels(productId, skuId, scenario) {
@@ -2861,6 +3279,7 @@
         <span>⚡ Quick Filter${isShopee() ? ' · Shopee' : (labels ? ' · Labels' : '')}</span>
         <div id="qf-header-actions">
           ${!labels ? '<button id="qf-reset-btn" title="รีเซ็ตฟิลเตอร์">↺</button>' : ''}
+          ${isTikTok() && labels ? '<button id="qf-history-btn" class="qf-history-btn" title="ประวัติการพิมพ์">⏱<span class="qf-history-badge" style="display:none;">0</span></button>' : ''}
           <button id="qf-toggle-btn" title="ย่อ/ขยาย">−</button>
         </div>
       </div>
@@ -2942,6 +3361,11 @@
       e.stopPropagation();
       resetFilters();
     });
+    document.getElementById('qf-history-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openHistoryModal();
+    });
+    renderHistoryBadge();
     document.getElementById('qf-scan-btn').addEventListener('click', scanAllPages);
     document.getElementById('qf-select-toggle')?.addEventListener('click', () => {
       setSelectMode(!state.selectMode);

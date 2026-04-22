@@ -51,6 +51,47 @@ window.fetch = async function(...args) { ... };
 4. ถ้ามี alias → fetch PDF → pdf-lib overlay → blob URL
 5. `window.open(url)` → tab ใหม่ พร้อมลายน้ำ
 
+### Print result modal: minimize-bubble + undownloaded-guard
+
+`showChunkedResult` (content.js) shows one modal per `runChunkedExport` call.
+Background-click dismiss was removed (ข้อมูล blob URL หายง่าย) so users close
+explicitly via × / ปิด / ย่อ. A `downloaded` flag is set per chunk when the
+user clicks เปิด / ดาวน์โหลด / ดาวน์โหลดทั้งหมด; closing while any completed
+chunk is still `downloaded=false` triggers a confirm dialog pointing to the
+history icon. "ย่อ" hides the overlay and spawns `.qf-chunked-bubble`
+(fixed, bottom-right, pill-shaped) that shows `กำลังพิมพ์ N/M` or
+`พร้อมโหลด N` and re-expands on click.
+
+### Print history (TikTok only)
+
+Stored in `localStorage.qf_print_history_v1` (JSON array, newest first,
+cap 200, auto-drop > 30 days old, trim to 50 on quota-exceeded).
+
+Entry schema:
+```js
+{
+  id, timestamp, title, baseFilename, totalLabels,
+  chunks: [{label, filename, ids: [fulfillUnitId, ...]}],
+  platform: 'tiktok',
+}
+```
+
+Critical: history stores **fulfillUnitId arrays**, NOT PDF bytes — re-download
+replays the chunks through `runChunkedExport(chunks, title, null)` (null meta
+to suppress duplicate entries) which re-calls TikTok's generate API. Free
+quota: TikTok already accepted the IDs once. If TikTok has since deleted
+an order, the chunk's retry button handles the error.
+
+Header shows `⏱` button (TikTok labels page only) with a `.qf-history-badge`
+bubble showing count of entries from the last 24h. Click opens
+`openHistoryModal()` — day-grouped list with `ดาวน์โหลดใหม่` (primary) and
+`🗑` (delete) per entry, plus `ล้างทั้งหมด` footer.
+
+Helpers: `loadHistory`, `saveHistory`, `addHistoryEntry`, `deleteHistoryEntry`,
+`clearAllHistory`, `historyRecentCount`, `renderHistoryBadge`. Called from
+`runChunkedExport` after `result.allDone()` only if `historyMeta` is truthy
+and platform is TikTok.
+
 ## ไฟล์สำคัญ
 
 | ไฟล์ | หน้าที่ | บรรทัดประมาณ |
