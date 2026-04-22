@@ -1327,6 +1327,43 @@ html[data-qf-theme="shopee"] .qf-combo-card.qf-select-mode {
   color: #444;
   font-weight: 400;
 }
+.qf-packer-select {
+  flex: 1 1 auto;
+  min-width: 140px;
+  max-width: 100%;
+  padding: 6px 10px;
+  border: 1.5px solid #ddd;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 13px;
+  color: #161823;
+  cursor: pointer;
+  transition: border-color 0.12s, box-shadow 0.12s;
+  font-family: inherit;
+  line-height: 1.4;
+}
+.qf-packer-select:hover {
+  border-color: #aaa;
+}
+.qf-packer-select:focus {
+  outline: none;
+  border-color: #fe2c55;
+  box-shadow: 0 0 0 3px rgba(254, 44, 85, 0.12);
+}
+html[data-qf-theme="shopee"] .qf-packer-select:focus {
+  border-color: #ee4d2d;
+  box-shadow: 0 0 0 3px rgba(238, 77, 45, 0.12);
+}
+.qf-packer-select optgroup {
+  font-weight: 600;
+  color: #555;
+  font-style: normal;
+}
+.qf-packer-select option {
+  font-weight: 400;
+  color: #161823;
+  padding: 4px 6px;
+}
 .qf-modal-actions {
   display: flex;
   gap: 8px;
@@ -2416,76 +2453,48 @@ html[data-qf-theme="shopee"] .qf-history-redownload:hover { background: #d4441f;
 html[data-qf-theme="shopee"] .qf-csv-worker-select:focus { border-color: #ee4d2d; }
 .qf-csv-modal .qf-modal-actions { padding: 12px 16px; margin-top: 8px; border-top: 1px solid #f0f0f0; }
 
-/* ==================== PLANNING PANEL ==================== */
-.qf-plan-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.55);
-  z-index: 9999997;
-  display: flex;
-  flex-direction: column;
-}
-.qf-plan-panel {
-  background: #fff;
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
-  font-size: 13px;
-  color: #161823;
-}
-.qf-plan-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 16px;
-  background: linear-gradient(135deg,#fe2c55,#ff5c8a);
-  color: #fff;
-  flex-shrink: 0;
-  flex-wrap: wrap;
-}
-.qf-plan-title { font-weight: 700; font-size: 14px; flex: 1; min-width: 0; }
-.qf-plan-header-btn {
-  background: rgba(255,255,255,0.2);
-  border: none;
-  color: #fff;
-  border-radius: 6px;
-  padding: 5px 10px;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.qf-plan-header-btn:hover { background: rgba(255,255,255,0.35); }
-.qf-plan-header-btn:disabled { opacity: 0.45; cursor: not-allowed; }
-.qf-plan-close {
-  background: rgba(255,255,255,0.2);
-  border: none;
-  color: #fff;
-  border-radius: 6px;
-  padding: 4px 8px;
-  font-size: 18px;
-  line-height: 1;
-  cursor: pointer;
-}
-.qf-plan-close:hover { background: rgba(255,255,255,0.35); }
-.qf-plan-body {
-  flex: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-}
+/* ==================== PLANNING PANEL (floating window) ==================== */
 .qf-plan-zone {
-  border-bottom: 1px solid #f0f0f0;
-  padding: 10px 14px;
+  border-right: 1px solid #f0f0f0;
+  padding: 10px 10px 6px;
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+  max-width: 220px;
+  flex-shrink: 0;
+  overflow: hidden;
 }
+.qf-plan-zone-badge {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.qf-plan-zone-remove {
+  background: none;
+  border: none;
+  color: #bbb;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 4px;
+  line-height: 1;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.qf-plan-zone-remove:hover { color: #fe2c55; background: #fff0f3; }
 .qf-plan-zone-header {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   margin-bottom: 8px;
+}
+.qf-plan-zone-header-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.qf-plan-zone-actions {
+  display: flex;
+  gap: 6px;
   flex-wrap: wrap;
 }
 .qf-plan-zone-title {
@@ -2493,6 +2502,10 @@ html[data-qf-theme="shopee"] .qf-csv-worker-select:focus { border-color: #ee4d2d
   font-size: 13px;
   flex: 1;
   min-width: 0;
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .qf-plan-zone-status {
   font-size: 11px;
@@ -2543,30 +2556,22 @@ html[data-qf-theme="shopee"] .qf-csv-worker-select:focus { border-color: #ee4d2d
   background: #fff;
   border: 1px solid #e5e7eb;
   border-radius: 6px;
-  padding: 4px 8px;
+  padding: 5px 8px 5px 6px;
   font-size: 11px;
   font-weight: 600;
   color: #333;
   cursor: grab;
   user-select: none;
   display: flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 160px;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  box-sizing: border-box;
   overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+  position: relative;
 }
 .qf-plan-card:active { cursor: grabbing; opacity: 0.75; }
 .qf-plan-card.qf-dragging { opacity: 0.4; }
-.qf-plan-card-count {
-  background: rgba(0,0,0,0.06);
-  border-radius: 8px;
-  padding: 0 5px;
-  font-size: 10px;
-  color: #555;
-  flex-shrink: 0;
-}
 .qf-plan-empty-hint {
   font-size: 11px;
   color: #bbb;
@@ -2574,34 +2579,6 @@ html[data-qf-theme="shopee"] .qf-csv-worker-select:focus { border-color: #ee4d2d
   padding: 6px;
   width: 100%;
   text-align: center;
-}
-.qf-plan-empty-panel {
-  align-items: center;
-  justify-content: center;
-  gap: 14px;
-  height: 100%;
-}
-.qf-plan-empty-msg {
-  font-size: 14px;
-  color: #555;
-  font-weight: 600;
-}
-.qf-plan-close-empty,
-.qf-plan-add-workers-cta {
-  padding: 8px 18px;
-  border-radius: 7px;
-  border: none;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.qf-plan-close-empty {
-  background: #eee;
-  color: #444;
-}
-.qf-plan-add-workers-cta {
-  background: #fe2c55;
-  color: #fff;
 }
 .qf-plan-recovery {
   padding: 8px 14px;
@@ -2645,6 +2622,10 @@ html[data-qf-theme="shopee"] .qf-csv-worker-select:focus { border-color: #ee4d2d
   cursor: pointer;
 }
 .qf-plan-chunk-all-btn:hover { border-color: #fe2c55; color: #fe2c55; background: #fff0f3; }
+.qf-plan-chunk-popup .qf-modal-actions {
+  padding: 0 18px 14px;
+  margin-top: 0;
+}
 .qf-plan-split-modal { width: 320px; max-width: 95vw; }
 .qf-plan-split-body { padding: 14px 18px; }
 .qf-plan-split-opt { display: flex; align-items: center; gap: 8px; padding: 8px 6px; border-radius: 6px; cursor: pointer; margin-bottom: 4px; }
@@ -2654,3 +2635,588 @@ html[data-qf-theme="shopee"] .qf-csv-worker-select:focus { border-color: #ee4d2d
 .qf-plan-worker-toggle { display: flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid #e5e7eb; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; color: #555; background: #fff; }
 .qf-plan-worker-toggle.active { border-color: #fe2c55; color: #fe2c55; background: #fff0f3; }
 .qf-plan-worker-icon { font-size: 13px; flex-shrink: 0; }
+
+/* ==================== §1.6 PLANNING FLOATING WINDOW (Lane A complete) ==================== */
+
+/* --- Minimized pill bubble (stacks above .qf-chunked-bubble at bottom:76px) --- */
+.qf-plan-bubble {
+  position: fixed;
+  bottom: 76px;
+  right: 16px;
+  z-index: 9999997;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 14px;
+  height: 48px;
+  border-radius: 24px;
+  background: linear-gradient(135deg, #fe2c55, #ff5c8a);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.18);
+  user-select: none;
+}
+.qf-plan-bubble-text {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.qf-plan-bubble-close {
+  background: rgba(255,255,255,0.25);
+  border: none;
+  color: #fff;
+  border-radius: 50%;
+  width: 22px;
+  height: 22px;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.qf-plan-bubble-close:hover { background: rgba(255,255,255,0.45); }
+
+/* --- Expanded floating draggable window --- */
+.qf-plan-window {
+  position: fixed;
+  width: 1000px;
+  height: 640px;
+  min-width: 600px;
+  min-height: 420px;
+  max-width: 96vw;
+  max-height: 90vh;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.22);
+  z-index: 9999997;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+  font-size: 13px;
+  color: #161823;
+}
+
+/* --- Titlebar (drag handle) --- */
+.qf-plan-window-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: linear-gradient(135deg, #fe2c55, #ff5c8a);
+  color: #fff;
+  cursor: move;
+  flex-shrink: 0;
+  user-select: none;
+}
+.qf-plan-window-title {
+  font-weight: 700;
+  font-size: 14px;
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.qf-plan-window-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.qf-plan-minimize-btn,
+.qf-plan-close-btn {
+  background: rgba(255,255,255,0.2);
+  border: none;
+  color: #fff;
+  border-radius: 6px;
+  padding: 4px 9px;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.qf-plan-minimize-btn:hover,
+.qf-plan-close-btn:hover { background: rgba(255,255,255,0.38); }
+
+/* --- Window body: zone columns share width, no horizontal scroll --- */
+.qf-plan-window-body {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: row;
+  gap: 0;
+  align-items: stretch;
+}
+
+/* --- Zone columns (unassigned / worker / team / add) --- */
+.qf-plan-zone.qf-zone-unassigned,
+.qf-plan-zone.qf-zone-worker,
+.qf-plan-zone.qf-zone-team,
+.qf-plan-zone.qf-zone-add {
+  flex: 1 1 0;
+  min-width: 0;
+  border-right: 1px solid #f0f0f0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.qf-plan-zone.qf-zone-add {
+  flex: 0 0 200px;
+}
+
+/* --- Zone scroll area (cards drop target) --- */
+.qf-plan-zone-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 8px;
+}
+
+/* --- Inline add-zone form elements --- */
+.qf-zone-add-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 6px 10px 0;
+}
+.qf-zone-add-form {
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.qf-zone-add-icons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.qf-zone-add-team-members {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+/* --- Product preview tile (.qf-plan-card visual upgrade) --- */
+.qf-plan-card-img {
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 4px;
+  flex-shrink: 0;
+  background: #e5e7eb;
+}
+.qf-plan-card-img--combo {
+  position: relative;
+  background: transparent;
+  overflow: visible;
+}
+.qf-plan-card-img-mini {
+  position: absolute;
+  width: 26px;
+  height: 26px;
+  border-radius: 4px;
+  border: 1.5px solid #fff;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+  object-fit: cover;
+  background: #e5e7eb;
+}
+.qf-plan-card-img--combo .qf-plan-card-img-mini:nth-child(1) { top: 0; left: 0; }
+.qf-plan-card-img--combo .qf-plan-card-img-mini:nth-child(2) { top: 6px; left: 7px; }
+.qf-plan-card-img--combo .qf-plan-card-img-mini:nth-child(3) { top: 12px; left: 14px; }
+.qf-plan-card-img-mini--fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #6b7280;
+  background: #f3f4f6;
+}
+.qf-plan-card-img-more {
+  position: absolute;
+  bottom: -4px;
+  right: -6px;
+  background: #fe2c55;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  border-radius: 8px;
+  padding: 1px 5px;
+  line-height: 1.3;
+  z-index: 20;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+}
+html[data-qf-theme="shopee"] .qf-plan-card-img-more { background: #ee4d2d; }
+
+/* --- Icon picker active highlight (stronger) --- */
+.qf-workers-icon-btn.active {
+  border-color: #fe2c55 !important;
+  background: #ffe8ee !important;
+  color: #fe2c55;
+  box-shadow: 0 0 0 2px rgba(254,44,85,0.2);
+}
+html[data-qf-theme="shopee"] .qf-workers-icon-btn.active {
+  border-color: #ee4d2d !important;
+  background: #fff0e8 !important;
+  color: #ee4d2d;
+  box-shadow: 0 0 0 2px rgba(238,77,45,0.2);
+}
+
+/* --- Auto-split modal option rows (make whole row clickable) --- */
+.qf-plan-split-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  margin-bottom: 4px;
+}
+.qf-plan-split-opt:hover { background: #f8f9fa; }
+.qf-plan-split-opt:has(input:checked) {
+  background: #ffe8ee;
+  border-color: #fe2c55;
+}
+html[data-qf-theme="shopee"] .qf-plan-split-opt:has(input:checked) {
+  background: #fff0e8;
+  border-color: #ee4d2d;
+}
+.qf-plan-card-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.qf-plan-card-alias {
+  font-size: 15px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.qf-plan-card-name {
+  font-size: 11px;
+  color: #888;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.qf-plan-card-variant {
+  font-size: 11px;
+  font-style: italic;
+  color: #aaa;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.qf-plan-card-badge {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  background: #374151;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 10px;
+  padding: 1px 6px;
+  line-height: 1.4;
+}
+.qf-plan-card-badge--split {
+  background: #2563eb;
+}
+
+/* --- Input error flash (§3.3 validation) --- */
+.qf-input-error {
+  border-color: #dc2626 !important;
+  animation: qf-error-flash 0.6s ease;
+}
+@keyframes qf-error-flash {
+  0%   { border-color: #dc2626; }
+  50%  { border-color: #fca5a5; }
+  100% { border-color: #dc2626; }
+}
+
+/* --- Chunk-plan modal (Apple-leaning, harmonized with core modal tokens) --- */
+.qf-chunk-plan-modal {
+  width: 400px;
+  max-width: 96vw;
+  padding: 20px 20px 16px;
+}
+.qf-chunk-plan-modal .qf-modal-title {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-bottom: 14px;
+}
+.qf-chunk-plan-modal .qf-modal-count {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: #161823;
+  margin: 0 0 2px;
+  line-height: 1.1;
+}
+.qf-chunk-plan-modal .qf-modal-summary {
+  font-size: 12.5px;
+  color: #8a8a8f;
+  margin-bottom: 14px;
+}
+.qf-chunk-plan-options {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 4px;
+}
+.qf-chunk-plan-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 8px;
+  margin: 0 -8px;
+  font-size: 13px;
+  color: #222;
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background 0.14s ease;
+}
+.qf-chunk-plan-opt:hover { background: #f6f6f7; }
+.qf-chunk-plan-opt input[type="radio"] {
+  margin: 3px 0 0;
+  flex-shrink: 0;
+  accent-color: #fe2c55;
+}
+html[data-qf-theme="shopee"] .qf-chunk-plan-opt input[type="radio"] {
+  accent-color: #ee4d2d;
+}
+.qf-chunk-plan-opt-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+.qf-chunk-plan-opt-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-weight: 500;
+  color: #161823;
+  line-height: 1.4;
+}
+.qf-chunk-plan-opt-sub {
+  font-size: 11.5px;
+  color: #8a8a8f;
+  line-height: 1.4;
+}
+.qf-chunk-unit {
+  color: #8a8a8f;
+  font-weight: 400;
+  font-size: 12px;
+}
+.qf-chunk-plan-input {
+  width: 64px;
+  padding: 3px 6px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 13px;
+  text-align: center;
+  color: #161823;
+  background: #fafafa;
+}
+.qf-chunk-plan-input:focus { outline: none; border-color: #fe2c55; background: #fff; }
+html[data-qf-theme="shopee"] .qf-chunk-plan-input:focus { border-color: #ee4d2d; }
+.qf-chunk-plan-preview {
+  font-size: 11px;
+  color: #888;
+  white-space: nowrap;
+}
+.qf-chunk-plan-more {
+  width: calc(100% + 16px);
+  margin: 8px -8px 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 8px;
+  background: transparent;
+  border: none;
+  border-top: 1px solid #f0f0f0;
+  border-radius: 0;
+  font-family: inherit;
+  font-size: 12.5px;
+  color: #555;
+  cursor: pointer;
+  text-align: left;
+}
+.qf-chunk-plan-more:hover { color: #161823; }
+.qf-chunk-plan-more-label { font-weight: 500; }
+.qf-chunk-plan-more-count {
+  color: #8a8a8f;
+  font-size: 11.5px;
+}
+.qf-chunk-plan-chevron {
+  margin-left: auto;
+  font-size: 18px;
+  color: #b0b0b5;
+  line-height: 1;
+  transition: transform 0.2s ease;
+}
+.qf-chunk-plan-more[aria-expanded="true"] .qf-chunk-plan-chevron {
+  transform: rotate(90deg);
+}
+.qf-chunk-plan-extras {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 6px 4px 2px;
+}
+.qf-chunk-plan-extras[hidden] { display: none; }
+.qf-chunk-plan-extra-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: #444;
+  cursor: pointer;
+  line-height: 1.4;
+}
+.qf-chunk-plan-extra-opt input[type="checkbox"] {
+  accent-color: #fe2c55;
+}
+html[data-qf-theme="shopee"] .qf-chunk-plan-extra-opt input[type="checkbox"] {
+  accent-color: #ee4d2d;
+}
+.qf-chunk-plan-extra-sub {
+  margin-left: 22px;
+  padding-left: 10px;
+  border-left: 2px solid #f0f0f0;
+  font-size: 12px;
+  color: #666;
+}
+html[data-qf-theme="shopee"] .qf-chunk-plan-extra-sub {
+  border-left-color: #ffe1d6;
+}
+
+/* --- Shopee theme overrides for new floating-window classes --- */
+html[data-qf-theme="shopee"] .qf-plan-bubble {
+  background: linear-gradient(135deg, #ee4d2d, #f76b1c);
+}
+html[data-qf-theme="shopee"] .qf-plan-window-titlebar {
+  background: linear-gradient(135deg, #ee4d2d, #f76b1c);
+}
+html[data-qf-theme="shopee"] .qf-plan-minimize-btn:hover,
+html[data-qf-theme="shopee"] .qf-plan-close-btn:hover {
+  background: rgba(255,255,255,0.38);
+}
+
+/* §5.2: Qty-variant chips */
+.qf-qty-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+  justify-content: center;
+}
+.qf-qty-chip {
+  background: #fff0f3;
+  border: 1px solid #f5a8b3;
+  border-radius: 10px;
+  padding: 2px 8px;
+  font-size: 10px;
+  color: #c0374d;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.qf-qty-chip:hover {
+  background: #fe2c55;
+  border-color: #fe2c55;
+  color: #fff;
+}
+.qf-qty-chip.qf-selected {
+  background: #fe2c55;
+  border-color: #fe2c55;
+  color: #fff;
+}
+.qf-qty-chip--done {
+  opacity: 0.5;
+  background: #eee;
+  border-color: #ccc;
+  color: #999;
+  text-decoration: line-through;
+  font-weight: 400;
+}
+.qf-qty-chip--done:hover {
+  opacity: 0.8;
+  background: #ddd;
+  border-color: #aaa;
+  color: #555;
+  text-decoration: none;
+}
+html[data-qf-theme="shopee"] .qf-qty-chip {
+  background: #fff5f0;
+  border-color: #f5bfb0;
+  color: #c0502d;
+}
+html[data-qf-theme="shopee"] .qf-qty-chip:hover,
+html[data-qf-theme="shopee"] .qf-qty-chip.qf-selected {
+  background: #ee4d2d;
+  border-color: #ee4d2d;
+  color: #fff;
+}
+
+/* Divider preset picker (Phase 1 Custom Layout) */
+.qf-divider-preset-modal {
+  max-width: 440px;
+  width: 92vw;
+}
+.qf-divider-preset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+.qf-divider-preset-opt {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid #d0d5dd;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.qf-divider-preset-opt:hover {
+  background: #f5f7fa;
+  border-color: #94a3b8;
+}
+.qf-divider-preset-opt input[type="radio"] {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+.qf-divider-preset-opt input[type="radio"]:checked + .qf-divider-preset-text .qf-divider-preset-title {
+  color: #111;
+  font-weight: 600;
+}
+.qf-divider-preset-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.35;
+}
+.qf-divider-preset-title {
+  font-size: 13px;
+  color: #1e293b;
+}
+.qf-divider-preset-desc {
+  font-size: 11px;
+  color: #64748b;
+}

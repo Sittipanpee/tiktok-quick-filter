@@ -365,3 +365,71 @@ agent-browser --cdp 9222 snapshot -i
 - **อย่ายิง API จาก ID ที่ scan ผิด scenario** — เช่น คลิก "1 ชิ้น" ต้องไม่ติด weird order มาด้วย
 - **อย่า bypass `applyCarrierFilter`** — ถ้า user toggle carrier ไว้ ต้องเคารพ filter
 - **อย่า hardcode `fp` token หรือ session params** — capture สดทุก session
+
+## localStorage keys เพิ่มเติม (Phase 2 Lane D)
+
+| Key | Purpose | ขนาดสูงสุด | Cleanup |
+|-----|---------|-----------|---------|
+| `qf_last_picking_list_v1` | ค่า checkbox "แนบใบ Picking List" ล่าสุด ('true'/'false') | 5 bytes | ไม่มี |
+| `qf_plan_snapshots_v1` | Snapshot แผนงานรายวัน (30 วัน) สำหรับ plannedQty ใน CSV | ~50 KB | trim >30 วัน เมื่อบันทึก |
+
+`state.sellerEmail` — อ่านจาก cookie `passport_user_email=` ตอน init สำหรับ Picking List header (masked)
+
+## PDF Template Builder (in progress)
+
+ฟีเจอร์ WYSIWYG editor ให้เจ้าของร้านปรับแต่งฉลาก (ใส่โลโก้, ข้อความขอบคุณ, QR LINE ฯลฯ)
+โดยไม่แตะ element ที่ **LOCKED** ของ carrier (barcode, QR, sort code, order ID)
+
+### Zone model 3 ชั้น
+- 🔒 **LOCKED** — `barcode main/left/right`, `qrCode`, `sortCode/routeCode/subZoneCode`,
+  `orderId`, `trackingNumber`, `serviceType`, `codLabel` — render @ original coords เสมอ
+- 🔄 **SHRINKABLE** — TikTok logo, carrier logo, `skuTable`, `addressBlock` — ย่อ/เลื่อนได้มี constraint
+- 🎨 **CUSTOMIZABLE** — shop logo, thank-you text, LINE QR, `aliasWatermark`, `workerNameBadge` — ของ user
+
+### Phase 1 status — **DONE** (calibration)
+
+| Path | Purpose |
+|---|---|
+| [tools/inspect-pdf.js](tools/inspect-pdf.js) | Node script อ่าน PDF → dump layout JSON + auto-classify LOCKED/SHRINKABLE zones |
+| [.claude/samples/jnt_layout.json](.claude/samples/jnt_layout.json) | Baseline J&T layout จาก `.claude/example.pdf` |
+| [docs/pdf-builder-phase1.md](docs/pdf-builder-phase1.md) | รายงาน Phase 1 ภาษาไทย + proposed `J_AND_T_LAYOUT` constant |
+
+Calibration ตรวจพบ: carrier=jnt, page=298×420pt (A6),
+9 LOCKED regions, 2 SHRINKABLE, 2 CUSTOMIZABLE (overlays ของ extension เอง)
+
+**Caveat:** `example.pdf` เป็นไฟล์ที่ผ่าน `overlayAliasOnPdf()` แล้ว — tool ทำ auto-filter
+overlay ของเรา (`extensionOverlay:true`) ก่อนจัดหมวด LOCKED.
+สำหรับ baseline 100% ต้อง re-run กับ **raw J&T PDF** ที่ไม่เคยผ่าน extension (ดู Phase 1 report §9)
+
+### Phase 2 preview (ยังไม่เริ่ม)
+- Canvas-based editor UI — consume `<carrier>_layout.json` → render draggable/resizable overlays
+- Save user config ลง `localStorage.qf_label_template_v1` (planned key)
+- Render pipeline ใหม่ใน `printIds()` → อ่าน template + overlay ด้วย pdf-lib แทน `overlayAliasOnPdf()`
+
+### Phase 3 preview (ยังไม่เริ่ม)
+- Multi-carrier: Flash, Kerry, SPX, Thailand Post — calibrate แต่ละราย carrier → `<carrier>_layout.json`
+- Preset library — thank-you templates, QR positions, brand-logo sizing
+
+### Run calibration ใหม่
+
+```bash
+# (ครั้งแรก) ติดตั้ง pdf2json ใน project root
+npm install pdf2json
+
+# รันบน PDF ใหม่
+node tools/inspect-pdf.js path/to/label.pdf .claude/samples/<carrier>_layout.json
+```
+
+Tool จะ:
+1. Extract text + coalesce glyphs (pdf2json แยก Thai เป็นรายตัว — ต้อง group ก่อน)
+2. Auto-detect carrier ด้วย fingerprint (J&T, Flash, Kerry, SPX, ไปรษณีย์)
+3. Classify LOCKED ด้วย heuristics: digit-length, font-size, position, service keywords
+4. Tag extension overlays (top-right Thai text + bottom ≤36pt band) เป็น `extensionOverlay:true`
+5. Redact PII (phone, long digit runs) ก่อนเขียน JSON
+
+### localStorage keys (Phase 2 — planned)
+
+| Key | Purpose |
+|---|---|
+| `qf_label_template_v1` | user-saved template config per carrier (position overrides, toggles, custom elements) |
+| `qf_label_template_lastcarrier_v1` | carrier ล่าสุดที่ user เปิด editor

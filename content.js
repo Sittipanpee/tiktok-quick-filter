@@ -116,6 +116,146 @@
     localStorage.setItem(OVERLAY_PREF_KEY, String(!!enabled));
   }
 
+  // ==================== DIVIDER PRESET (Phase 1 of Custom Layout feature) ====================
+  //
+  // ฟีเจอร์ Custom PDF Layout — วางแผน 3 เฟส:
+  //
+  // Phase 1 (IMPLEMENTED HERE): Preset picker.
+  //   - 4 presets: minimal / standard / detailed / photo-first.
+  //   - UI: radio group ใน settings menu → บันทึกที่ localStorage['qf_divider_preset_v1'].
+  //   - Applied โดย buildDividerPage ผ่าน getDividerPresetConfig().
+  //
+  // Phase 2 (SPEC ONLY — design doc below):
+  //   Data model: localStorage['qf_divider_config_v1'] = JSON {
+  //     fields: { alias, name, variant, carrier, image, qty, worker, footer } — each { visible: bool, size: 's'|'m'|'l' }
+  //     layout: 'stacked' | 'compact'
+  //   }
+  //   UI mockup: modal with 2 columns — left column lists fields with checkbox + size radio;
+  //              right column shows live preview (HTML approximation of PDF page at 2x scale).
+  //   Integration: buildDividerPage reads config; each field block wraps in `if (cfg.fields.X.visible)` and
+  //                uses SIZE_MAP[cfg.fields.X.size] to pick font size. Positions recomputed top-down so
+  //                hidden fields don't leave gaps (use vertical cursor).
+  //   Fallback: if config missing / malformed → use preset from Phase 1.
+  //
+  // Phase 3 (SPEC ONLY):
+  //   Visual editor — full drag-and-drop canvas.
+  //   Data model: localStorage['qf_divider_layout_v1'] = JSON {
+  //     canvas: { w, h },
+  //     elements: [{ id, type: 'alias'|'name'|'image'|'carrier'|'qty'|'text', x, y, w, h, size?, text? }]
+  //   }
+  //   UI: HTML5 canvas-backed editor, mouse-drag positions elements; snap grid 4pt; live preview.
+  //   Save button serializes positions back into localStorage.
+  //   Integration: if layout present, buildDividerPage ignores preset/config and renders each element at
+  //                its recorded (x, y). Coords are PDF points with origin bottom-left (consistent with pdf-lib).
+  //   Migration: "convert to visual layout" button in Phase 2 modal seeds the canvas from current config.
+  //
+  const DIVIDER_PRESET_KEY = 'qf_divider_preset_v1';
+  const DIVIDER_PRESETS = ['minimal', 'standard', 'detailed', 'photo-first'];
+  function loadDividerPreset() {
+    const v = localStorage.getItem(DIVIDER_PRESET_KEY);
+    return DIVIDER_PRESETS.includes(v) ? v : 'standard';
+  }
+  function saveDividerPreset(preset) {
+    if (!DIVIDER_PRESETS.includes(preset)) return;
+    localStorage.setItem(DIVIDER_PRESET_KEY, preset);
+  }
+  // Preset → field visibility + emphasis. ทุกอย่างขาวดำ.
+  function getDividerPresetConfig(preset) {
+    const p = DIVIDER_PRESETS.includes(preset) ? preset : 'standard';
+    switch (p) {
+      case 'minimal':
+        // alias only — giant.
+        return { preset: p, showAlias: true, aliasScale: 1.6, showName: false, showVariant: false,
+          showCarrier: false, showImage: false, showQty: true, showWorker: true, showFooter: false,
+          imageFirst: false };
+      case 'detailed':
+        return { preset: p, showAlias: true, aliasScale: 1.0, showName: true, showVariant: true,
+          showCarrier: true, showImage: true, showQty: true, showWorker: true, showFooter: true,
+          showMeta: true, imageFirst: false };
+      case 'photo-first':
+        return { preset: p, showAlias: true, aliasScale: 1.0, showName: true, showVariant: true,
+          showCarrier: true, showImage: true, showQty: true, showWorker: true, showFooter: true,
+          imageFirst: true };
+      case 'standard':
+      default:
+        return { preset: p, showAlias: true, aliasScale: 1.0, showName: true, showVariant: true,
+          showCarrier: true, showImage: true, showQty: true, showWorker: true, showFooter: true,
+          imageFirst: false };
+    }
+  }
+
+  // ==================== DIVIDER CONFIG (Phase 2 of Custom Layout) ====================
+  // Fine-grained config: per-field visibility + size (s|m|l).
+  // Shape: { fields: { alias, name, variant, carrier, image, qty, worker, footer }, layout: 'stacked'|'compact' }
+  // Each field entry = { visible: bool, size: 's'|'m'|'l' }.
+  // If absent / malformed → fall back to Phase 1 preset via presetToConfig().
+  const DIVIDER_CONFIG_KEY = 'qf_divider_config_v1';
+  const DIVIDER_FIELDS = ['alias', 'name', 'variant', 'carrier', 'image', 'qty', 'worker', 'footer'];
+  const DIVIDER_LAYOUTS = ['stacked', 'compact'];
+  const DIVIDER_SIZES = ['s', 'm', 'l'];
+  const DIVIDER_SIZE_MAP = { s: 0.75, m: 1.0, l: 1.3 };
+
+  function _validDividerField(f) {
+    return f && typeof f === 'object' &&
+      typeof f.visible === 'boolean' &&
+      DIVIDER_SIZES.includes(f.size);
+  }
+  function _validDividerConfig(cfg) {
+    if (!cfg || typeof cfg !== 'object') return false;
+    if (!cfg.fields || typeof cfg.fields !== 'object') return false;
+    for (const k of DIVIDER_FIELDS) {
+      if (!_validDividerField(cfg.fields[k])) return false;
+    }
+    if (!DIVIDER_LAYOUTS.includes(cfg.layout)) return false;
+    return true;
+  }
+  function loadDividerConfig() {
+    try {
+      const raw = localStorage.getItem(DIVIDER_CONFIG_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return _validDividerConfig(parsed) ? parsed : null;
+    } catch { return null; }
+  }
+  function saveDividerConfig(cfg) {
+    if (!_validDividerConfig(cfg)) return false;
+    try {
+      localStorage.setItem(DIVIDER_CONFIG_KEY, JSON.stringify(cfg));
+      return true;
+    } catch { return false; }
+  }
+  // Convert Phase 1 preset → Phase 2 config shape (returns new object, immutable source).
+  function presetToConfig(preset) {
+    const p = getDividerPresetConfig(preset);
+    const fld = (vis, size) => ({ visible: !!vis, size });
+    // aliasScale 1.6 (minimal) → size 'l'; 1.0 → 'm'.
+    const aliasSize = (p.aliasScale && p.aliasScale >= 1.4) ? 'l' : 'm';
+    return {
+      fields: {
+        alias:   fld(p.showAlias,   aliasSize),
+        name:    fld(p.showName,    'm'),
+        variant: fld(p.showVariant, 'm'),
+        carrier: fld(p.showCarrier, 'm'),
+        image:   fld(p.showImage,   'm'),
+        qty:     fld(p.showQty,     'm'),
+        worker:  fld(p.showWorker,  'm'),
+        footer:  fld(p.showFooter,  's'),
+      },
+      layout: p.imageFirst ? 'compact' : 'stacked',
+      // keep imageFirst for buildDividerPage consumption
+      imageFirst: !!p.imageFirst,
+    };
+  }
+  // Resolution: explicit config → preset fallback.
+  function getEffectiveDividerConfig() {
+    const cfg = loadDividerConfig();
+    if (cfg) {
+      // attach imageFirst flag (derived from layout) for buildDividerPage.
+      return { ...cfg, imageFirst: cfg.layout === 'compact' };
+    }
+    return presetToConfig(loadDividerPreset());
+  }
+
   const DONE_STORAGE_KEY = 'qf_done_items_v1';
   function loadDoneItems() {
     try {
@@ -164,6 +304,7 @@
     calendarMonth: null, // {year, month} cursor for the visible month
     overlayEnabled: loadOverlayPref(),
     workers: loadWorkers(),          // [{id, name, icon}] คนแพ็ค
+    sellerEmail: null,               // §7.6: populated at widget boot from TikTok session cookie
   };
 
   function loadAliases() {
@@ -210,6 +351,75 @@
 
   function saveWorkers() {
     localStorage.setItem(WORKERS_STORAGE_KEY, JSON.stringify(state.workers));
+  }
+
+  // ==================== TEAMS ====================
+  // §2: Team concept — groups of workers sharing a planning column.
+  // Schema: Team { id, name, memberWorkerIds[], createdAt }
+  // localStorage key: qf_teams_v1 (JSON: Team[])
+
+  const TEAMS_STORAGE_KEY = 'qf_teams_v1';
+
+  function loadTeams() {
+    try {
+      const raw = localStorage.getItem(TEAMS_STORAGE_KEY);
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) return [];
+      return arr;
+    } catch { return []; }
+  }
+  // Bootstrap: attach teams to state (state object is created before this module).
+  state.teams = loadTeams();
+
+  function saveTeams(teams) {
+    try {
+      localStorage.setItem(TEAMS_STORAGE_KEY, JSON.stringify(teams));
+    } catch (e) {
+      console.warn('[QF] teams save failed:', e);
+    }
+  }
+
+  function createTeam({ name, memberWorkerIds }) {
+    const id = 't_' + Math.random().toString(36).slice(2, 10);
+    const team = { id, name: String(name || '').trim(), memberWorkerIds: memberWorkerIds || [], createdAt: Date.now() };
+    state.teams = [...state.teams, team];
+    saveTeams(state.teams);
+    return team;
+  }
+
+  function updateTeam(id, patch) {
+    const idx = state.teams.findIndex(t => t.id === id);
+    if (idx < 0) return null;
+    const updated = { ...state.teams[idx], ...patch };
+    state.teams = state.teams.map(t => t.id === id ? updated : t);
+    saveTeams(state.teams);
+    return updated;
+  }
+
+  function deleteTeam(id) {
+    state.teams = state.teams.filter(t => t.id !== id);
+    saveTeams(state.teams);
+  }
+
+  function getTeam(id) {
+    return state.teams.find(t => t.id === id);
+  }
+
+  function teamIcon() {
+    // Teams always use the 👥 glyph in UI (not in PDF watermark).
+    return '👥';
+  }
+
+  // Called when a worker is deleted — remove that workerId from all teams.
+  function removeWorkerFromTeams(workerId) {
+    const changed = state.teams.some(t => t.memberWorkerIds.includes(workerId));
+    if (!changed) return;
+    state.teams = state.teams.map(t => ({
+      ...t,
+      memberWorkerIds: t.memberWorkerIds.filter(wid => wid !== workerId),
+    }));
+    saveTeams(state.teams);
   }
 
   // ==================== PRINT HISTORY ====================
@@ -1073,6 +1283,9 @@
         orderCountMulti: 0,
         fulfillUnitIdsSingle: new Set(),
         fulfillUnitIdsMulti: new Set(),
+        // §5.1: Per-quantity buckets for multi-qty orders (qty>=2, single SKU).
+        // Map<quantity: number, Set<fulfillUnitId>>
+        fulfillUnitIdsByQty: new Map(),
       });
     }
     const p = state.products.get(s.productId);
@@ -1085,6 +1298,8 @@
         orderCountMulti: 0,
         fulfillUnitIdsSingle: new Set(),
         fulfillUnitIdsMulti: new Set(),
+        // §5.1: Per-quantity buckets (same semantics as product-level).
+        fulfillUnitIdsByQty: new Map(),
       });
     }
     return p;
@@ -1107,6 +1322,7 @@
           productName: s.productName,
           skuName: s.skuName,
           sellerSkuName: s.sellerSkuName,
+          productImageURL: s.productImageURL || '',
           quantity: s.quantity,
         })),
       });
@@ -1140,6 +1356,12 @@
         if (fulfillUnitId) {
           product.fulfillUnitIdsMulti.add(fulfillUnitId);
           variant.fulfillUnitIdsMulti.add(fulfillUnitId);
+          // §5.1: Also track per-quantity bucket for qty-variant split feature.
+          const q = s.quantity;
+          if (!product.fulfillUnitIdsByQty.has(q)) product.fulfillUnitIdsByQty.set(q, new Set());
+          product.fulfillUnitIdsByQty.get(q).add(fulfillUnitId);
+          if (!variant.fulfillUnitIdsByQty.has(q)) variant.fulfillUnitIdsByQty.set(q, new Set());
+          variant.fulfillUnitIdsByQty.get(q).add(fulfillUnitId);
         }
       }
     } else if (skus.length > 1) {
@@ -1654,6 +1876,9 @@
   }
 
   const PRINT_BATCH_SIZE = 500; // TikTok limit per generate call
+  // §3.1: Chunk-plan modal thresholds
+  const CHUNK_PROMPT_THRESHOLD = 200; // show modal when total > this
+  const CHUNK_AUTO_SAFE_SIZE   = 200; // default X value in "แบ่งทุกๆ X ใบ" option
 
   // Dedupe concurrent font fetches when multiple chunks start in parallel —
   // without this, 3 chunks would each fire a fetch for Sarabun-Bold.ttf (88KB)
@@ -1715,65 +1940,225 @@
     const now = new Date();
     const pad = n => String(n).padStart(2, '0');
     const stamp = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}${pad(now.getHours())}${pad(now.getMinutes())}`;
+    // §8.3: Strip only truly unsafe chars; preserve [ ] (valid on Win/macOS/Linux).
     const clean = (hint || 'labels')
-      .replace(/[\\/:*?"<>|]/g, '')
+      .replace(/[/\\:*?"<>|]/g, '')
       .replace(/\s+/g, ' ')
       .trim()
       .slice(0, 60);
     return `${clean} ${stamp}`;
   }
 
-  function showChunkChoiceModal({total}) {
-    const defaultChunks = Math.max(1, Math.ceil(total / 200));
+  // §3: Universal pre-print chunk-plan modal.
+  // Resolves to ChunkPlan { mode, n?, x?, withPickingList, combined } or null.
+  const PICKING_LIST_PREF_KEY = 'qf_last_picking_list_v1';
+  function loadPickingListPref() {
+    try { return localStorage.getItem(PICKING_LIST_PREF_KEY) === 'true'; } catch { return false; }
+  }
+  function savePickingListPref(val) {
+    try { localStorage.setItem(PICKING_LIST_PREF_KEY, val ? 'true' : 'false'); } catch {}
+  }
+
+  function showChunkPlanModal({ total, multiSku = false, defaultPickingList = null }) {
+    const lastPickingList = defaultPickingList !== null ? defaultPickingList : loadPickingListPref();
+    const defaultN = Math.max(2, Math.ceil(total / CHUNK_AUTO_SAFE_SIZE));
+    // §3.7: Default radio: 'single' if total<=200; else 'every' with X=200.
+    const defaultMode = total <= CHUNK_PROMPT_THRESHOLD ? 'single' : 'every';
+
     return new Promise(resolve => {
       const overlay = document.createElement('div');
-      overlay.className = 'qf-modal-overlay qf-chunk-modal-overlay';
-      const presets = [1, 2, defaultChunks, defaultChunks * 2].filter((n, i, a) => n > 0 && a.indexOf(n) === i).sort((a,b) => a-b);
+      overlay.className = 'qf-modal-overlay qf-chunk-plan-overlay';
       overlay.innerHTML = `
-        <div class="qf-modal qf-chunk-modal" role="dialog">
-          <div class="qf-modal-title">แบ่งไฟล์เพื่อความปลอดภัย</div>
+        <div class="qf-modal qf-chunk-plan-modal" role="dialog">
+          <div class="qf-modal-title">เตรียมพิมพ์ฉลาก</div>
           <div class="qf-modal-body">
-            <div class="qf-chunk-summary">${total} ฉลาก เยอะเกิน 200 ใบ — แนะนำแบ่งไฟล์</div>
-            <div class="qf-chunk-hint">แบ่งเพื่อ: ป้องกันค้างเครื่อง / ถ้ามีปัญหากลางทาง ยังได้ไฟล์ที่เสร็จแล้ว</div>
-            <div class="qf-chunk-presets">
-              ${presets.map(n => `<button class="qf-chunk-preset" data-n="${n}">${n} ไฟล์<span class="qf-chunk-preset-sub">~${Math.ceil(total/n)} ใบ/ไฟล์</span></button>`).join('')}
+            <div class="qf-modal-count">${total} ใบ</div>
+            <div class="qf-modal-summary">เลือกวิธีแบ่งไฟล์</div>
+            <div class="qf-chunk-plan-options">
+              <label class="qf-chunk-plan-opt">
+                <input type="radio" name="qf-chunk-mode" value="single"
+                  ${defaultMode === 'single' ? 'checked' : ''}>
+                <span class="qf-chunk-plan-opt-body">
+                  <span class="qf-chunk-plan-opt-title">ไฟล์เดียว</span>
+                  <span class="qf-chunk-plan-opt-sub qf-chunk-single-label">${multiSku ? `แยก 1 ไฟล์ต่อสินค้า` : `${total} ใบในไฟล์เดียว`}</span>
+                </span>
+              </label>
+              <label class="qf-chunk-plan-opt">
+                <input type="radio" name="qf-chunk-mode" value="even"
+                  ${defaultMode === 'even' ? 'checked' : ''}>
+                <span class="qf-chunk-plan-opt-body">
+                  <span class="qf-chunk-plan-opt-title">
+                    แบ่งเท่า ๆ กัน
+                    <input type="number" name="qf-chunk-N" class="qf-chunk-plan-input qf-chunk-n-input"
+                      min="2" max="${total}" value="${defaultN}"/>
+                    <span class="qf-chunk-unit">ชุด</span>
+                  </span>
+                  <span class="qf-chunk-plan-opt-sub qf-chunk-n-preview"></span>
+                </span>
+              </label>
+              <label class="qf-chunk-plan-opt">
+                <input type="radio" name="qf-chunk-mode" value="every"
+                  ${defaultMode === 'every' ? 'checked' : ''}>
+                <span class="qf-chunk-plan-opt-body">
+                  <span class="qf-chunk-plan-opt-title">
+                    กำหนดจำนวน
+                    <input type="number" name="qf-chunk-X" class="qf-chunk-plan-input qf-chunk-x-input"
+                      min="1" max="${total}" value="${CHUNK_AUTO_SAFE_SIZE}"/>
+                    <span class="qf-chunk-unit">ใบ/ไฟล์</span>
+                  </span>
+                  <span class="qf-chunk-plan-opt-sub qf-chunk-x-preview"></span>
+                </span>
+              </label>
             </div>
-            <div class="qf-chunk-custom">
-              หรือ ตั้งเอง: <input type="number" class="qf-chunk-input" min="1" max="${total}" value="${defaultChunks}"/> ไฟล์
-              <span class="qf-chunk-preview"></span>
+            <button type="button" class="qf-chunk-plan-more" aria-expanded="false">
+              <span class="qf-chunk-plan-more-label">ตัวเลือกเพิ่มเติม</span>
+              <span class="qf-chunk-plan-more-count"></span>
+              <span class="qf-chunk-plan-chevron">›</span>
+            </button>
+            <div class="qf-chunk-plan-extras" hidden>
+              <label class="qf-chunk-plan-extra-opt">
+                <input type="checkbox" name="qf-chunk-picking" class="qf-chunk-picking-chk"
+                  ${lastPickingList ? 'checked' : ''}/>
+                แนบใบสรุปรายการ
+              </label>
+              ${multiSku ? `<label class="qf-chunk-plan-extra-opt">
+                <input type="checkbox" name="qf-chunk-combined" class="qf-chunk-combined-chk"/>
+                รวมทุกสินค้าเป็นไฟล์เดียว
+              </label>` : ''}
+              <label class="qf-chunk-plan-extra-opt">
+                <input type="checkbox" name="qf-chunk-divider" class="qf-chunk-divider-chk" checked/>
+                ใส่หน้าคั่นระหว่างสินค้าแต่ละแบบ
+              </label>
             </div>
           </div>
           <div class="qf-modal-actions">
             <button class="qf-btn-cancel">ยกเลิก</button>
-            <button class="qf-btn-confirm">เริ่มพิมพ์</button>
+            <button class="qf-btn-confirm qf-chunk-plan-submit">เริ่มพิมพ์</button>
           </div>
         </div>
       `;
       document.body.appendChild(overlay);
-      const inp = overlay.querySelector('.qf-chunk-input');
-      const preview = overlay.querySelector('.qf-chunk-preview');
-      const sync = () => {
-        const n = Math.max(1, Math.min(total, parseInt(inp.value) || 1));
-        preview.textContent = `(~${Math.ceil(total/n)} ใบ/ไฟล์)`;
+
+      const radioEls  = () => [...overlay.querySelectorAll('input[name="qf-chunk-mode"]')];
+      const nInput    = overlay.querySelector('.qf-chunk-n-input');
+      const xInput    = overlay.querySelector('.qf-chunk-x-input');
+      const nPreview  = overlay.querySelector('.qf-chunk-n-preview');
+      const xPreview  = overlay.querySelector('.qf-chunk-x-preview');
+      const submitBtn = overlay.querySelector('.qf-chunk-plan-submit');
+
+      const getMode = () => (radioEls().find(r => r.checked) || {}).value || 'single';
+
+      const updatePreviews = () => {
+        const n = parseInt(nInput.value) || defaultN;
+        const x = parseInt(xInput.value) || CHUNK_AUTO_SAFE_SIZE;
+        nPreview.textContent = `~${Math.floor(total/n)}–${Math.ceil(total/n)} ใบ/ไฟล์`;
+        xPreview.textContent = `${Math.ceil(total/x)} ไฟล์`;
       };
-      sync();
-      inp.addEventListener('input', sync);
-      overlay.querySelectorAll('.qf-chunk-preset').forEach(b => {
-        b.addEventListener('click', () => {
-          inp.value = b.dataset.n;
-          sync();
-          overlay.querySelectorAll('.qf-chunk-preset').forEach(x => x.classList.toggle('active', x === b));
+      updatePreviews();
+
+      // Clicking a number input should auto-select the parent radio.
+      [nInput, xInput].forEach(inp => {
+        inp.addEventListener('focus', () => {
+          const radioVal = inp.name === 'qf-chunk-N' ? 'even' : 'every';
+          const radio = overlay.querySelector(`input[value="${radioVal}"]`);
+          if (radio) radio.checked = true;
+        });
+        inp.addEventListener('input', updatePreviews);
+
+        // §3.3: On blur, clamp and flash red border if out-of-range.
+        inp.addEventListener('blur', () => {
+          const isN = inp.name === 'qf-chunk-N';
+          const min = isN ? 2 : 1;
+          const max = total;
+          let val = parseInt(inp.value);
+          if (isNaN(val) || val < min) val = min;
+          if (val > max) val = max;
+          if (String(val) !== inp.value) {
+            inp.value = val;
+            inp.classList.add('qf-input-error');
+            setTimeout(() => inp.classList.remove('qf-input-error'), 600);
+          }
+          updatePreviews();
+        });
+
+        inp.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); submitBtn.click(); }
         });
       });
-      const cleanup = (val) => { overlay.remove(); resolve(val); };
-      overlay.querySelector('.qf-btn-cancel').onclick = () => cleanup(null);
-      overlay.querySelector('.qf-btn-confirm').onclick = () => {
-        const n = Math.max(1, Math.min(total, parseInt(inp.value) || 1));
-        cleanup(n);
+
+      radioEls().forEach(r => r.addEventListener('change', updatePreviews));
+
+      // Update the single-mode sub-label based on combined checkbox state.
+      const combinedChk = overlay.querySelector('.qf-chunk-combined-chk');
+      const singleLabel = overlay.querySelector('.qf-chunk-single-label');
+      if (combinedChk) {
+        combinedChk.addEventListener('change', () => {
+          if (singleLabel && multiSku) {
+            singleLabel.textContent = combinedChk.checked
+              ? `รวม ${total} ใบในไฟล์เดียว`
+              : `แยก 1 ไฟล์ต่อสินค้า`;
+          }
+        });
+      }
+
+      // Collapsible "ตัวเลือกเพิ่มเติม" — collapsed by default, counter shows how many are on.
+      const moreBtn = overlay.querySelector('.qf-chunk-plan-more');
+      const extrasEl = overlay.querySelector('.qf-chunk-plan-extras');
+      const moreCountEl = overlay.querySelector('.qf-chunk-plan-more-count');
+      const extraChecks = () => [...overlay.querySelectorAll('.qf-chunk-plan-extras input[type="checkbox"]')];
+      const updateMoreCount = () => {
+        const n = extraChecks().filter(c => c.checked).length;
+        moreCountEl.textContent = n > 0 ? `· เปิด ${n} รายการ` : '';
       };
+      moreBtn.addEventListener('click', () => {
+        const expanded = moreBtn.getAttribute('aria-expanded') === 'true';
+        moreBtn.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+        extrasEl.hidden = expanded;
+      });
+      extraChecks().forEach(c => c.addEventListener('change', updateMoreCount));
+      updateMoreCount();
+
+      const cleanup = (val) => { overlay.remove(); resolve(val); };
+
+      overlay.querySelector('.qf-btn-cancel').onclick = () => cleanup(null);
       overlay.onclick = (e) => { if (e.target === overlay) cleanup(null); };
       const onKey = (e) => { if (e.key === 'Escape') { cleanup(null); document.removeEventListener('keydown', onKey); } };
       document.addEventListener('keydown', onKey);
+
+      submitBtn.onclick = () => {
+        const mode = getMode();
+        const withPickingList = overlay.querySelector('.qf-chunk-picking-chk')?.checked || false;
+        const combined = overlay.querySelector('.qf-chunk-combined-chk')?.checked || false;
+        const withDivider = overlay.querySelector('.qf-chunk-divider-chk')?.checked || false;
+        savePickingListPref(withPickingList);
+
+        let n = null;
+        let x = null;
+
+        if (mode === 'even') {
+          n = parseInt(nInput.value);
+          const clamped = Math.max(2, Math.min(total, isNaN(n) ? defaultN : n));
+          if (clamped !== n) {
+            nInput.value = clamped;
+            nInput.classList.add('qf-input-error');
+            setTimeout(() => nInput.classList.remove('qf-input-error'), 600);
+            return; // Don't submit yet — let user see the correction.
+          }
+          n = clamped;
+        } else if (mode === 'every') {
+          x = parseInt(xInput.value);
+          const clamped = Math.max(1, Math.min(total, isNaN(x) ? CHUNK_AUTO_SAFE_SIZE : x));
+          if (clamped !== x) {
+            xInput.value = clamped;
+            xInput.classList.add('qf-input-error');
+            setTimeout(() => xInput.classList.remove('qf-input-error'), 600);
+            return;
+          }
+          x = clamped;
+        }
+
+        cleanup({ mode, n, x, withPickingList, combined, withDivider });
+      };
     });
   }
 
@@ -2300,12 +2685,17 @@
       }
       if (workerName) {
         const { width: pw, height: ph } = page.getSize();
-        const wSize = Math.min(ph * 0.03, 14);
-        const wText = workerIcon ? `แพ็ค: ${workerIcon} ${workerName}` : `แพ็ค: ${workerName}`;
+        const wSize = Math.min(ph * 0.04, 18);
+        // §6.2: Drop "แพ็ค: " prefix and icon — Sarabun-Bold lacks Unicode symbol
+        // glyphs so they render as □. Worker is identified by name only.
+        // Position: top-RIGHT (user request) with measured text width.
+        const wText = workerName;
+        const wWidth = font.widthOfTextAtSize(wText, wSize);
         page.drawText(wText, {
-          x: 6, y: ph - wSize - 4, size: wSize, font,
-          color: rgb(0, 0, 0), opacity: 0.4,
-          maxWidth: pw - 12,
+          x: Math.max(6, pw - wWidth - 6),
+          y: ph - wSize - 6,
+          size: wSize, font,
+          color: rgb(0, 0, 0), opacity: 0.85,
         });
       }
       if (onProgress && (i % 20 === 0 || i === total - 1)) {
@@ -2354,6 +2744,7 @@
   function selectionKey(item) {
     if (item.type === 'combo') return `combo:${item.sigKey}`;
     if (item.type === 'variant') return `var:${item.productId}:${item.skuId}:${item.scenario}`;
+    if (item.type === 'qty') return `qty:${item.productId}:${item.skuId ?? ''}:${item.qty}`;
     return `prod:${item.productId}:${item.scenario}`;
   }
 
@@ -2441,6 +2832,12 @@
       if (item.type === 'combo') {
         const combo = state.weirdCombos.get(item.sigKey);
         if (combo) ids = applyCarrierFilter([...combo.fulfillUnitIds]);
+      } else if (item.type === 'qty') {
+        const product = state.products.get(item.productId);
+        if (product) {
+          const bucket = product.fulfillUnitIdsByQty.get(item.qty);
+          if (bucket) ids = applyCarrierFilter([...bucket]);
+        }
       } else {
         ids = collectFulfillIds(item.productId, item.skuId, item.scenario);
       }
@@ -2516,63 +2913,215 @@
 
     if (!items.length) { showToast('รายการที่เลือกไม่มีฉลาก', 2000); return; }
 
-    // Build per-item chunks (1 file each = no mixing across products).
-    // If a single item has >200 IDs, split it into N sub-chunks of <=200 each.
-    const SUB_CHUNK_THRESHOLD = 200;
-    const chunks = [];
+    // Collect all ids and detect multi-SKU.
+    // A record with >1 skus (weird combo) counts as multi-SKU on its own;
+    // also count every (productId:skuId) across all records so cross-bucket mixes prompt.
+    const allSelectedIds = [];
+    const skuBuckets = new Set();
+    let hasComboRecord = false;
     for (const it of items) {
       const ids = getItemIds(it);
-      if (!ids.length) continue;
-      const {label, filename} = describeItem(it);
-      if (ids.length <= SUB_CHUNK_THRESHOLD) {
-        chunks.push({item: it, ids, label, filename});
-      } else {
-        const subCount = Math.ceil(ids.length / SUB_CHUNK_THRESHOLD);
-        const subSize = Math.ceil(ids.length / subCount);
-        for (let i = 0; i < ids.length; i += subSize) {
-          const slice = ids.slice(i, i + subSize);
-          const idx = chunks.filter(c => c.item === it).length + 1;
-          chunks.push({
-            item: it,
-            ids: slice,
-            label: `${label} (${idx}/${subCount})`,
-            filename: `${filename}-ชุด${idx}-${subCount}`,
-          });
+      for (const id of ids) {
+        allSelectedIds.push(id);
+        const rec = state.records.get(id);
+        if (!rec?.skuList?.length) continue;
+        if (rec.skuList.length > 1) hasComboRecord = true;
+        for (const s of rec.skuList) {
+          skuBuckets.add(`${s.productId}:${s.skuId}`);
         }
       }
     }
+    const multiSku = hasComboRecord || skuBuckets.size > 1;
+    const totalIds = allSelectedIds.length;
 
-    if (!chunks.length) { showToast('รายการที่เลือกไม่มีฉลาก', 2000); return; }
+    if (!totalIds) { showToast('รายการที่เลือกไม่มีฉลาก', 2000); return; }
 
-    const totalIds = chunks.reduce((a, c) => a + c.ids.length, 0);
-    const sample = chunks.slice(0, 3).map(c => c.label).join(', ')
-      + (chunks.length > 3 ? ` +อีก ${chunks.length - 3}` : '');
+    const sample = items.slice(0, 3).map(it => describeItem(it).label).join(', ')
+      + (items.length > 3 ? ` +อีก ${items.length - 3}` : '');
 
     const confirm = await showPrintConfirm({
-      title: `พิมพ์ ${chunks.length} ไฟล์`,
-      summary: `แยก 1 ไฟล์ต่อตัวเลือก (sub-chunk ถ้า >${SUB_CHUNK_THRESHOLD} ใบ)`,
+      title: multiSku ? `พิมพ์ ${skuBuckets.size} SKU` : `พิมพ์ ${items.length} ไฟล์`,
+      summary: multiSku ? `${skuBuckets.size} SKU · ${totalIds} ฉลาก` : `แยก 1 ไฟล์ต่อตัวเลือก`,
       count: totalIds,
       sampleText: sample,
     });
     if (!confirm) return;
 
-    const stamp = makeBaseFilename('').trim(); // YYYYMMDDHHMM only
-    const exportChunks = chunks.map(c => ({
-      ids: c.ids,
-      label: c.label,
-      filename: `${makeBaseFilename(c.filename)}.pdf`,
-    }));
+    const { workerId, workerName, workerIcon } = confirm;
+
+    // §3.5/§4: Use showChunkPlanModal whenever multi-SKU (so user can choose combined vs split)
+    // or for large batches. Default combined=false (split per SKU).
+    let plan;
+    if (!multiSku && totalIds <= CHUNK_PROMPT_THRESHOLD) {
+      plan = { mode: 'single', withPickingList: loadPickingListPref(), combined: false, withDivider: false };
+    } else {
+      plan = await showChunkPlanModal({ total: totalIds, multiSku, defaultPickingList: loadPickingListPref() });
+      if (!plan) return;
+    }
+
+    // §8.1: Filename using assignee bracket pattern.
+    const assignee = workerName || null;
 
     try {
+      // §4: If multi-SKU combined mode, build combined PDF.
+      if (multiSku && plan.combined) {
+        const groupMap = new Map();
+        for (const id of allSelectedIds) {
+          const rec = state.records.get(id);
+          if (!rec?.skuList?.length) continue;
+          const s = rec.skuList[0];
+          const key = `${s.productId}:${s.skuId}`;
+          if (!groupMap.has(key)) {
+            const alias = (getAlias(s.productId) || '').trim();
+            const variantInfo = getVariantInfo(s.productId, s.skuId);
+            groupMap.set(key, {
+              productId: s.productId,
+              skuId: s.skuId,
+              alias: alias || shortName(s.productName),
+              officialName: s.productName || '',
+              variantName: (variantInfo?.alias || '').trim() || (s.skuName || s.sellerSkuName || ''),
+              productImageURL: s.productImageURL || null,
+              ids: [],
+            });
+          }
+          groupMap.get(key).ids.push(id);
+        }
+        const groups = [...groupMap.values()].sort((a, b) => a.alias.localeCompare(b.alias));
+        const baseHint = `รวม ${groups.length} SKU`;
+        const baseFilename = assignee
+          ? makeBaseFilename(`[${baseHint}] [${assignee}]`)
+          : makeBaseFilename(baseHint);
+
+        // Slice into plan chunks; each chunk is its own combined PDF.
+        const slices = planSlice(allSelectedIds, plan);
+        const chunkCount = slices.length;
+        const exportChunks = [];
+        // §UX: show immediate progress so the UI isn't silent during PDF build.
+        const prepProgress = showProgress(`กำลังเตรียม PDF รวม (${groups.length} SKU · ${totalIds} ฉลาก)`);
+        try {
+          for (let i = 0; i < slices.length; i++) {
+            const slice = slices[i];
+            const idx = i + 1;
+            const chunkSuffix = chunkCount > 1 ? `-ชุด${idx}-${chunkCount}` : '';
+            const filename = `${baseFilename}${chunkSuffix}.pdf`;
+            const label = chunkCount === 1 ? 'ไฟล์เดียว' : `ชุด ${idx}/${chunkCount}`;
+            const basePct = (i / chunkCount) * 100;
+            prepProgress.update(basePct, `กำลังสร้างชุด ${idx}/${chunkCount}`);
+
+            // Re-group slice for this chunk's combined PDF.
+            const sliceGroupMap = new Map();
+            for (const id of slice) {
+              const rec = state.records.get(id);
+              if (!rec?.skuList?.length) continue;
+              const s = rec.skuList[0];
+              const key = `${s.productId}:${s.skuId}`;
+              if (!sliceGroupMap.has(key)) {
+                const grp = groups.find(g => g.productId === s.productId && g.skuId === s.skuId);
+                if (grp) sliceGroupMap.set(key, { ...grp, ids: [] });
+              }
+              const grpEntry = sliceGroupMap.get(key);
+              if (grpEntry) grpEntry.ids.push(id);
+            }
+            const sliceGroups = [...sliceGroupMap.values()].sort((a, b) => a.alias.localeCompare(b.alias));
+
+            try {
+              const { bytes } = await buildMultiSkuCombinedPdf(sliceGroups, workerName, workerIcon, plan.withPickingList, (pct) => {
+                prepProgress.update(basePct + (pct / chunkCount), `ชุด ${idx}/${chunkCount} · ${pct.toFixed(0)}%`);
+              }, plan.withDivider);
+              exportChunks.push({ ids: slice, label, filename, prebuiltBytes: bytes });
+            } catch (_buildErr) {
+              exportChunks.push({ ids: slice, label, filename });
+            }
+          }
+          prepProgress.update(100, 'พร้อมแล้ว');
+        } finally {
+          // Remove immediately — runChunkedExport opens its own modal next.
+          document.querySelectorAll('.qf-progress-overlay').forEach(e => e.remove());
+        }
+
+        // runChunkedExport using prebuiltBytes where available.
+        const runChunks = exportChunks.map(c => ({ ids: c.ids, label: c.label, filename: c.filename, prebuiltBytes: c.prebuiltBytes }));
+        const ok = await runChunkedExport(runChunks, `พิมพ์รวม ${groups.length} SKU`, {
+          baseFilename,
+          totalLabels: totalIds,
+          workerId,
+          workerName,
+          workerIcon,
+          assigneeKind: workerName ? 'worker' : null,
+          assigneeName: workerName || null,
+          withPickingList: plan.withPickingList || false,
+        });
+        if (ok) {
+          for (const c of exportChunks) {
+            for (const it of items) {
+              if (it.type === 'combo') markComboDone(it.sigKey);
+              else {
+                const type = it.scenario === 'multi' ? 'single_sku' : 'single_item';
+                markDone(it.productId, it.skuId || null, type);
+              }
+            }
+          }
+          for (const it of rawItems) {
+            if (it.type === 'product') {
+              const type = it.scenario === 'multi' ? 'single_sku' : 'single_item';
+              markDone(it.productId, null, type);
+            }
+          }
+          state.selected.clear();
+          state.selectMode = false;
+          renderAll();
+        }
+        return;
+      }
+
+      // Per-SKU (non-combined) or single-SKU path: 1 file per item.
+      const SUB_CHUNK_THRESHOLD = CHUNK_PROMPT_THRESHOLD;
+      const chunks = [];
+      for (const it of items) {
+        const ids = getItemIds(it);
+        if (!ids.length) continue;
+        const { label, filename } = describeItem(it);
+        const itemAssignee = assignee;
+        const baseFilename = itemAssignee
+          ? makeBaseFilename(`[${filename}] [${itemAssignee}]`)
+          : makeBaseFilename(filename);
+        if (ids.length <= SUB_CHUNK_THRESHOLD) {
+          chunks.push({ item: it, ids, label, filename: `${baseFilename}.pdf` });
+        } else {
+          const slices = planSlice(ids, plan);
+          const subCount = slices.length;
+          slices.forEach((slice, i) => {
+            const idx = i + 1;
+            const chunkSuffix = subCount > 1 ? `-ชุด${idx}-${subCount}` : '';
+            chunks.push({
+              item: it,
+              ids: slice,
+              label: subCount === 1 ? label : `${label} (${idx}/${subCount})`,
+              filename: `${baseFilename}${chunkSuffix}.pdf`,
+            });
+          });
+        }
+      }
+
+      if (!chunks.length) { showToast('รายการที่เลือกไม่มีฉลาก', 2000); return; }
+
+      const exportChunks = chunks.map(c => ({ ids: c.ids, label: c.label, filename: c.filename }));
+      const baseFilename = assignee
+        ? makeBaseFilename(`[พิมพ์รวม-${items.length}ไฟล์] [${assignee}]`)
+        : makeBaseFilename(`พิมพ์รวม-${items.length}ไฟล์`);
+
       const ok = await runChunkedExport(exportChunks, `พิมพ์รวม ${chunks.length} ไฟล์`, {
-        baseFilename: makeBaseFilename(`พิมพ์รวม-${chunks.length}ไฟล์`),
+        baseFilename,
         totalLabels: totalIds,
-        workerId: confirm.workerId,
-        workerName: confirm.workerName,
-        workerIcon: confirm.workerIcon,
+        workerId,
+        workerName,
+        workerIcon,
+        assigneeKind: workerName ? 'worker' : null,
+        assigneeName: workerName || null,
+        withPickingList: plan.withPickingList || false,
+        withDivider: plan.withDivider || false,
       });
       if (ok) {
-        // Mark expanded items (variants/combos) done
         for (const c of chunks) {
           const it = c.item;
           if (it.type === 'combo') markComboDone(it.sigKey);
@@ -2581,7 +3130,6 @@
             markDone(it.productId, it.skuId || null, type);
           }
         }
-        // Also mark original product-level selections done (so product card greys out)
         for (const it of rawItems) {
           if (it.type === 'product') {
             const type = it.scenario === 'multi' ? 'single_sku' : 'single_item';
@@ -2593,7 +3141,6 @@
         renderAll();
       }
     } catch (e) {
-      console.error('[QF] printSelected failed:', e);
       showErrorToast('พิมพ์ผิดพลาด: ' + e.message, {
         source: 'printSelected',
         error: String(e && (e.stack || e.message || e)),
@@ -2646,23 +3193,28 @@
     return applyCarrierFilter(ids);
   }
 
+  function loadLastAssignee() {
+    try { return localStorage.getItem('qf_last_assignee_v1') || ''; } catch (_) { return ''; }
+  }
+  function saveLastAssignee(v) {
+    try { localStorage.setItem('qf_last_assignee_v1', v || ''); } catch (_) {}
+  }
+
   function showPrintConfirm({ title, summary, count, sampleText }) {
     return new Promise(resolve => {
       const overlay = document.createElement('div');
       overlay.className = 'qf-modal-overlay';
       const overlayChecked = state.overlayEnabled ? 'checked' : '';
-      const hasWorkers = state.workers.length > 0;
-      const packerRowHtml = hasWorkers ? `
+      const teams = state.teams || [];
+      const hasAssignees = state.workers.length > 0 || teams.length > 0;
+      const last = loadLastAssignee();
+      const workerOpts = state.workers.length ? `<optgroup label="คน">${state.workers.map(w => `<option value="worker:${escapeHtml(w.id)}"${last === 'worker:' + w.id ? ' selected' : ''}>${escapeHtml(w.icon)}  ${escapeHtml(w.name)}</option>`).join('')}</optgroup>` : '';
+      const teamOpts = teams.length ? `<optgroup label="ทีม">${teams.map(t => `<option value="team:${escapeHtml(t.id)}"${last === 'team:' + t.id ? ' selected' : ''}>👥  ${escapeHtml(t.name)}</option>`).join('')}</optgroup>` : '';
+      const skipOpt = `<option value=""${!last ? ' selected' : ''}>— ไม่ระบุ —</option>`;
+      const packerRowHtml = hasAssignees ? `
         <div class="qf-packer-row">
-          <span class="qf-packer-label">ใครแพ็ค?</span>
-          <div class="qf-packer-pills">
-            ${state.workers.map(w => `
-              <button type="button" class="qf-packer-pill" data-worker-id="${escapeHtml(w.id)}" data-worker-name="${escapeHtml(w.name)}">
-                <span class="qf-packer-pill-icon">${escapeHtml(w.icon)}</span>${escapeHtml(w.name)}
-              </button>
-            `).join('')}
-            <button type="button" class="qf-packer-pill qf-packer-pill-skip active" data-worker-id="" data-worker-name="">— ข้าม</button>
-          </div>
+          <label class="qf-packer-label" for="qf-packer-select">ใครแพ็ค?</label>
+          <select id="qf-packer-select" class="qf-packer-select">${workerOpts}${teamOpts}${skipOpt}</select>
         </div>
       ` : '';
       overlay.innerHTML = `
@@ -2693,31 +3245,25 @@
         state.overlayEnabled = overlayCheck.checked;
         saveOverlayPref(state.overlayEnabled);
       });
-      // Packer pill single-select logic
-      if (hasWorkers) {
-        overlay.querySelectorAll('.qf-packer-pill').forEach(pill => {
-          pill.addEventListener('click', () => {
-            overlay.querySelectorAll('.qf-packer-pill').forEach(p => p.classList.remove('active'));
-            pill.classList.add('active');
-          });
-        });
-      }
-      const getSelectedWorker = () => {
-        if (!hasWorkers) return { workerId: null, workerName: null, workerIcon: null };
-        const active = overlay.querySelector('.qf-packer-pill.active');
-        const wid = active?.dataset.workerId || null;
-        const worker = wid ? state.workers.find(w => w.id === wid) : null;
-        return {
-          workerId: wid,
-          workerName: active?.dataset.workerName || null,
-          workerIcon: worker?.icon || null,
-        };
+      const getSelectedAssignee = () => {
+        if (!hasAssignees) return { workerId: null, workerName: null, workerIcon: null };
+        const select = overlay.querySelector('.qf-packer-select');
+        const v = select?.value || '';
+        saveLastAssignee(v);
+        if (!v) return { workerId: null, workerName: null, workerIcon: null };
+        const [kind, id] = v.split(':');
+        if (kind === 'team') {
+          const t = (state.teams || []).find(x => x.id === id);
+          return { workerId: null, workerName: t?.name || null, workerIcon: '👥', teamId: t?.id || null, teamName: t?.name || null };
+        }
+        const w = state.workers.find(x => x.id === id);
+        return { workerId: w?.id || null, workerName: w?.name || null, workerIcon: w?.icon || null };
       };
       const cleanup = (ok) => {
         overlay.remove();
         if (!ok) { resolve(false); return; }
-        const { workerId, workerName, workerIcon } = getSelectedWorker();
-        resolve({ ok: true, workerId: workerId || null, workerName: workerName || null, workerIcon: workerIcon || null });
+        const a = getSelectedAssignee();
+        resolve({ ok: true, workerId: a.workerId || null, workerName: a.workerName || null, workerIcon: a.workerIcon || null, teamId: a.teamId || null, teamName: a.teamName || null });
       };
       overlay.querySelector('.qf-btn-cancel').onclick = () => cleanup(false);
       overlay.querySelector('.qf-btn-confirm').onclick = () => cleanup(true);
@@ -2807,6 +3353,16 @@
       } else {
         modifiedBytes = pdfBytes;
       }
+      // Apply user-chosen PDF template ON TOP of (after) the alias watermark so
+      // custom logos/text can optionally cover or sit alongside it.
+      try {
+        const _activeTpl = getActivePdfTemplate();
+        if (_activeTpl && modifiedBytes) {
+          modifiedBytes = await applyPdfTemplate(modifiedBytes, _activeTpl, buildTemplateRecordData(batch));
+        }
+      } catch (_tplErr) {
+        console.warn('[QF] pdf template apply failed, using overlay-only bytes:', _tplErr);
+      }
 
       setP(1.0);
       return modifiedBytes;
@@ -2828,7 +3384,817 @@
     return { bytes, pageCount };
   }
 
-  async function printIds(ids, displayLabel, sampleText, filenameHint, opts = {}) {
+  // Sub-group ids by (productId:skuId) then by carrier so each SKU × carrier
+  // combination gets its own divider. Sorted by alias → carrierName.
+  function subGroupByCarrier(ids) {
+    const bucketMap = new Map();
+    for (const id of ids) {
+      const rec = state.records.get(id);
+      if (!rec?.skuList?.length) continue;
+      const s = rec.skuList[0];
+      const skuKey = `${s.productId || ''}:${s.skuId || ''}`;
+      const carrierId = state.carrierOf.get(id) || 'unknown';
+      const carrier = state.carriers.get(carrierId) || { name: 'ไม่ระบุ', iconUrl: '' };
+      const key = `${skuKey}|${carrierId}`;
+      if (!bucketMap.has(key)) {
+        const aliasRaw = (getAlias(s.productId) || '').trim();
+        const variantInfo = getVariantInfo(s.productId, s.skuId);
+        bucketMap.set(key, {
+          skuKey,
+          carrierId,
+          alias: aliasRaw || shortName(s.productName || ''),
+          officialName: s.productName || '',
+          variantName: (variantInfo?.alias || '').trim() || (s.skuName || ''),
+          productImageURL: s.productImageURL || null,
+          carrierName: carrier.name || 'ไม่ระบุ',
+          carrierIconURL: carrier.iconUrl || null,
+          ids: [],
+        });
+      }
+      bucketMap.get(key).ids.push(id);
+    }
+    return [...bucketMap.values()].sort((a, b) => {
+      const aliasCmp = a.alias.localeCompare(b.alias, 'th');
+      if (aliasCmp !== 0) return aliasCmp;
+      return a.carrierName.localeCompare(b.carrierName, 'th');
+    });
+  }
+
+  // Prepend per-subgroup divider pages to an existing label PDF. Reorders by
+  // (sku, carrier) so dividers always sit directly above their labels.
+  // Returns {bytes, pageCount}. idOrder must match the order ids were sent to
+  // the API so page index → id can be inferred.
+  async function prependDividersToChunk(labelBytes, idOrder, workerName) {
+    const { PDFDocument } = window.PDFLib;
+    const subs = subGroupByCarrier(idOrder);
+    if (subs.length === 0) return { bytes: labelBytes, pageCount: null };
+
+    const labelDoc = await PDFDocument.load(labelBytes);
+    const totalPages = labelDoc.getPageCount();
+    if (totalPages === 0) return { bytes: labelBytes, pageCount: 0 };
+
+    // idOrder is the order ids were sent to TikTok. Assume 1 id ↔ 1 page.
+    // (TikTok returns 1 label per fulfill_unit_id.) Build id → pageIndex map.
+    const pageByIdIdx = new Map();
+    const limit = Math.min(idOrder.length, totalPages);
+    for (let i = 0; i < limit; i++) pageByIdIdx.set(idOrder[i], i);
+
+    const finalDoc = await PDFDocument.create();
+    if (window.fontkit) finalDoc.registerFontkit(window.fontkit);
+    const fontBytes = await ensureFontBytes();
+    const font = await finalDoc.embedFont(fontBytes, { subset: true });
+
+    const W = labelDoc.getPage(0).getWidth();
+    const H = labelDoc.getPage(0).getHeight();
+
+    for (const sub of subs) {
+      await buildDividerPage(finalDoc, { W, H }, {
+        alias: sub.alias,
+        officialName: sub.officialName,
+        variantName: sub.variantName,
+        productImageURL: sub.productImageURL,
+        carrierName: sub.carrierName,
+        carrierIconURL: sub.carrierIconURL,
+        qty: sub.ids.length,
+      }, font, workerName);
+      const pageIdx = sub.ids
+        .map(id => pageByIdIdx.get(id))
+        .filter(i => i != null);
+      if (pageIdx.length) {
+        const copied = await finalDoc.copyPages(labelDoc, pageIdx);
+        copied.forEach(p => finalDoc.addPage(p));
+      }
+    }
+
+    const bytes = await finalDoc.save();
+    return { bytes, pageCount: finalDoc.getPageCount() };
+  }
+
+  // §4.5 / §4.6: Build a single divider page for the combined multi-SKU PDF.
+  // payload = {alias, officialName, variantName, productImageURL, qty,
+  //            carrierName?, carrierIconURL?}
+  // Layout redesigned (Bug #2 fix) — clean top-down stack, no overlaps.
+  // ทุกอย่างขาวดำ (grayscale only).
+  async function buildDividerPage(pdfDoc, { W, H }, payload, font, workerName) {
+    const { rgb } = window.PDFLib;
+    const page = pdfDoc.addPage([W, H]);
+    // Phase 2: use per-field config (with preset fallback). Resolve size mult per field.
+    const eff = getEffectiveDividerConfig();
+    const f = eff.fields;
+    const mult = (k) => DIVIDER_SIZE_MAP[f[k]?.size] || 1.0;
+    const vis = (k) => !!f[k]?.visible;
+    // Map new config → existing cfg.* flags expected by downstream code (minimal churn).
+    const cfg = {
+      showAlias:   vis('alias'),
+      showName:    vis('name'),
+      showVariant: vis('variant'),
+      showCarrier: vis('carrier'),
+      showImage:   vis('image'),
+      showQty:     vis('qty'),
+      showWorker:  vis('worker'),
+      showFooter:  vis('footer'),
+      aliasScale:  mult('alias'),
+      imageFirst:  !!eff.imageFirst,
+    };
+    const BLACK = rgb(0, 0, 0);
+    const DARK = rgb(0.15, 0.15, 0.15);
+    const MID = rgb(0.35, 0.35, 0.35);
+    const LIGHT = rgb(0.55, 0.55, 0.55);
+
+    // --- Banners (top + bottom) — ขาวดำ ---
+    const BANNER_H = 20;
+    page.drawRectangle({ x: 0, y: H - BANNER_H, width: W, height: BANNER_H, color: BLACK });
+    page.drawRectangle({ x: 0, y: 0, width: W, height: BANNER_H, color: BLACK });
+    const bannerText = '— แบ่งกลุ่ม SKU —';
+    const bannerSize = 11;
+    const bannerW = font.widthOfTextAtSize(bannerText, bannerSize);
+    page.drawText(bannerText, {
+      x: (W - bannerW) / 2,
+      y: H - BANNER_H + (BANNER_H - bannerSize) / 2 + 1,
+      size: bannerSize,
+      font,
+      color: rgb(1, 1, 1),
+    });
+
+    // --- Top area cursor (below top banner) ---
+    // Layout: top-down stack with vertical cursor.
+    const PAD_X = 12;
+    const contentMaxW = W - PAD_X * 2;
+    let topCursor = H - BANNER_H - 6; // y of next drawable top edge
+    const imgMult = mult('image');
+
+    // Worker/team line at top (text in grey, below banner).
+    if (cfg.showWorker && workerName) {
+      const wSize = 9 * mult('worker');
+      topCursor -= wSize + 2;
+      page.drawText(`ผู้แพ็ค: ${workerName}`, {
+        x: PAD_X,
+        y: topCursor,
+        size: wSize,
+        font,
+        color: MID,
+        maxWidth: contentMaxW,
+      });
+      topCursor -= 4;
+    }
+
+    // --- photo-first preset renders image FIRST, at top ---
+    // For other presets image is placed between carrier and qty.
+    const IMG_MAX = 70 * imgMult; // max side for product image (shrunk from 120 to leave room)
+    let topImageBottom = null;
+    if (cfg.imageFirst && cfg.showImage && payload.productImageURL) {
+      try {
+        const imgResp = await _origFetch.call(window, payload.productImageURL, { credentials: 'omit' });
+        if (imgResp.ok) {
+          const imgBuf = await imgResp.arrayBuffer();
+          const ct = imgResp.headers.get('content-type') || '';
+          const isPng = ct.includes('png') || payload.productImageURL.toLowerCase().includes('.png');
+          const image = isPng ? await pdfDoc.embedPng(imgBuf) : await pdfDoc.embedJpg(imgBuf);
+          const maxSide = 100; // photo-first: bigger
+          const ratio = image.width / image.height;
+          const iw = ratio >= 1 ? maxSide : maxSide * ratio;
+          const ih = ratio >= 1 ? maxSide / ratio : maxSide;
+          const iy = topCursor - ih - 4;
+          page.drawImage(image, { x: (W - iw) / 2, y: iy, width: iw, height: ih });
+          topImageBottom = iy;
+          topCursor = iy - 8;
+        }
+      } catch { /* skip */ }
+    }
+
+    // --- Alias block (always the biggest element when shown) ---
+    if (cfg.showAlias && payload.alias) {
+      const baseSize = Math.min(H * 0.08, 36) * (cfg.aliasScale || 1);
+      const aliasW0 = font.widthOfTextAtSize(payload.alias, baseSize);
+      const scale = aliasW0 > contentMaxW ? contentMaxW / aliasW0 : 1;
+      const aliasSize = baseSize * scale;
+      const aliasW = font.widthOfTextAtSize(payload.alias, aliasSize);
+      topCursor -= aliasSize + 4;
+      page.drawText(payload.alias, {
+        x: (W - aliasW) / 2,
+        y: topCursor,
+        size: aliasSize,
+        font,
+        color: BLACK,
+      });
+      topCursor -= 4;
+    }
+
+    // --- Official name (truncate, 10pt) ---
+    if (cfg.showName && payload.officialName) {
+      const nameSize = 10 * mult('name');
+      let nameText = payload.officialName;
+      while (nameText.length > 2 && font.widthOfTextAtSize(nameText, nameSize) > contentMaxW) {
+        nameText = nameText.slice(0, -1);
+      }
+      if (nameText !== payload.officialName) nameText = nameText.slice(0, -1) + '…';
+      const nameW = font.widthOfTextAtSize(nameText, nameSize);
+      topCursor -= nameSize + 2;
+      page.drawText(nameText, {
+        x: (W - nameW) / 2,
+        y: topCursor,
+        size: nameSize,
+        font,
+        color: DARK,
+      });
+    }
+
+    // --- Variant line (9pt grey) ---
+    if (cfg.showVariant && payload.variantName) {
+      const varSize = 9 * mult('variant');
+      let varText = payload.variantName;
+      while (varText.length > 2 && font.widthOfTextAtSize(varText, varSize) > contentMaxW) {
+        varText = varText.slice(0, -1);
+      }
+      if (varText !== payload.variantName) varText = varText.slice(0, -1) + '…';
+      const varW = font.widthOfTextAtSize(varText, varSize);
+      topCursor -= varSize + 2;
+      page.drawText(varText, {
+        x: (W - varW) / 2,
+        y: topCursor,
+        size: varSize,
+        font,
+        color: MID,
+      });
+      topCursor -= 4;
+    }
+
+    // --- Carrier badge (outlined box, 22pt tall) ---
+    if (cfg.showCarrier && payload.carrierName) {
+      const carrierSize = 11 * mult('carrier');
+      const carrierLabel = `ขนส่ง: ${payload.carrierName}`;
+      const labelW = font.widthOfTextAtSize(carrierLabel, carrierSize);
+      const iconSize = 16;
+      let iconImg = null;
+      if (payload.carrierIconURL) {
+        try {
+          const iconResp = await _origFetch.call(window, payload.carrierIconURL, { credentials: 'omit' });
+          if (iconResp.ok) {
+            const iconBuf = await iconResp.arrayBuffer();
+            const ct = iconResp.headers.get('content-type') || '';
+            const isPng = ct.includes('png') || payload.carrierIconURL.toLowerCase().includes('.png');
+            iconImg = isPng ? await pdfDoc.embedPng(iconBuf) : await pdfDoc.embedJpg(iconBuf);
+          }
+        } catch { iconImg = null; }
+      }
+      const gap = iconImg ? 6 : 0;
+      const iconW = iconImg ? iconSize : 0;
+      const rowW = iconW + gap + labelW;
+      const padX = 10;
+      const boxW = rowW + padX * 2;
+      const boxH = 22;
+      const boxX = (W - boxW) / 2;
+      topCursor -= boxH + 6;
+      const boxY = topCursor;
+      page.drawRectangle({
+        x: boxX, y: boxY, width: boxW, height: boxH,
+        borderColor: BLACK, borderWidth: 1,
+        color: rgb(1, 1, 1),
+      });
+      let cur = boxX + padX;
+      if (iconImg) {
+        const r = iconImg.width / iconImg.height;
+        const ih = iconSize;
+        const iw = ih * r;
+        page.drawImage(iconImg, { x: cur, y: boxY + (boxH - ih) / 2, width: iw, height: ih });
+        cur += iw + gap;
+      }
+      page.drawText(carrierLabel, {
+        x: cur,
+        y: boxY + (boxH - carrierSize) / 2 + 1,
+        size: carrierSize,
+        font,
+        color: BLACK,
+      });
+    }
+
+    // --- Bottom-up layout: footer (y=18) → qty (y=42) → image above qty ---
+    const FOOTER_Y = BANNER_H + 8; // above bottom banner
+    const QTY_Y = FOOTER_Y + 22;
+
+    // Footer
+    if (cfg.showFooter) {
+      const footerText = 'กรุณาตรวจสอบจำนวนสินค้าก่อนแพ็คสินค้า';
+      const footerSize = 8 * mult('footer');
+      const footerW = font.widthOfTextAtSize(footerText, footerSize);
+      page.drawText(footerText, {
+        x: (W - footerW) / 2,
+        y: FOOTER_Y,
+        size: footerSize,
+        font,
+        color: LIGHT,
+      });
+    }
+
+    // Qty (always shown unless preset hides)
+    if (cfg.showQty) {
+      const qtyText = `จำนวนทั้งหมด: ${payload.qty} ใบ`;
+      const qtySize = 13 * mult('qty');
+      const qtyW = font.widthOfTextAtSize(qtyText, qtySize);
+      page.drawText(qtyText, {
+        x: (W - qtyW) / 2,
+        y: QTY_Y,
+        size: qtySize,
+        font,
+        color: BLACK,
+      });
+    }
+
+    // Product image (when NOT imageFirst) — placed between top block and qty.
+    if (!cfg.imageFirst && cfg.showImage && payload.productImageURL) {
+      const availableTop = topCursor - 6;    // top of available vertical space
+      const availableBot = QTY_Y + 18;       // leave room above qty
+      const availH = availableTop - availableBot;
+      if (availH > 30) {
+        try {
+          const imgResp = await _origFetch.call(window, payload.productImageURL, { credentials: 'omit' });
+          if (imgResp.ok) {
+            const imgBuf = await imgResp.arrayBuffer();
+            const ct = imgResp.headers.get('content-type') || '';
+            const isPng = ct.includes('png') || payload.productImageURL.toLowerCase().includes('.png');
+            const image = isPng ? await pdfDoc.embedPng(imgBuf) : await pdfDoc.embedJpg(imgBuf);
+            const maxSide = Math.min(IMG_MAX, availH, contentMaxW);
+            const ratio = image.width / image.height;
+            const iw = ratio >= 1 ? maxSide : maxSide * ratio;
+            const ih = ratio >= 1 ? maxSide / ratio : maxSide;
+            const iy = availableBot + (availH - ih) / 2;
+            page.drawImage(image, { x: (W - iw) / 2, y: iy, width: iw, height: ih });
+          }
+        } catch { /* skip */ }
+      }
+    }
+
+    return page;
+  }
+
+  // §7: Build picking list pages for prepending to a label PDF.
+  // Returns array of PDFPage objects already added to a temporary PDFDocument.
+  // Caller uses finalDoc.copyPages(tmpDoc, tmpDoc.getPageIndices()) to embed them.
+  async function buildPickingListPages(groups, { W, H }, headerMeta) {
+    if (!window.PDFLib || !window.fontkit) return [];
+    const { PDFDocument, rgb } = window.PDFLib;
+
+    // Aggregate rows from groups — one row per productId:skuId bucket.
+    const aggMap = new Map();
+    for (const grp of groups) {
+      const key = `${grp.productId || ''}:${grp.skuId || ''}`;
+      if (!aggMap.has(key)) {
+        const variantInfo = getVariantInfo(grp.productId, grp.skuId);
+        aggMap.set(key, {
+          alias: grp.alias || '',
+          officialName: grp.officialName || '',
+          skuAlias: (variantInfo?.alias || '').trim(),
+          sellerSku: grp.sellerSku || '',
+          productImageURL: grp.productImageURL || null,
+          qty: 0,
+          orderIds: new Set(),
+        });
+      }
+      const agg = aggMap.get(key);
+      // qty = label count in this group (each id = 1 fulfillUnit = 1 order)
+      agg.qty += grp.ids.length;
+      for (const id of grp.ids) {
+        const rec = state.records.get(id);
+        const oid = rec?.orderIds?.[0];
+        if (oid) agg.orderIds.add(oid);
+      }
+    }
+
+    let no = 0;
+    const rows = [...aggMap.values()]
+      .sort((a, b) => a.alias.localeCompare(b.alias) || a.officialName.localeCompare(b.officialName))
+      .map(r => ({ ...r, no: ++no, orderIds: [...r.orderIds] }));
+
+    const tmpDoc = await PDFDocument.create();
+    if (window.fontkit) tmpDoc.registerFontkit(window.fontkit);
+    const fontBytes = await ensureFontBytes();
+    const font = await tmpDoc.embedFont(fontBytes, { subset: true });
+
+    const isCompact = W < 420;
+    const headerHeight = 120;
+    // Bug #3 fix: smaller rows so more fit per page (tabular 38, compact 46).
+    const rowHeight = isCompact ? 46 : 38;
+    const footerHeight = 30;
+    const rowsPerPage = Math.max(1, Math.floor((H - headerHeight - footerHeight) / rowHeight));
+    const pageCount = Math.ceil(rows.length / rowsPerPage);
+
+    // Pre-embed images for tabular layout (one fetch per group, best-effort).
+    const imageCache = new Map(); // key → embedded image or null
+    if (!isCompact) {
+      await Promise.all(rows.map(async (row) => {
+        if (!row.productImageURL || imageCache.has(row.productImageURL)) return;
+        try {
+          const resp = await _origFetch.call(window, row.productImageURL, { credentials: 'omit' });
+          if (!resp.ok) { imageCache.set(row.productImageURL, null); return; }
+          const buf = await resp.arrayBuffer();
+          const ct = resp.headers.get('content-type') || '';
+          const isPng = ct.includes('png') || row.productImageURL.toLowerCase().includes('.png');
+          const img = isPng ? await tmpDoc.embedPng(buf) : await tmpDoc.embedJpg(buf);
+          imageCache.set(row.productImageURL, img);
+        } catch { imageCache.set(row.productImageURL, null); }
+      }));
+    }
+
+    for (let pi = 0; pi < pageCount; pi++) {
+      const page = tmpDoc.addPage([W, H]);
+      renderPickingHeader(page, headerMeta, font, W, H, pi + 1, pageCount);
+
+      const pageRows = rows.slice(pi * rowsPerPage, (pi + 1) * rowsPerPage);
+      let curY = H - headerHeight;
+      for (const row of pageRows) {
+        if (isCompact) {
+          renderPickingRowCompact(page, row, curY, W, font);
+        } else {
+          renderPickingRowTabular(page, row, curY, W, font, imageCache);
+        }
+        curY -= rowHeight;
+      }
+    }
+
+    return tmpDoc;
+  }
+
+  function renderPickingHeader(page, headerMeta, font, W, H, pageNum, pageCount) {
+    const { rgb } = window.PDFLib;
+    const black = rgb(0, 0, 0);
+    const grey = rgb(0.4, 0.4, 0.4);
+
+    // Title
+    page.drawText('Picking List', { x: 24, y: H - 36, size: 24, font, color: black });
+
+    // User
+    const userText = `User: ${maskEmail(headerMeta.userEmail)}`;
+    page.drawText(userText, { x: 24, y: H - 56, size: 10, font, color: grey, maxWidth: W - 48 });
+
+    // Print time
+    const d = headerMeta.printedAt || new Date();
+    const pad = n => String(n).padStart(2, '0');
+    const dateStr = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    page.drawText(`Print time: ${dateStr}`, { x: 24, y: H - 70, size: 10, font, color: grey, maxWidth: W - 48 });
+
+    // Totals
+    const totalsText = `Orders: ${headerMeta.totalOrders || 0}  Products: ${headerMeta.totalProducts || 0}  Items: ${headerMeta.totalItems || 0}`;
+    page.drawText(totalsText, { x: 24, y: H - 84, size: 10, font, color: grey, maxWidth: W - 48 });
+
+    // Assignee
+    if (headerMeta.assigneeName) {
+      page.drawText(`รับผิดชอบ: ${headerMeta.assigneeName}`, { x: 24, y: H - 98, size: 10, font, color: black, maxWidth: W - 48 });
+    }
+
+    // Separator line
+    page.drawLine({ start: { x: 12, y: H - 108 }, end: { x: W - 12, y: H - 108 }, thickness: 0.5, color: grey });
+
+    // Page footer
+    page.drawText(`${pageNum}/${pageCount}`, { x: W - 50, y: 18, size: 9, font, color: grey });
+  }
+
+  // Simple word-wrap: break text into up to maxLines lines that fit within maxW.
+  // Breaks on space first; falls back to hard-cut for long continuous strings.
+  // Last line truncates with '…' if overflowing.
+  function wrapTextToLines(text, maxLines, font, size, maxW) {
+    if (!text) return [];
+    const words = String(text).split(/(\s+)/); // keep spaces so we can rejoin cleanly
+    const lines = [];
+    let buf = '';
+    const flush = () => { if (buf.length) lines.push(buf); buf = ''; };
+    for (const w of words) {
+      const cand = buf + w;
+      if (font.widthOfTextAtSize(cand, size) <= maxW) { buf = cand; continue; }
+      // Doesn't fit. If buf already has content, wrap and start a new line.
+      if (buf.trim().length) {
+        flush();
+        if (lines.length >= maxLines) break;
+        buf = w.replace(/^\s+/, '');
+        if (font.widthOfTextAtSize(buf, size) > maxW) {
+          // Still too big → hard-cut.
+          while (buf.length > 1 && font.widthOfTextAtSize(buf, size) > maxW) buf = buf.slice(0, -1);
+        }
+      } else {
+        // Single word wider than maxW — hard-cut it.
+        let cut = w;
+        while (cut.length > 1 && font.widthOfTextAtSize(cut, size) > maxW) cut = cut.slice(0, -1);
+        buf = cut;
+      }
+    }
+    if (buf.length) flush();
+    if (lines.length > maxLines) {
+      const kept = lines.slice(0, maxLines);
+      // Append ellipsis to last line, trim to fit.
+      let last = kept[maxLines - 1] + '…';
+      while (last.length > 1 && font.widthOfTextAtSize(last, size) > maxW) last = last.slice(0, -2) + '…';
+      kept[maxLines - 1] = last;
+      return kept;
+    }
+    return lines;
+  }
+
+  function renderPickingRowTabular(page, row, y, W, font, imageCache) {
+    const { rgb } = window.PDFLib;
+    const black = rgb(0, 0, 0);
+    const grey = rgb(0.5, 0.5, 0.5);
+    const rowH = 38; // Bug #3 fix: shrunk from 50 to fit more rows
+    const pad = 24;
+    // Widths: no=20, img=32, name=flex, sku=46, sellerSku=56, qty=32, orderId=74
+    const fixedW = 260;
+    const nameW = Math.max(40, W - pad * 2 - fixedW);
+    let x = pad;
+
+    // Row number
+    page.drawText(String(row.no), { x, y: y - 12, size: 8, font, color: grey });
+    x += 20;
+
+    // Image (30×30)
+    const img = row.productImageURL ? (imageCache.get(row.productImageURL) || null) : null;
+    if (img) {
+      const boxSize = 30;
+      const ratio = img.width / img.height;
+      const iw = ratio >= 1 ? boxSize : boxSize * ratio;
+      const ih = ratio >= 1 ? boxSize / ratio : boxSize;
+      page.drawImage(img, { x, y: y - rowH + (rowH - ih) / 2, width: iw, height: ih });
+    }
+    x += 32;
+
+    // Alias (11pt) — single line truncated.
+    const aliasSize = 11;
+    const aliasRaw = row.alias || row.officialName.slice(0, 12);
+    let aliasText = aliasRaw;
+    while (aliasText.length > 1 && font.widthOfTextAtSize(aliasText, aliasSize) > nameW) {
+      aliasText = aliasText.slice(0, -1);
+    }
+    page.drawText(aliasText, { x, y: y - 12, size: aliasSize, font, color: black });
+
+    // Official name (8pt) — word-wrap up to 2 lines.
+    const nameSize = 8;
+    const nameLines = wrapTextToLines(row.officialName || '', 2, font, nameSize, nameW);
+    nameLines.forEach((line, i) => {
+      page.drawText(line, { x, y: y - 22 - i * (nameSize + 1), size: nameSize, font, color: grey });
+    });
+    x += nameW;
+
+    // SKU alias
+    const skuText = row.skuAlias || '-';
+    page.drawText(skuText.slice(0, 10), { x, y: y - 14, size: 8, font, color: grey, maxWidth: 44 });
+    x += 46;
+
+    // Seller SKU
+    const ssText = row.sellerSku || '-';
+    page.drawText(ssText.slice(0, 12), { x, y: y - 14, size: 8, font, color: grey, maxWidth: 54 });
+    x += 56;
+
+    // Qty
+    page.drawText(String(row.qty), { x, y: y - 14, size: 11, font, color: black });
+    x += 32;
+
+    // Order IDs (up to 3, +N more)
+    const oids = row.orderIds.slice(0, 3);
+    const more = row.orderIds.length - oids.length;
+    const oidText = oids.join(', ') + (more > 0 ? ` +${more}` : '');
+    page.drawText(oidText, { x, y: y - 14, size: 7, font, color: grey, maxWidth: 72 });
+
+    // Row separator
+    page.drawLine({ start: { x: pad, y: y - rowH }, end: { x: W - pad, y: y - rowH }, thickness: 0.25, color: rgb(0.85, 0.85, 0.85) });
+  }
+
+  function renderPickingRowCompact(page, row, y, W, font) {
+    const { rgb } = window.PDFLib;
+    const black = rgb(0, 0, 0);
+    const grey = rgb(0.5, 0.5, 0.5);
+    const rowH = 46; // Bug #3 fix: shrunk from 60
+    const pad = 12;
+    const imgSize = 34;
+
+    // Row number + alias (11pt, right of image)
+    const textX = pad + imgSize + 6;
+    const textW = W - textX - pad;
+    const aliasSize = 11;
+    const alias = row.alias || row.officialName.slice(0, 16);
+    let aliasText = `${row.no}. ${alias}`;
+    while (aliasText.length > 1 && font.widthOfTextAtSize(aliasText, aliasSize) > textW) {
+      aliasText = aliasText.slice(0, -1);
+    }
+    page.drawText(aliasText, { x: textX, y: y - 12, size: aliasSize, font, color: black });
+
+    // Official name (8pt) — word-wrap up to 2 lines.
+    const ns = 8;
+    const nameLines = wrapTextToLines(row.officialName || '', 2, font, ns, textW);
+    nameLines.forEach((line, i) => {
+      page.drawText(line, { x: textX, y: y - 22 - i * (ns + 1), size: ns, font, color: grey });
+    });
+
+    // Bottom line: Qty + SKU + order count
+    const bottomY = y - rowH + 6;
+    const bottomParts = [`Qty: ${row.qty}`];
+    if (row.skuAlias) bottomParts.push(`SKU: ${row.skuAlias}`);
+    if (row.orderIds.length > 0) bottomParts.push(`Orders: ${row.orderIds.length}`);
+    page.drawText(bottomParts.join('  /  '), { x: textX, y: bottomY, size: 8, font, color: grey, maxWidth: textW });
+
+    // Row separator
+    page.drawLine({ start: { x: pad, y: y - rowH }, end: { x: W - pad, y: y - rowH }, thickness: 0.25, color: rgb(0.85, 0.85, 0.85) });
+  }
+
+  // §7.3: Aggregate groups into PickingListData for headerMeta computation.
+  function buildPickingHeaderMeta(groups, assigneeName) {
+    const orderIds = new Set();
+    const productIds = new Set();
+    let totalItems = 0;
+    for (const grp of groups) {
+      productIds.add(`${grp.productId}:${grp.skuId || ''}`);
+      for (const id of grp.ids) {
+        const rec = state.records.get(id);
+        const oid = rec?.orderIds?.[0];
+        if (oid) orderIds.add(oid);
+        for (const s of (rec?.skuList || [])) totalItems += (s.quantity || 1);
+      }
+    }
+    return {
+      userEmail: state.sellerEmail || null,
+      printedAt: new Date(),
+      assigneeName: assigneeName || null,
+      totalOrders: orderIds.size,
+      totalProducts: productIds.size,
+      totalItems,
+    };
+  }
+
+  // §4.7: Build a combined multi-SKU PDF: [divider_1][labels_1][divider_2][labels_2]…
+  // groups[] shape: [{productId, skuId, alias, officialName, variantName, productImageURL, ids: string[]}]
+  //   sorted by alias ascending by caller.
+  async function buildMultiSkuCombinedPdf(groups, workerName, workerIcon, withPickingList, onProgress, withDivider = true) {
+    if (!window.PDFLib || !window.fontkit) throw new Error('PDFLib/fontkit ไม่พร้อมใช้งาน');
+    const { PDFDocument } = window.PDFLib;
+
+    const finalDoc = await PDFDocument.create();
+    if (window.fontkit) finalDoc.registerFontkit(window.fontkit);
+    const fontBytes = await ensureFontBytes();
+    const font = await finalDoc.embedFont(fontBytes, { subset: true });
+
+    // Probe page size from first group's labels.
+    let W = 288; // A6 fallback width (pt)
+    let H = 432; // A6 fallback height (pt)
+    let firstGroupBytes = null;
+    try {
+      firstGroupBytes = await callGenerateApiRaw(groups[0].ids);
+      const sampleDoc = await PDFDocument.load(firstGroupBytes);
+      const samplePage = sampleDoc.getPage(0);
+      W = samplePage.getWidth();
+      H = samplePage.getHeight();
+    } catch (_probErr) {
+      // Use A6 fallback — firstGroupBytes may still be valid or null.
+    }
+
+    // §7: Prepend picking list pages when requested.
+    if (withPickingList) {
+      try {
+        const headerMeta = buildPickingHeaderMeta(groups, workerName);
+        const tmpDoc = await buildPickingListPages(groups, { W, H }, headerMeta);
+        if (tmpDoc) {
+          const copied = await finalDoc.copyPages(tmpDoc, tmpDoc.getPageIndices());
+          copied.forEach(p => finalDoc.addPage(p));
+        }
+      } catch (_plErr) {
+        console.warn('[QF] picking list build failed, continuing without:', _plErr);
+      }
+    }
+
+    for (let gi = 0; gi < groups.length; gi++) {
+      const grp = groups[gi];
+
+      // When divider is on, sub-group by carrier so each (SKU × carrier)
+      // combination gets its own divider + block of labels — กันแพ็คผิด
+      // เมื่อ SKU เดียวกันมีหลายขนส่ง.
+      const subs = withDivider ? subGroupByCarrier(grp.ids) : null;
+      const parts = (subs && subs.length > 0)
+        ? subs.map(s => ({
+            ids: s.ids,
+            alias: s.alias || grp.alias,
+            officialName: s.officialName || grp.officialName,
+            variantName: s.variantName || grp.variantName,
+            productImageURL: s.productImageURL || grp.productImageURL,
+            carrierName: s.carrierName,
+            carrierIconURL: s.carrierIconURL,
+          }))
+        : [{
+            ids: grp.ids,
+            alias: grp.alias,
+            officialName: grp.officialName,
+            variantName: grp.variantName,
+            productImageURL: grp.productImageURL,
+            carrierName: null,
+            carrierIconURL: null,
+          }];
+
+      for (let pi = 0; pi < parts.length; pi++) {
+        const part = parts[pi];
+        // Fetch label bytes (reuse first-group probe result only for the
+        // first sub-part of the first group when it matches grp.ids).
+        let labelsBytes;
+        try {
+          if (gi === 0 && pi === 0 && firstGroupBytes && part.ids.length === grp.ids.length) {
+            labelsBytes = firstGroupBytes;
+          } else {
+            labelsBytes = await callGenerateApiRaw(part.ids);
+          }
+        } catch (e) {
+          throw new Error(`กลุ่ม "${part.alias}" (${gi + 1}/${groups.length}) ดึง labels ไม่ได้: ${e.message}`);
+        }
+
+        // Apply alias overlay if enabled.
+        if (state.overlayEnabled && labelsBytes) {
+          try {
+            labelsBytes = await overlayAliasOnPdf(labelsBytes, part.ids, () => {}, workerName, workerIcon);
+          } catch (_oErr) { /* continue unmodified */ }
+        }
+        // Apply active PDF template (user's custom header/logo/etc).
+        if (labelsBytes) {
+          try {
+            const _activeTpl = getActivePdfTemplate();
+            if (_activeTpl) {
+              labelsBytes = await applyPdfTemplate(labelsBytes, _activeTpl, buildTemplateRecordData(part.ids));
+            }
+          } catch (_tErr) { /* continue unmodified */ }
+        }
+
+        if (withDivider) {
+          await buildDividerPage(finalDoc, { W, H }, {
+            alias: part.alias,
+            officialName: part.officialName,
+            variantName: part.variantName,
+            productImageURL: part.productImageURL,
+            carrierName: part.carrierName,
+            carrierIconURL: part.carrierIconURL,
+            qty: part.ids.length,
+          }, font, workerName);
+        }
+
+        if (labelsBytes) {
+          try {
+            const partDoc = await PDFDocument.load(labelsBytes);
+            const copied = await finalDoc.copyPages(partDoc, partDoc.getPageIndices());
+            copied.forEach(p => finalDoc.addPage(p));
+          } catch (_copyErr) { /* skip malformed */ }
+        }
+      }
+
+      if (onProgress) onProgress((gi + 1) / groups.length);
+    }
+
+    const bytes = await finalDoc.save();
+    return { bytes, pageCount: finalDoc.getPageCount() };
+  }
+
+  // Helper: call TikTok's generate API for a list of fulfillUnitIds and return raw PDF bytes.
+  // Splits into batches of PRINT_BATCH_SIZE, merges pages, returns combined bytes.
+  async function callGenerateApiRaw(ids) {
+    const { PDFDocument } = window.PDFLib;
+    const batches = [];
+    for (let i = 0; i < ids.length; i += PRINT_BATCH_SIZE) {
+      batches.push(ids.slice(i, i + PRINT_BATCH_SIZE));
+    }
+    const batchDocs = await Promise.all(batches.map(async (batch) => {
+      const body = {
+        fulfill_unit_id_list: batch,
+        content_type_list: [1, 2],
+        template_type: 0,
+        op_scene: 2,
+        file_prefix: 'Shipping label',
+        request_time: Date.now(),
+        print_option: { tmpl: 0, template_size: 0, layout: [0] },
+        print_source: 201,
+      };
+      const resp = await _origFetch.call(window, '/api/v1/fulfillment/shipping_doc/generate', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await safeJson(resp, 'generate API');
+      if (data.code !== 0) throw new Error(`code=${data.code} msg="${data.message || ''}"`);
+      const docUrl = data.data?.doc_url;
+      if (!docUrl) throw new Error('ไม่มี doc_url ใน response');
+
+      // Mark as printed in local state.
+      for (const id of batch) {
+        const rec = state.records.get(id);
+        if (rec) rec.labelStatus = 50;
+        state.printedUnitIds.add(id);
+      }
+
+      const pdfResp = await _origFetch.call(window, docUrl);
+      if (!pdfResp.ok) throw new Error(`PDF fetch HTTP ${pdfResp.status}`);
+      return pdfResp.arrayBuffer();
+    }));
+
+    if (batchDocs.length === 1) return batchDocs[0];
+    const merged = await PDFDocument.create();
+    for (const bytes of batchDocs) {
+      const part = await PDFDocument.load(bytes);
+      const copied = await merged.copyPages(part, part.getPageIndices());
+      copied.forEach(p => merged.addPage(p));
+    }
+    return merged.save();
+  }
+
+  async function printIds(ids, displayLabel, sampleText, filenameHint) {
     if (isShopee()) {
       // Copy order_ids (extracted from records) to clipboard so user can paste into Shopee's search
       const orderIds = [];
@@ -2857,42 +4223,104 @@
     if (!confirm) return false;
     const { workerId, workerName, workerIcon } = confirm;
 
-    let chunkCount = 1;
-    if (!opts.forceSingleFile && ids.length > 200) {
-      const choice = await showChunkChoiceModal({total: ids.length});
-      if (choice === null) return false;
-      chunkCount = choice;
+    // §3.5: Use showChunkPlanModal when multi-SKU OR above threshold.
+    let plan;
+    // Detect multi-SKU: count distinct productId:skuId buckets across ALL skus in every record.
+    // A single record with >1 skus (weird combo) is already multi-SKU on its own.
+    const skuBuckets = new Set();
+    let hasComboRecord = false;
+    for (const id of ids) {
+      const rec = state.records.get(id);
+      if (!rec?.skuList?.length) continue;
+      if (rec.skuList.length > 1) hasComboRecord = true;
+      for (const s of rec.skuList) {
+        skuBuckets.add(`${s.productId}:${s.skuId}`);
+      }
+    }
+    const multiSku = hasComboRecord || skuBuckets.size > 1;
+    if (!multiSku && ids.length <= CHUNK_PROMPT_THRESHOLD) {
+      plan = { mode: 'single', withPickingList: loadPickingListPref(), combined: false, withDivider: false };
+    } else {
+      plan = await showChunkPlanModal({ total: ids.length, multiSku, defaultPickingList: loadPickingListPref() });
+      if (!plan) return false;
     }
 
-    const chunkSize = Math.ceil(ids.length / chunkCount);
-    const baseFilename = makeBaseFilename(filenameHint || displayLabel);
-    const chunks = [];
-    for (let i = 0; i < ids.length; i += chunkSize) {
-      const slice = ids.slice(i, i + chunkSize);
-      const idx = chunks.length + 1;
-      chunks.push({
-        ids: slice,
-        filename: chunkCount === 1
-          ? `${baseFilename}.pdf`
-          : `${baseFilename}-ชุด${idx}-${chunkCount}.pdf`,
-        label: chunkCount === 1 ? 'ไฟล์เดียว' : `ชุด ${idx}/${chunkCount}`,
-      });
+    // §3.5: Map ChunkPlan → chunks[]
+    const total = ids.length;
+    const allIds = ids;
+    let slices;
+    switch (plan.mode) {
+      case 'even': {
+        const n = plan.n || 1;
+        const sz = Math.ceil(total / n);
+        slices = [];
+        for (let i = 0; i < allIds.length; i += sz) slices.push(allIds.slice(i, i + sz));
+        break;
+      }
+      case 'every': {
+        const x = plan.x || CHUNK_AUTO_SAFE_SIZE;
+        slices = [];
+        for (let i = 0; i < allIds.length; i += x) slices.push(allIds.slice(i, i + x));
+        break;
+      }
+      default: // 'single'
+        slices = [allIds];
+        break;
     }
+    const chunkCount = slices.length;
+
+    // §8.1: Build filename with assignee bracket pattern.
+    const assignee = workerName || null;
+    const baseHint = filenameHint || displayLabel;
+    const baseFilename = assignee
+      ? makeBaseFilename(`[${baseHint}] [${assignee}]`)
+      : makeBaseFilename(baseHint);
+
+    const chunks = slices.map((slice, i) => {
+      const idx = i + 1;
+      const chunkSuffix = chunkCount > 1 ? `-ชุด${idx}-${chunkCount}` : '';
+      return {
+        ids: slice,
+        filename: `${baseFilename}${chunkSuffix}.pdf`,
+        label: chunkCount === 1 ? 'ไฟล์เดียว' : `ชุด ${idx}/${chunkCount}`,
+      };
+    });
+
     return runChunkedExport(chunks, displayLabel || 'พิมพ์ฉลาก', {
       baseFilename,
       totalLabels: ids.length,
       workerId,
       workerName,
       workerIcon,
+      assigneeKind: workerName ? 'worker' : null,
+      assigneeName: workerName || null,
+      withPickingList: plan.withPickingList || false,
+      withDivider: plan.withDivider || false,
     });
   }
 
   // runChunkedExport(chunks, title, historyMeta)
   //   historyMeta = null → skip history (e.g., re-download from history itself)
-  //   historyMeta = {baseFilename, totalLabels, workerId?, workerName?} → save entry after allDone
+  //   historyMeta = {baseFilename, totalLabels, workerId?, workerName?, withPickingList?} → save entry after allDone
   async function runChunkedExport(chunks, displayTitle, historyMeta) {
     const workerName = historyMeta?.workerName || null;
     const workerIcon = historyMeta?.workerIcon || null;
+    const withPickingList = historyMeta?.withPickingList || false;
+    const withDivider = historyMeta?.withDivider || false;
+    const assigneeName = historyMeta?.assigneeName || workerName || null;
+
+    // When divider is on, reorder each chunk's ids by (sku, carrier) so the
+    // buildChunkPdf output already has carrier blocks contiguous — we can
+    // then slice + prepend dividers afterwards by page index.
+    if (withDivider) {
+      for (const c of chunks) {
+        if (c.prebuiltBytes) continue; // combined path already has dividers baked in
+        const subs = subGroupByCarrier(c.ids);
+        if (subs.length > 0) {
+          c.ids = subs.flatMap(s => s.ids);
+        }
+      }
+    }
     const totalIds = chunks.reduce((a, c) => a + c.ids.length, 0);
     const result = showChunkedResult({
       title: displayTitle,
@@ -2903,9 +4331,90 @@
     const runChunk = async (ci) => {
       result.startChunk(ci);
       try {
-        const { bytes, pageCount } = await buildChunkPdf(chunks[ci].ids, (pct, label) => {
-          result.updateChunkProgress(ci, pct, label);
-        }, workerName, workerIcon);
+        let bytes, pageCount;
+        const prebuilt = chunks[ci].prebuiltBytes;
+        if (prebuilt) {
+          // Combined path: buildMultiSkuCombinedPdf already baked in
+          // dividers + merged all SKUs — use bytes as-is.
+          bytes = prebuilt;
+          try {
+            const { PDFDocument } = window.PDFLib;
+            const d = await PDFDocument.load(bytes);
+            pageCount = d.getPageCount();
+          } catch { pageCount = null; }
+          result.updateChunkProgress(ci, 100, 'พร้อมแล้ว');
+        } else {
+          ({ bytes, pageCount } = await buildChunkPdf(chunks[ci].ids, (pct, label) => {
+            result.updateChunkProgress(ci, pct, label);
+          }, workerName, workerIcon));
+
+          // §Divider: prepend per-subgroup dividers to each split chunk.
+          // Runs BEFORE picking list so picking list stays at the very top.
+          if (withDivider && window.PDFLib) {
+            try {
+              const { bytes: dBytes, pageCount: dCount } = await prependDividersToChunk(bytes, chunks[ci].ids, workerName);
+              bytes = dBytes;
+              if (dCount != null) pageCount = dCount;
+            } catch (_dErr) {
+              console.warn('[QF] divider prepend failed:', _dErr);
+            }
+          }
+
+          // §7.1: Prepend picking list pages to each chunk when requested.
+          // NOTE: only runs on the non-prebuilt branch — buildMultiSkuCombinedPdf
+          // already bakes picking list in on the prebuilt path (Bug #1 fix: ป้องกันหน้าซ้ำ).
+          if (withPickingList && window.PDFLib) {
+            try {
+              const { PDFDocument } = window.PDFLib;
+              // Build groups for this chunk's ids.
+              const chunkGroupMap = new Map();
+              for (const id of chunks[ci].ids) {
+                const rec = state.records.get(id);
+                if (!rec?.skuList?.length) continue;
+                const s = rec.skuList[0];
+                const key = `${s.productId}:${s.skuId || ''}`;
+                if (!chunkGroupMap.has(key)) {
+                  const alias = (getAlias(s.productId) || '').trim();
+                  const variantInfo = getVariantInfo(s.productId, s.skuId);
+                  chunkGroupMap.set(key, {
+                    productId: s.productId, skuId: s.skuId || null,
+                    alias: alias || shortName(s.productName),
+                    officialName: s.productName || '',
+                    variantName: (variantInfo?.alias || '').trim() || (s.skuName || ''),
+                    productImageURL: s.productImageURL || null,
+                    sellerSku: s.sellerSkuName || '',
+                    ids: [],
+                  });
+                }
+                chunkGroupMap.get(key).ids.push(id);
+              }
+              const chunkGroups = [...chunkGroupMap.values()];
+              // Probe page size from existing label bytes.
+              let W = 288; let H = 432;
+              try {
+                const sampleDoc = await PDFDocument.load(bytes);
+                W = sampleDoc.getPage(0).getWidth();
+                H = sampleDoc.getPage(0).getHeight();
+              } catch {}
+              const headerMeta = buildPickingHeaderMeta(chunkGroups, assigneeName);
+              const tmpDoc = await buildPickingListPages(chunkGroups, { W, H }, headerMeta);
+              if (tmpDoc && tmpDoc.getPageCount() > 0) {
+                const combinedDoc = await PDFDocument.create();
+                if (window.fontkit) combinedDoc.registerFontkit(window.fontkit);
+                const plCopied = await combinedDoc.copyPages(tmpDoc, tmpDoc.getPageIndices());
+                plCopied.forEach(p => combinedDoc.addPage(p));
+                const labelDoc = await PDFDocument.load(bytes);
+                const lCopied = await combinedDoc.copyPages(labelDoc, labelDoc.getPageIndices());
+                lCopied.forEach(p => combinedDoc.addPage(p));
+                bytes = await combinedDoc.save();
+                pageCount = combinedDoc.getPageCount();
+              }
+            } catch (_plErr) {
+              console.warn('[QF] picking list prepend failed:', _plErr);
+            }
+          }
+        }
+
         const blob = new Blob([bytes], {type: 'application/pdf'});
         const url = URL.createObjectURL(blob);
         result.completeChunk(ci, {url, pageCount});
@@ -2944,6 +4453,9 @@
           platform: 'tiktok',
           workerId: historyMeta.workerId || null,
           workerName: historyMeta.workerName || null,
+          // §8.2: assignee fields added for CSV export and daily planning.
+          assigneeKind: historyMeta.assigneeKind || null,
+          assigneeName: historyMeta.assigneeName || null,
         });
         renderHistoryBadge();
       } catch (e) {
@@ -3003,6 +4515,143 @@
       overlay.onclick = e => { if (e.target === overlay) cleanup(null); };
       const onKey = e => { if (e.key === 'Escape') { cleanup(null); document.removeEventListener('keydown', onKey); } };
       document.addEventListener('keydown', onKey);
+    });
+  }
+
+  // §5.3: Modal for card-click when product has multiple qty buckets.
+  // Resolves 'merge' | 'split' | null.
+  function showQtyCombineModal({ alias, buckets }) {
+    return new Promise(resolve => {
+      const overlay = document.createElement('div');
+      overlay.className = 'qf-modal-overlay qf-qty-combine-overlay';
+      const bucketDesc = buckets.map(b => `×${b.qty} (${b.count})`).join(', ');
+      const totalCount = buckets.reduce((s, b) => s + b.count, 0);
+      overlay.innerHTML = `
+        <div class="qf-modal qf-qty-combine-modal" role="dialog">
+          <div class="qf-modal-title">พิมพ์ "${escapeHtml(alias)}"</div>
+          <div class="qf-modal-body">
+            <div class="qf-split-sub">${buckets.length} กลุ่มจำนวน · ${totalCount} ฉลากรวม</div>
+            <div class="qf-split-options">
+              <label class="qf-split-opt">
+                <input type="radio" name="qf-qty-combine" value="split" checked/>
+                <div class="qf-split-opt-body">
+                  <div class="qf-split-opt-title">แยก PDF ต่อจำนวน (ค่าเริ่มต้น)</div>
+                  <div class="qf-split-opt-desc">${buckets.length} ไฟล์ · ${escapeHtml(bucketDesc)}</div>
+                </div>
+              </label>
+              <label class="qf-split-opt">
+                <input type="radio" name="qf-qty-combine" value="merge"/>
+                <div class="qf-split-opt-body">
+                  <div class="qf-split-opt-title">รวมไฟล์เดียว</div>
+                  <div class="qf-split-opt-desc">เรียงตามจำนวน: ${escapeHtml(bucketDesc)}</div>
+                </div>
+              </label>
+              <label class="qf-split-opt qf-qty-combine-sub" style="display:none;">
+                <input type="checkbox" name="qf-qty-divider" class="qf-qty-divider-chk"/>
+                <div class="qf-split-opt-body">
+                  <div class="qf-split-opt-title">แทรกหน้าคั่นระหว่างกลุ่มจำนวน</div>
+                  <div class="qf-split-opt-desc">หน้าคั่นแสดงชื่อย่อ + จำนวน ก่อนฉลากแต่ละกลุ่ม</div>
+                </div>
+              </label>
+            </div>
+          </div>
+          <div class="qf-modal-actions">
+            <button class="qf-btn-cancel">ยกเลิก</button>
+            <button class="qf-btn-confirm">พิมพ์</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+      const cleanup = v => { overlay.remove(); resolve(v); };
+      const subRow = overlay.querySelector('.qf-qty-combine-sub');
+      const divChk = overlay.querySelector('.qf-qty-divider-chk');
+      overlay.querySelectorAll('input[name="qf-qty-combine"]').forEach(r => {
+        r.addEventListener('change', () => {
+          const mergePicked = overlay.querySelector('input[name="qf-qty-combine"]:checked')?.value === 'merge';
+          subRow.style.display = mergePicked ? '' : 'none';
+          if (!mergePicked) divChk.checked = false;
+        });
+      });
+      overlay.querySelector('.qf-btn-cancel').onclick = () => cleanup(null);
+      overlay.querySelector('.qf-btn-confirm').onclick = () => {
+        const picked = overlay.querySelector('input[name="qf-qty-combine"]:checked')?.value || 'split';
+        const withDivider = picked === 'merge' && divChk.checked;
+        cleanup({ mode: picked, withDivider });
+      };
+      overlay.onclick = e => { if (e.target === overlay) cleanup(null); };
+      const onKey = e => { if (e.key === 'Escape') { cleanup(null); document.removeEventListener('keydown', onKey); } };
+      document.addEventListener('keydown', onKey);
+    });
+  }
+
+  // §5.4: Print all qty buckets combined (each bucket = one divider group).
+  async function printQtyBucketsCombined(productId, alias, buckets, workerName, workerIcon, plan) {
+    const product = state.products.get(productId);
+    const groups = buckets.map(b => ({
+      productId,
+      skuId: null,
+      alias: alias + ' ×' + b.qty,
+      officialName: product?.productName || alias,
+      variantName: '×' + b.qty,
+      productImageURL: product?.productImageURL || null,
+      ids: [...b.ids],
+    }));
+    const totalIds = groups.reduce((s, g) => s + g.ids.length, 0);
+    const assignee = workerName || null;
+    const baseFilename = assignee
+      ? makeBaseFilename('[' + alias + '] [' + assignee + ']')
+      : makeBaseFilename(alias);
+    try {
+      const prepProgress = showProgress(`กำลังเตรียม PDF รวม (${groups.length} กลุ่ม · ${totalIds} ฉลาก)`);
+      let bytes;
+      try {
+        ({ bytes } = await buildMultiSkuCombinedPdf(groups, workerName, workerIcon, plan.withPickingList, (pct) => {
+          prepProgress.update(pct, `${pct.toFixed(0)}%`);
+        }, plan.withDivider));
+      } finally {
+        document.querySelectorAll('.qf-progress-overlay').forEach(e => e.remove());
+      }
+      const allIds = groups.flatMap(g => g.ids);
+      const exportChunk = { ids: allIds, label: 'ไฟล์เดียว', filename: baseFilename + '.pdf' };
+      const ok = await runChunkedExport([exportChunk], alias + ' (รวมตามจำนวน)', {
+        baseFilename,
+        totalLabels: totalIds,
+        workerName,
+        workerIcon,
+        assigneeKind: workerName ? 'worker' : null,
+        assigneeName: workerName || null,
+      });
+      return ok;
+    } catch (e) {
+      throw new Error('รวม PDF ไม่สำเร็จ: ' + e.message);
+    }
+  }
+
+  // §5.5: Print each qty bucket as a separate chunk.
+  async function printQtyBucketsSplit(productId, alias, buckets, workerName, workerIcon) {
+    const assignee = workerName || null;
+    const chunks = buckets.map(b => {
+      const hint = alias + ' x' + b.qty;
+      const baseFilename = assignee
+        ? makeBaseFilename('[' + hint + '] [' + assignee + ']')
+        : makeBaseFilename(hint);
+      return {
+        ids: [...b.ids],
+        label: alias + ' ×' + b.qty,
+        filename: baseFilename + '.pdf',
+      };
+    });
+    const totalIds = chunks.reduce((s, c) => s + c.ids.length, 0);
+    const baseFilename = assignee
+      ? makeBaseFilename('[' + alias + '] [' + assignee + ']')
+      : makeBaseFilename(alias);
+    return runChunkedExport(chunks, alias + ' (แยกตามจำนวน)', {
+      baseFilename,
+      totalLabels: totalIds,
+      workerName,
+      workerIcon,
+      assigneeKind: workerName ? 'worker' : null,
+      assigneeName: workerName || null,
     });
   }
 
@@ -3071,11 +4720,11 @@
         if (choice === 'per-variant') {
           return printProductByVariants(productId, scenario, variantsList);
         }
-        // 'merge' and 'chunked' fall through; 'merge' forces single file
+        // 'merge' and 'chunked' fall through — printIds now handles chunking via showChunkPlanModal.
         const ids = collectFulfillIds(productId, null, scenario);
         const title = `${product.productName}`;
         const sampleQty = scenario === 'multi' ? '2+' : '1';
-        return printIds(ids, title, `${baseName} ${sampleQty}`, baseName, { forceSingleFile: choice === 'merge' });
+        return printIds(ids, title, `${baseName} ${sampleQty}`, baseName);
       }
     }
 
@@ -3096,18 +4745,133 @@
     const combo = state.weirdCombos.get(sigKey);
     if (!combo) { showToast('ไม่พบ combo', 2000); return; }
     const ids = applyCarrierFilter([...combo.fulfillUnitIds]);
+    if (!ids.length) { showToast('ไม่มีฉลากใน combo นี้', 2000); return false; }
+
     const sample = combo.items
       .map(i => `${(getAlias(i.productId) || '').trim() || shortName(i.productName)} ${i.quantity}`)
       .join(' + ');
+    const filenameHint = combo.items
+      .map(i => (getAlias(i.productId) || '').trim() || shortName(i.productName))
+      .join('+');
+    const displayLabel = `ออเดอร์แปลก: ${sample}`;
+
     try {
-      const filenameHint = combo.items
-        .map(i => (getAlias(i.productId) || '').trim() || shortName(i.productName))
-        .join('+');
-      const ok = await printIds(ids, `ออเดอร์แปลก: ${sample}`, sample, filenameHint);
+      // §4: Weird combos are always multi-SKU by definition.
+      // Show chunk-plan modal (which includes the "รวม PDF" option, default checked).
+      const confirm = await showPrintConfirm({
+        title: displayLabel,
+        count: ids.length,
+        sampleText: sample,
+      });
+      if (!confirm) return false;
+      const { workerId, workerName, workerIcon } = confirm;
+
+      // §4: Weird combos are always multi-SKU → always prompt so user chooses combined/split + divider.
+      const plan = await showChunkPlanModal({ total: ids.length, multiSku: true, defaultPickingList: loadPickingListPref() });
+      if (!plan) return false;
+
+      const assignee = workerName || null;
+      let ok;
+
+      if (plan.combined) {
+        // Build groups from combo items (each item is a distinct productId:skuId).
+        const groupMap = new Map();
+        for (const id of ids) {
+          const rec = state.records.get(id);
+          if (!rec?.skuList?.length) continue;
+          const s = rec.skuList[0];
+          const key = `${s.productId}:${s.skuId}`;
+          if (!groupMap.has(key)) {
+            const alias = (getAlias(s.productId) || '').trim();
+            const variantInfo = getVariantInfo(s.productId, s.skuId);
+            groupMap.set(key, {
+              productId: s.productId,
+              skuId: s.skuId,
+              alias: alias || shortName(s.productName),
+              officialName: s.productName || '',
+              variantName: (variantInfo?.alias || '').trim() || (s.skuName || s.sellerSkuName || ''),
+              productImageURL: s.productImageURL || null,
+              ids: [],
+            });
+          }
+          groupMap.get(key).ids.push(id);
+        }
+        const groups = [...groupMap.values()].sort((a, b) => a.alias.localeCompare(b.alias));
+        const baseHint = `รวม ${groups.length} SKU`;
+        const baseFilename = assignee
+          ? makeBaseFilename(`[${baseHint}] [${assignee}]`)
+          : makeBaseFilename(baseHint);
+
+        const slices = planSlice(ids, plan);
+        const chunkCount = slices.length;
+        const exportChunks = slices.map((slice, i) => {
+          const idx = i + 1;
+          const chunkSuffix = chunkCount > 1 ? `-ชุด${idx}-${chunkCount}` : '';
+          return {
+            ids: slice,
+            label: chunkCount === 1 ? 'ไฟล์เดียว' : `ชุด ${idx}/${chunkCount}`,
+            filename: `${baseFilename}${chunkSuffix}.pdf`,
+          };
+        });
+
+        ok = await runChunkedExport(exportChunks, displayLabel, {
+          baseFilename,
+          totalLabels: ids.length,
+          workerId,
+          workerName,
+          workerIcon,
+          assigneeKind: workerName ? 'worker' : null,
+          assigneeName: workerName || null,
+        });
+      } else {
+        // Per-SKU: delegate to printIds (no confirm re-prompt needed — already confirmed above).
+        // Build flat chunks per-SKU bucket.
+        const groupMap = new Map();
+        for (const id of ids) {
+          const rec = state.records.get(id);
+          if (!rec?.skuList?.length) continue;
+          const s = rec.skuList[0];
+          const key = `${s.productId}:${s.skuId}`;
+          if (!groupMap.has(key)) {
+            const alias = (getAlias(s.productId) || '').trim();
+            groupMap.set(key, { alias: alias || shortName(s.productName), ids: [] });
+          }
+          groupMap.get(key).ids.push(id);
+        }
+        const groups = [...groupMap.values()].sort((a, b) => a.alias.localeCompare(b.alias));
+        const baseFilename = assignee
+          ? makeBaseFilename(`[${filenameHint}] [${assignee}]`)
+          : makeBaseFilename(filenameHint);
+        const exportChunks = [];
+        for (const grp of groups) {
+          const slices = planSlice(grp.ids, plan);
+          const subCount = slices.length;
+          slices.forEach((slice, i) => {
+            const idx = i + 1;
+            const chunkSuffix = subCount > 1 ? `-ชุด${idx}-${subCount}` : '';
+            exportChunks.push({
+              ids: slice,
+              label: subCount === 1 ? grp.alias : `${grp.alias} ชุด${idx}/${subCount}`,
+              filename: assignee
+                ? makeBaseFilename(`[${grp.alias}] [${assignee}]`) + `${chunkSuffix}.pdf`
+                : makeBaseFilename(grp.alias) + `${chunkSuffix}.pdf`,
+            });
+          });
+        }
+        ok = await runChunkedExport(exportChunks, displayLabel, {
+          baseFilename,
+          totalLabels: ids.length,
+          workerId,
+          workerName,
+          workerIcon,
+          assigneeKind: workerName ? 'worker' : null,
+          assigneeName: workerName || null,
+        });
+      }
+
       if (ok) { markComboDone(sigKey); renderAll(); }
       return ok;
     } catch (e) {
-      console.error('[QF] printWeirdCombo failed:', e);
       showErrorToast('พิมพ์ผิดพลาด: ' + e.message, {
         source: 'printWeirdCombo',
         sigKey,
@@ -3348,25 +5112,146 @@
     }
   }
 
+  // §7.6: Mask email for picking list header — show first 2 chars + *** + @domain.
+  function maskEmail(email) {
+    if (!email || typeof email !== 'string') return '(ไม่ระบุ)';
+    const atIdx = email.indexOf('@');
+    if (atIdx < 0) return '***';
+    const local = email.slice(0, atIdx);
+    const domain = email.slice(atIdx + 1);
+    const keep = local.slice(0, 2);
+    return keep + '***@' + domain;
+  }
+
   // ==================== CSV EXPORT ====================
   function buildHistoryCsv(entries) {
     const q = (v) => '"' + String(v == null ? '' : v).replace(/[\r\n]+/g, ' ').replace(/"/g, '""') + '"';
     const pad = n => String(n).padStart(2, '0');
-    const header = [q('วันที่'), q('เวลา'), q('คนแพ็ค'), q('ไอคอน'), q('platform'), q('ชื่อสินค้า'), q('จำนวน'), q('fulfillUnitIds')].join(',');
-    const rows = entries.map(e => {
+    const header = [
+      q('timestamp'), q('date'), q('time'), q('platform'),
+      q('title'), q('baseFilename'), q('chunkLabel'), q('chunkFilename'), q('chunkIdCount'), q('totalLabels'),
+      q('assigneeKind'), q('assigneeName'),
+      q('teamId'), q('teamName'),
+      q('workerId'), q('workerName'),
+    ].join(',');
+    const rows = [];
+    for (const e of entries) {
       const d = new Date(e.timestamp);
       const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-      const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-      const worker = state.workers.find(w => w.id === e.workerId);
-      const workerName = e.workerName || '';
-      const workerIcon = worker ? worker.icon : '';
+      const time = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
       const platform = e.platform || 'tiktok';
       const title = e.title || '';
+      const baseFilename = e.baseFilename || '';
       const totalLabels = e.totalLabels != null ? e.totalLabels : '';
-      const ids = e.chunks.flatMap(c => c.ids).join(';');
-      return [q(date), q(time), q(workerName), q(workerIcon), q(platform), q(title), q(totalLabels), q(ids)].join(',');
-    });
+      const assigneeKind = e.assigneeKind || (e.workerId ? 'worker' : '');
+      const assigneeName = e.assigneeName || e.workerName || '';
+      const teamId = e.teamId || '';
+      const teamName = e.teamName || '';
+      const workerId = e.workerId || '';
+      const workerName = e.workerName || '';
+      for (const c of (e.chunks || [])) {
+        const chunkLabel = c.label || '';
+        const chunkFilename = c.filename || '';
+        const chunkIdCount = (c.ids || []).length;
+        rows.push([
+          q(e.timestamp), q(date), q(time), q(platform),
+          q(title), q(baseFilename), q(chunkLabel), q(chunkFilename), q(chunkIdCount), q(totalLabels),
+          q(assigneeKind), q(assigneeName),
+          q(teamId), q(teamName),
+          q(workerId), q(workerName),
+        ].join(','));
+      }
+    }
     return '\ufeff' + [header, ...rows].join('\r\n');
+  }
+
+  function buildDailyCsv(entries) {
+    const q = (v) => '"' + String(v == null ? '' : v).replace(/[\r\n]+/g, ' ').replace(/"/g, '""') + '"';
+    const pad = n => String(n).padStart(2, '0');
+    const fmtDate = (ts) => { const d = new Date(ts); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+    const fmtTime = (ts) => { const d = new Date(ts); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
+
+    // §9.6: plannedQty from snapshots.
+    const plannedMap = new Map();
+    const snapshots = loadPlanSnapshots();
+    const hasSnapshots = snapshots.length > 0;
+    for (const snap of snapshots) {
+      for (const [, col] of Object.entries(snap.columns || {})) {
+        const ak = col.assigneeKind || 'unassigned';
+        const an = col.assigneeName || '';
+        const assigneeKey = ak === 'team' ? `team:${an}` : (ak === 'worker' ? `worker:${an}` : 'unassigned');
+        for (const id of (col.ids || [])) {
+          const rec = state.records.get(id);
+          if (!rec?.skuList?.length) continue;
+          for (const s of rec.skuList) {
+            const pk = `${snap.date}:${assigneeKey}:${s.productId}:${s.skuId || ''}`;
+            plannedMap.set(pk, (plannedMap.get(pk) || 0) + (s.quantity || 1));
+          }
+        }
+      }
+    }
+
+    const dailyMap = new Map();
+    for (const e of entries) {
+      const day = fmtDate(e.timestamp);
+      const assigneeKind = e.assigneeKind || (e.workerId ? 'worker' : 'unassigned');
+      const assigneeName = e.assigneeName || e.workerName || e.teamName || '';
+      const assigneeKey = assigneeKind === 'team' ? `team:${assigneeName}` : (assigneeKind === 'worker' ? `worker:${assigneeName}` : 'unassigned');
+      for (const chunk of (e.chunks || [])) {
+        for (const id of (chunk.ids || [])) {
+          const rec = state.records.get(id);
+          if (!rec?.skuList?.length) continue;
+          for (const s of rec.skuList) {
+            const key = `${day}:${assigneeKey}:${s.productId}:${s.skuId || ''}`;
+            if (!dailyMap.has(key)) {
+              const alias = (getAlias(s.productId) || '').trim();
+              const variantInfo = getVariantInfo(s.productId, s.skuId);
+              dailyMap.set(key, {
+                date: day, platform: e.platform || 'tiktok',
+                assigneeKind,
+                workerName: assigneeKind === 'worker' ? assigneeName : '',
+                teamName: assigneeKind === 'team' ? assigneeName : '',
+                productAlias: alias || shortName(s.productName),
+                officialName: s.productName || '',
+                skuAlias: (variantInfo?.alias || '').trim(),
+                sellerSku: s.sellerSkuName || '',
+                printedQty: 0,
+                startTime: e.timestamp, endTime: e.timestamp,
+                _planKey: key,
+              });
+            }
+            const row = dailyMap.get(key);
+            row.printedQty += (s.quantity || 1);
+            if (e.timestamp < row.startTime) row.startTime = e.timestamp;
+            if (e.timestamp > row.endTime) row.endTime = e.timestamp;
+          }
+        }
+      }
+    }
+
+    const header = [
+      q('date'), q('platform'), q('assigneeKind'), q('workerName'), q('teamName'),
+      q('productAlias'), q('officialName'), q('skuAlias'), q('sellerSku'),
+      q('plannedQty'), q('printedQty'), q('remainingQty'),
+      q('startTime'), q('endTime'),
+    ].join(',');
+
+    const preamble = hasSnapshots ? [] : [q('หมายเหตุ: ไม่พบ snapshot แผนงาน — plannedQty ใช้ printedQty แทน')];
+
+    const rows = [...dailyMap.values()]
+      .sort((a, b) => a.date.localeCompare(b.date) || a.assigneeKind.localeCompare(b.assigneeKind) || a.productAlias.localeCompare(b.productAlias))
+      .map(r => {
+        const planned = hasSnapshots ? (plannedMap.get(r._planKey) || 0) : r.printedQty;
+        const remaining = Math.max(0, planned - r.printedQty);
+        return [
+          q(r.date), q(r.platform), q(r.assigneeKind), q(r.workerName), q(r.teamName),
+          q(r.productAlias), q(r.officialName), q(r.skuAlias), q(r.sellerSku),
+          q(planned), q(r.printedQty), q(remaining),
+          q(fmtTime(r.startTime)), q(fmtTime(r.endTime)),
+        ].join(',');
+      });
+
+    return '\ufeff' + [...preamble, header, ...rows].join('\r\n');
   }
 
   function downloadCsv(csv, filename) {
@@ -3380,6 +5265,56 @@
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  }
+
+  // Phase 1 Custom Layout: preset picker modal.
+  function openDividerPresetModal() {
+    document.querySelectorAll('.qf-divider-preset-overlay').forEach(e => e.remove());
+    const current = loadDividerPreset();
+    const overlay = document.createElement('div');
+    overlay.className = 'qf-modal-overlay qf-divider-preset-overlay';
+    const presets = [
+      { id: 'minimal',     title: 'ขั้นต่ำสุด (Minimal)',    desc: 'แสดงเฉพาะชื่อย่อขนาดใหญ่กลางหน้า + จำนวน — เหมาะกับพนักงานที่จำรหัสสินค้าได้' },
+      { id: 'standard',    title: 'มาตรฐาน (Standard)',      desc: 'แสดงชื่อย่อ + ชื่อสินค้า + ตัวเลือก + ขนส่ง + รูป + จำนวน (ค่าเริ่มต้น)' },
+      { id: 'detailed',    title: 'ละเอียด (Detailed)',     desc: 'เหมือน Standard + แสดงรายละเอียดเพิ่ม (เหมาะกับตรวจสอบละเอียด)' },
+      { id: 'photo-first', title: 'รูปก่อน (Photo-first)',  desc: 'รูปสินค้าใหญ่ด้านบน ชื่อย่อใต้รูป — เหมาะกับพนักงานใหม่จำรูป' },
+    ];
+    const optsHtml = presets.map(p => `
+      <label class="qf-divider-preset-opt">
+        <input type="radio" name="qf-divider-preset" value="${p.id}" ${p.id === current ? 'checked' : ''} />
+        <div class="qf-divider-preset-text">
+          <div class="qf-divider-preset-title">${escapeHtml(p.title)}</div>
+          <div class="qf-divider-preset-desc">${escapeHtml(p.desc)}</div>
+        </div>
+      </label>
+    `).join('');
+    overlay.innerHTML = `
+      <div class="qf-modal qf-divider-preset-modal" role="dialog">
+        <div class="qf-modal-title">ใบคั่น - เลือกรูปแบบ</div>
+        <div class="qf-modal-body">
+          <div class="qf-modal-summary">รูปแบบนี้จะใช้ทุกครั้งที่พิมพ์ฉลากพร้อมใบคั่น (ทุกอย่างขาวดำ)</div>
+          <div class="qf-divider-preset-list">${optsHtml}</div>
+        </div>
+        <div class="qf-modal-actions">
+          <button class="qf-btn-cancel">ยกเลิก</button>
+          <button class="qf-btn-confirm">บันทึก</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.querySelector('.qf-btn-cancel').onclick = close;
+    overlay.querySelector('.qf-btn-confirm').onclick = () => {
+      const chosen = overlay.querySelector('input[name="qf-divider-preset"]:checked')?.value;
+      if (chosen) {
+        saveDividerPreset(chosen);
+        showToast(`บันทึกรูปแบบใบคั่น: ${chosen}`, 2500);
+      }
+      close();
+    };
+    overlay.onclick = (e) => { if (e.target === overlay) close(); };
+    const onKey = (e) => { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } };
+    document.addEventListener('keydown', onKey);
   }
 
   function openCsvExportModal() {
@@ -3396,16 +5331,27 @@
     overlay.innerHTML = `
       <div class="qf-modal qf-csv-modal" role="dialog">
         <div class="qf-workers-header">
-          <div class="qf-modal-title" style="margin-bottom:0;">ดาวน์โหลดประวัติ CSV</div>
+          <div class="qf-modal-title" style="margin-bottom:0;">ดาวน์โหลด CSV</div>
           <button class="qf-csv-close qf-workers-close">×</button>
         </div>
         <div class="qf-csv-body">
-          <div class="qf-csv-section-label">ช่วงเวลา:</div>
-          <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-range" value="today"> วันนี้</label>
-          <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-range" value="7d" checked> 7 วัน</label>
-          <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-range" value="all"> ทั้งหมด</label>
-          <div class="qf-csv-section-label" style="margin-top:12px;">คนแพ็ค:</div>
-          <select class="qf-csv-worker-select">${workerOptions}</select>
+          <div class="qf-csv-section-label">ประเภทรายงาน:</div>
+          <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-type" value="history" checked> ประวัติการพิมพ์ (per chunk audit log)</label>
+          <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-type" value="daily"> แผนงานรายวัน (daily planning summary)</label>
+          <div id="qf-csv-history-opts">
+            <div class="qf-csv-section-label" style="margin-top:10px;">ช่วงเวลา:</div>
+            <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-range" value="today"> วันนี้</label>
+            <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-range" value="7d" checked> 7 วัน</label>
+            <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-range" value="all"> ทั้งหมด</label>
+            <div class="qf-csv-section-label" style="margin-top:10px;">คนแพ็ค:</div>
+            <select class="qf-csv-worker-select">${workerOptions}</select>
+          </div>
+          <div id="qf-csv-daily-opts" style="display:none;">
+            <div class="qf-csv-section-label" style="margin-top:10px;">ช่วงเวลา:</div>
+            <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-daily-range" value="today"> วันนี้</label>
+            <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-daily-range" value="7d" checked> 7 วัน</label>
+            <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-daily-range" value="all"> ทั้งหมด</label>
+          </div>
         </div>
         <div class="qf-modal-actions">
           <button class="qf-btn-cancel qf-csv-cancel">ยกเลิก</button>
@@ -3423,139 +5369,49 @@
     const onKey = (e) => { if (e.key === 'Escape') { cleanup(); document.removeEventListener('keydown', onKey); } };
     document.addEventListener('keydown', onKey);
 
+    // Toggle history vs daily option panels
+    overlay.querySelectorAll('input[name="qf-csv-type"]').forEach(radio => {
+      radio.addEventListener('change', () => {
+        const isHistory = overlay.querySelector('input[name="qf-csv-type"]:checked').value === 'history';
+        overlay.querySelector('#qf-csv-history-opts').style.display = isHistory ? '' : 'none';
+        overlay.querySelector('#qf-csv-daily-opts').style.display = isHistory ? 'none' : '';
+      });
+    });
+
     overlay.querySelector('.qf-csv-download').onclick = (e) => {
       e.stopPropagation();
-      const range = overlay.querySelector('input[name="qf-csv-range"]:checked').value;
-      const workerVal = overlay.querySelector('.qf-csv-worker-select').value;
-
-      const now = Date.now();
-      const dayStart = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x.getTime(); };
-      let cutoff = 0;
-      if (range === 'today') cutoff = dayStart(now);
-      else if (range === '7d') cutoff = dayStart(now) - 6 * 24 * 60 * 60 * 1000;
-
-      let entries = loadHistory().filter(e => e.timestamp >= cutoff);
-
-      if (workerVal === 'none') {
-        entries = entries.filter(e => e.workerId == null);
-      } else if (workerVal !== 'all') {
-        entries = entries.filter(e => e.workerId === workerVal);
-      }
-
-      if (entries.length === 0) {
-        showToast('ไม่มีข้อมูลในช่วงที่เลือก', 2000);
-        return;
-      }
-
+      const csvType = overlay.querySelector('input[name="qf-csv-type"]:checked').value;
       const today = new Date();
       const pad = n => String(n).padStart(2, '0');
-      const filename = `print-history-${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}.csv`;
-      downloadCsv(buildHistoryCsv(entries), filename);
+      const todayStr = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+      const dayStart = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x.getTime(); };
+      const now = Date.now();
+
+      if (csvType === 'history') {
+        const range = overlay.querySelector('input[name="qf-csv-range"]:checked').value;
+        const workerVal = overlay.querySelector('.qf-csv-worker-select').value;
+        let cutoff = 0;
+        if (range === 'today') cutoff = dayStart(now);
+        else if (range === '7d') cutoff = dayStart(now) - 6 * 24 * 60 * 60 * 1000;
+        let entries = loadHistory().filter(e => e.timestamp >= cutoff);
+        if (workerVal === 'none') {
+          entries = entries.filter(e => e.workerId == null && e.teamId == null);
+        } else if (workerVal !== 'all') {
+          entries = entries.filter(e => e.workerId === workerVal);
+        }
+        if (entries.length === 0) { showToast('ไม่มีข้อมูลในช่วงที่เลือก', 2000); return; }
+        downloadCsv(buildHistoryCsv(entries), `quickfilter-history-${todayStr}.csv`);
+      } else {
+        const range = overlay.querySelector('input[name="qf-csv-daily-range"]:checked').value;
+        let cutoff = 0;
+        if (range === 'today') cutoff = dayStart(now);
+        else if (range === '7d') cutoff = dayStart(now) - 6 * 24 * 60 * 60 * 1000;
+        const entries = loadHistory().filter(e => e.timestamp >= cutoff);
+        if (entries.length === 0) { showToast('ไม่มีข้อมูลในช่วงที่เลือก', 2000); return; }
+        downloadCsv(buildDailyCsv(entries), `quickfilter-daily-${todayStr}.csv`);
+      }
       cleanup();
     };
-  }
-
-  // ==================== WORKERS MODAL ====================
-  function openWorkersModal() {
-    document.querySelectorAll('.qf-workers-overlay').forEach(e => e.remove());
-    const overlay = document.createElement('div');
-    overlay.className = 'qf-modal-overlay qf-workers-overlay';
-    document.body.appendChild(overlay);
-
-    function render(editingId = null, formName = '', formIcon = WORKER_ICONS[0]) {
-      overlay.innerHTML = `
-        <div class="qf-modal qf-workers-modal" role="dialog">
-          <div class="qf-workers-header">
-            <div class="qf-modal-title" style="margin-bottom:0;">จัดการคนแพ็ค</div>
-            <button class="qf-workers-close">×</button>
-          </div>
-          <div class="qf-workers-list">
-            ${state.workers.length === 0
-              ? '<div class="qf-workers-empty">ยังไม่มีคนแพ็ค</div>'
-              : state.workers.map(w => `
-                <div class="qf-workers-row" data-id="${escapeHtml(w.id)}">
-                  <span class="qf-worker-icon">${escapeHtml(w.icon)}</span>
-                  <span class="qf-worker-name">${escapeHtml(w.name)}</span>
-                  <button class="qf-workers-edit" data-id="${escapeHtml(w.id)}">แก้</button>
-                  <button class="qf-workers-del" data-id="${escapeHtml(w.id)}">ลบ</button>
-                </div>`).join('')}
-          </div>
-          ${editingId !== null ? `
-          <div class="qf-workers-form">
-            <div class="qf-workers-form-row">
-              <label class="qf-workers-form-label">ชื่อ</label>
-              <input id="qf-worker-name-input" class="qf-workers-input" maxlength="30"
-                value="${escapeHtml(formName)}" placeholder="ชื่อคนแพ็ค" />
-            </div>
-            <div class="qf-workers-form-row">
-              <label class="qf-workers-form-label">ไอคอน</label>
-              <div class="qf-workers-icons">
-                ${WORKER_ICONS.map(ic => `
-                  <button class="qf-workers-icon-btn${ic === formIcon ? ' active' : ''}"
-                    data-icon="${ic}">${ic}</button>`).join('')}
-              </div>
-            </div>
-            <div class="qf-workers-form-actions">
-              <button class="qf-workers-cancel">ยกเลิก</button>
-              <button class="qf-workers-save">บันทึก</button>
-            </div>
-          </div>` : `
-          <div class="qf-workers-add-row">
-            <button class="qf-workers-add-btn">+ เพิ่มคนแพ็ค</button>
-          </div>`}
-        </div>
-      `;
-
-      overlay.querySelector('.qf-workers-close').addEventListener('click', () => overlay.remove());
-      overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
-
-      overlay.querySelectorAll('.qf-workers-del').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const id = btn.dataset.id;
-          state.workers = state.workers.filter(w => w.id !== id);
-          saveWorkers();
-          render(null);
-        });
-      });
-
-      overlay.querySelectorAll('.qf-workers-edit').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const worker = state.workers.find(w => w.id === btn.dataset.id);
-          if (worker) render(worker.id, worker.name, worker.icon);
-        });
-      });
-
-      overlay.querySelector('.qf-workers-add-btn')?.addEventListener('click', () => {
-        render('__new__', '', WORKER_ICONS[0]);
-      });
-
-      if (editingId !== null) {
-        let selectedIcon = formIcon;
-        overlay.querySelectorAll('.qf-workers-icon-btn').forEach(btn => {
-          btn.addEventListener('click', () => {
-            selectedIcon = btn.dataset.icon;
-            overlay.querySelectorAll('.qf-workers-icon-btn').forEach(b => b.classList.toggle('active', b.dataset.icon === selectedIcon));
-          });
-        });
-
-        overlay.querySelector('.qf-workers-cancel').addEventListener('click', () => render(null));
-
-        overlay.querySelector('.qf-workers-save').addEventListener('click', () => {
-          const name = overlay.querySelector('#qf-worker-name-input').value.trim();
-          if (!name) { showToast('กรุณากรอกชื่อ', 1800); return; }
-          if (editingId === '__new__') {
-            const id = Math.random().toString(36).slice(2, 10);
-            state.workers = [...state.workers, { id, name, icon: selectedIcon }];
-          } else {
-            state.workers = state.workers.map(w => w.id === editingId ? { ...w, name, icon: selectedIcon } : w);
-          }
-          saveWorkers();
-          render(null);
-        });
-      }
-    }
-
-    render(null);
   }
 
   // ==================== UI ====================
@@ -3574,9 +5430,11 @@
           <div id="qf-settings-wrap" style="position:relative;">
             <button id="qf-settings-btn" title="ตั้งค่า">⋮</button>
             <div id="qf-settings-menu" class="qf-settings-menu" style="display:none;">
-              <button id="qf-menu-workers">จัดการคนแพ็ค</button>
               <button id="qf-menu-csv">ดาวน์โหลดประวัติ CSV</button>
               <button id="qf-menu-plan">🎨 วางแผน</button>
+              <button id="qf-menu-divider-preset">🗂 ใบคั่น - รูปแบบ</button>
+              <button id="qf-menu-pdf-templates">📄 เทมเพลต PDF</button>
+              <button id="qf-menu-pdf-template-new">✏️ สร้างเทมเพลต</button>
             </div>
           </div>
           <button id="qf-toggle-btn" title="ย่อ/ขยาย">−</button>
@@ -3671,11 +5529,6 @@
       settingsMenu.style.display = settingsMenu.style.display === 'none' ? '' : 'none';
     });
     document.addEventListener('click', () => { settingsMenu.style.display = 'none'; });
-    document.getElementById('qf-menu-workers').addEventListener('click', (e) => {
-      e.stopPropagation();
-      settingsMenu.style.display = 'none';
-      openWorkersModal();
-    });
     document.getElementById('qf-menu-csv').addEventListener('click', (e) => {
       e.stopPropagation();
       settingsMenu.style.display = 'none';
@@ -3688,6 +5541,36 @@
         settingsMenu.style.display = 'none';
         const existing = loadPlanningSession();
         openPlanningPanel(existing);
+      });
+    }
+    const pdfTplBtn = document.getElementById('qf-menu-pdf-templates');
+    if (pdfTplBtn) {
+      pdfTplBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        settingsMenu.style.display = 'none';
+        openPdfTemplateManager();
+      });
+    }
+    const pdfTplNewBtn = document.getElementById('qf-menu-pdf-template-new');
+    if (pdfTplNewBtn) {
+      pdfTplNewBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        settingsMenu.style.display = 'none';
+        const tpls = loadPdfTemplates();
+        if (tpls.length >= MAX_PDF_TEMPLATES) {
+          showToast(`ครบ ${MAX_PDF_TEMPLATES} เทมเพลตแล้ว — ลบก่อนจึงสร้างใหม่ได้`, 3000);
+          openPdfTemplateManager();
+          return;
+        }
+        openPdfTemplateEditor();
+      });
+    }
+    const dividerPresetBtn = document.getElementById('qf-menu-divider-preset');
+    if (dividerPresetBtn) {
+      dividerPresetBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        settingsMenu.style.display = 'none';
+        openDividerPresetModal();
       });
     }
     renderHistoryBadge();
@@ -4221,7 +6104,11 @@
                 const choice = await showDoneActionModal(label);
                 if (choice === 'unmark') {
                   if (labels) {
-                    for (const id of v[idsKey] || []) state.printedUnitIds.delete(id);
+                    for (const id of v[idsKey] || []) {
+                      state.printedUnitIds.delete(id);
+                      const rec = state.records.get(id);
+                      if (rec) rec.labelStatus = LABEL_STATUS_NOT_PRINTED;
+                    }
                   } else {
                     state.doneItems.delete(doneKey(p.productId, v.skuId, type));
                     saveDoneItems();
@@ -4237,6 +6124,61 @@
             badgesEl.appendChild(badge);
           }
         }
+        // §5.2: Qty chips — in multi scenario on labels page, always show so user sees "×N (count)".
+        if (labels && scenario === 'multi' && p.fulfillUnitIdsByQty.size > 0) {
+          const qtyBuckets = [...p.fulfillUnitIdsByQty.entries()]
+            .map(([qty, idSet]) => ({ qty, ids: applyCarrierFilter([...idSet]) }))
+            .filter(b => b.ids.length > 0)
+            .sort((a, b) => a.qty - b.qty);
+          if (qtyBuckets.length >= 1) {
+            const chipsRow = document.createElement('div');
+            chipsRow.className = 'qf-qty-chips';
+            for (const b of qtyBuckets) {
+              const allDone = b.ids.every(id =>
+                state.printedUnitIds.has(id) || state.records.get(id)?.labelStatus === LABEL_STATUS_PRINTED
+              );
+              const chip = document.createElement('span');
+              chip.className = 'qf-qty-chip' + (allDone ? ' qf-qty-chip--done' : '');
+              chip.dataset.qty = b.qty;
+              chip.textContent = (allDone ? '\u2713 ' : '') + '\u00d7' + b.qty + ' (' + b.ids.length + ')';
+              const qtyItem = { type: 'qty', productId: p.productId, skuId: null, qty: b.qty };
+              chip.addEventListener('click', async e => {
+                e.stopPropagation();
+                if (state.selectMode) {
+                  if (allDone) return;
+                  toggleSelection(qtyItem);
+                  chip.classList.toggle('qf-selected');
+                  return;
+                }
+                const alias = (getAlias(p.productId) || '').trim() || shortName(p.productName);
+                if (allDone) {
+                  const label = alias + ' \u00d7' + b.qty;
+                  const choice = await showDoneActionModal(label);
+                  if (choice === 'unmark') {
+                    for (const id of b.ids) {
+                      state.printedUnitIds.delete(id);
+                      const rec = state.records.get(id);
+                      if (rec) rec.labelStatus = LABEL_STATUS_NOT_PRINTED;
+                    }
+                    renderAll();
+                  } else if (choice === 'reprint') {
+                    const lbl = alias + ' \u00d7' + b.qty;
+                    const hint = alias + ' x' + b.qty;
+                    await printIds(b.ids, lbl, lbl, hint);
+                    renderAll();
+                  }
+                  return;
+                }
+                const lbl = alias + ' \u00d7' + b.qty;
+                const hint = alias + ' x' + b.qty;
+                const ok = await printIds(b.ids, lbl, lbl, hint);
+                if (ok) renderAll();
+              });
+              chipsRow.appendChild(chip);
+            }
+            card.appendChild(chipsRow);
+          }
+        }
         card.addEventListener('click', async (e) => {
           if (state.selectMode) {
             if (cardDone) return; // can't select already-printed
@@ -4248,7 +6190,11 @@
             const choice = await showDoneActionModal(p.productName);
             if (choice === 'unmark') {
               if (labels) {
-                for (const id of p[idsKey] || []) state.printedUnitIds.delete(id);
+                for (const id of p[idsKey] || []) {
+                  state.printedUnitIds.delete(id);
+                  const rec = state.records.get(id);
+                  if (rec) rec.labelStatus = LABEL_STATUS_NOT_PRINTED;
+                }
               } else {
                 state.doneItems.delete(doneKey(p.productId, null, type));
                 saveDoneItems();
@@ -4258,6 +6204,46 @@
               applyProductFilter(p.productId, null, type);
             }
             return;
+          }
+          // §5.3: Multi scenario + labels page + 2+ qty buckets → show รวม/แยก modal.
+          if (labels && scenario === 'multi' && p.fulfillUnitIdsByQty.size > 0) {
+            const qtyBuckets = [...p.fulfillUnitIdsByQty.entries()]
+              .map(([qty, idSet]) => ({ qty, ids: applyCarrierFilter([...idSet]), count: applyCarrierFilter([...idSet]).length }))
+              .filter(b => b.count > 0)
+              .sort((a, b) => a.qty - b.qty);
+            if (qtyBuckets.length > 1) {
+              const alias = (getAlias(p.productId) || '').trim() || shortName(p.productName);
+              const picked = await showQtyCombineModal({ alias, buckets: qtyBuckets });
+              if (!picked) return;
+              const choice = picked.mode;
+              const withDivider = picked.withDivider;
+              const confirm = await showPrintConfirm({
+                title: alias,
+                summary: choice === 'merge' ? 'รวม ' + qtyBuckets.length + ' กลุ่มจำนวน' : 'แยก ' + qtyBuckets.length + ' ไฟล์',
+                count: qtyBuckets.reduce((s, b) => s + b.count, 0),
+                sampleText: alias,
+              });
+              if (!confirm) return;
+              const { workerName, workerIcon } = confirm;
+              let ok;
+              if (choice === 'merge') {
+                const totalIds = qtyBuckets.reduce((s, b) => s + b.count, 0);
+                // Qty-merge is multi-SKU by definition → always prompt for chunking/picking.
+                const plan = await showChunkPlanModal({ total: totalIds, multiSku: true, defaultPickingList: loadPickingListPref() });
+                if (!plan) return;
+                plan.withDivider = withDivider;
+                try {
+                  ok = await printQtyBucketsCombined(p.productId, alias, qtyBuckets, workerName, workerIcon, plan);
+                } catch (err) {
+                  showErrorToast('พิมพ์รวมไม่สำเร็จ: ' + err.message, { source: 'printQtyBucketsCombined', error: String(err) });
+                  return;
+                }
+              } else {
+                ok = await printQtyBucketsSplit(p.productId, alias, qtyBuckets, workerName, workerIcon);
+              }
+              if (ok) renderAll();
+              return;
+            }
           }
           applyProductFilter(p.productId, null, type);
         });
@@ -4347,7 +6333,11 @@
               const label = combo.items.map(i => (state.aliases.get(i.productId) || '').trim() || shortName(i.productName)).join(' + ');
               const choice = await showDoneActionModal(label);
               if (choice === 'unmark') {
-                for (const id of combo.fulfillUnitIds) state.printedUnitIds.delete(id);
+                for (const id of combo.fulfillUnitIds) {
+                  state.printedUnitIds.delete(id);
+                  const rec = state.records.get(id);
+                  if (rec) rec.labelStatus = LABEL_STATUS_NOT_PRINTED;
+                }
                 state.doneItems.delete(comboDoneKey(combo.sigKey));
                 saveDoneItems();
                 renderAll();
@@ -4392,27 +6382,87 @@
 
   // ==================== PLANNING PANEL ====================
   const PLANNING_SESSION_KEY = 'qf_planning_session_v1';
+  const PLAN_WINDOW_POS_KEY = 'qf_plan_window_pos_v1';
+  const PLAN_SNAPSHOTS_KEY = 'qf_plan_snapshots_v1';
   const PLANNING_STUCK_TIMEOUT = 60 * 1000;
   let _planSaveTimer = null;
+
+  // §9.6: Snapshot helpers — one snapshot per (sessionId, date). Retained 30 days.
+  function loadPlanSnapshots() {
+    try {
+      const raw = localStorage.getItem(PLAN_SNAPSHOTS_KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  }
+
+  function savePlanSnapshots(arr) {
+    try {
+      const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+      const trimmed = arr.filter(s => new Date(s.date).getTime() >= cutoff - 24 * 60 * 60 * 1000);
+      localStorage.setItem(PLAN_SNAPSHOTS_KEY, JSON.stringify(trimmed));
+    } catch (e) {
+      console.warn('[QF] snapshots save failed:', e);
+    }
+  }
+
+  function _todayDateStr() {
+    const d = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }
+
+  function pushPlanSnapshot(session) {
+    if (!session || !session.sessionId) return;
+    const date = _todayDateStr();
+    const existing = loadPlanSnapshots();
+    const already = existing.find(s => s.sessionId === session.sessionId && s.date === date);
+    if (already) {
+      // Update in place — session may have changed columns since last save today.
+      const updated = existing.map(s => {
+        if (s.sessionId !== session.sessionId || s.date !== date) return s;
+        const cols = {};
+        for (const [cid, col] of Object.entries(session.columns || {})) {
+          cols[cid] = { assigneeKind: col.kind, assigneeName: col.teamName || col.workerName || null, ids: [...(col.fulfillUnitIds || [])] };
+        }
+        return { ...s, columns: cols, savedAt: Date.now() };
+      });
+      savePlanSnapshots(updated);
+    } else {
+      const cols = {};
+      for (const [cid, col] of Object.entries(session.columns || {})) {
+        cols[cid] = { assigneeKind: col.kind, assigneeName: col.teamName || col.workerName || null, ids: [...(col.fulfillUnitIds || [])] };
+      }
+      const snap = { date, sessionId: session.sessionId, columns: cols, savedAt: Date.now() };
+      savePlanSnapshots([...existing, snap]);
+    }
+  }
 
   function loadPlanningSession() {
     try {
       const raw = localStorage.getItem(PLANNING_SESSION_KEY);
       if (!raw) return null;
       const s = JSON.parse(raw);
-      if (!s || s.version !== 1) return null;
+      if (!s || (s.version !== 1 && s.version !== 2)) return null;
       if (Date.now() > s.expiresAt) { localStorage.removeItem(PLANNING_SESSION_KEY); return null; }
       const platform = isShopee() ? 'sp' : 'tk';
       if (s.platform !== platform) return null;
-      // Migrate old columns that have workerColor but no workerIcon
+      // Migrate old columns: workerColor → workerIcon; add kind/columnId for v1 sessions
       const columns = {};
       for (const [wid, col] of Object.entries(s.columns || {})) {
-        if (col.workerIcon || !col.workerColor) { columns[wid] = col; continue; }
-        const worker = state.workers.find(w => w.id === wid);
-        const { workerColor: _drop, ...rest } = col;
-        columns[wid] = { ...rest, workerIcon: worker?.icon || WORKER_COLOR_TO_ICON[col.workerColor] || '●' };
+        let migrated = col;
+        // color → icon migration
+        if (!migrated.workerIcon && migrated.workerColor) {
+          const worker = state.workers.find(w => w.id === wid);
+          const { workerColor: _drop, ...rest } = migrated;
+          migrated = { ...rest, workerIcon: worker?.icon || WORKER_COLOR_TO_ICON[migrated.workerColor] || '●' };
+        }
+        // v1 → v2: add kind + columnId
+        if (!migrated.kind) {
+          migrated = { ...migrated, kind: 'worker', columnId: wid, workerId: wid };
+        }
+        columns[migrated.columnId || wid] = migrated;
       }
-      return { ...s, columns };
+      return { ...s, version: 2, columns };
     } catch { return null; }
   }
 
@@ -4426,7 +6476,25 @@
 
   function debouncedSavePlan(session) {
     clearTimeout(_planSaveTimer);
-    _planSaveTimer = setTimeout(() => savePlanningSession(session), 200);
+    _planSaveTimer = setTimeout(() => {
+      savePlanningSession(session);
+      // §9.6: push daily snapshot so buildDailyCsv can derive plannedQty.
+      pushPlanSnapshot(session);
+    }, 200);
+  }
+
+  function savePanelPos(pos) {
+    try { localStorage.setItem(PLAN_WINDOW_POS_KEY, JSON.stringify(pos)); } catch {}
+  }
+
+  function loadPanelPos() {
+    try {
+      const raw = localStorage.getItem(PLAN_WINDOW_POS_KEY);
+      if (!raw) return null;
+      const p = JSON.parse(raw);
+      if (typeof p.x !== 'number' || typeof p.y !== 'number') return null;
+      return p;
+    } catch { return null; }
   }
 
   function newPlanningSession() {
@@ -4435,7 +6503,7 @@
     const now = Date.now();
     const allIds = [...state.records.keys()];
     return {
-      version: 1,
+      version: 2,
       sessionId,
       platform,
       scannedAt: now,
@@ -4456,15 +6524,62 @@
 
   // Build card data from session — one card per unique productId:skuId combo in the given id list
   function buildPlanCards(ids) {
-    const map = new Map(); // "productId:skuId" → {key, productId, skuId, name, count, ids}
+    const map = new Map();
     for (const id of ids) {
       const rec = state.records.get(id);
       if (!rec?.skuList?.length) continue;
+
+      if (rec.skuList.length > 1) {
+        const sorted = [...rec.skuList].sort((a, b) =>
+          String(a.productId).localeCompare(String(b.productId)));
+        const sigKey = sorted.map(s => `${s.productId}:${s.quantity}`).join('|');
+        const key = `combo:${sigKey}`;
+        if (!map.has(key)) {
+          const items = sorted.map(s => ({
+            productId: s.productId,
+            skuId: s.skuId,
+            alias: (getAlias(s.productId) || '').trim(),
+            officialName: s.productName || '',
+            productImageURL: s.productImageURL || null,
+            quantity: s.quantity,
+          }));
+          const aliasParts = items.map(it => it.alias || shortName(it.officialName));
+          const comboAlias = aliasParts.join(' + ');
+          const comboOfficialName = items
+            .map(it => `${shortName(it.officialName) || it.alias || '?'}${it.quantity > 1 ? ` ×${it.quantity}` : ''}`)
+            .join(' + ');
+          map.set(key, {
+            key,
+            isCombo: true,
+            items,
+            productId: null, skuId: null,
+            alias: comboAlias,
+            officialName: comboOfficialName,
+            variantName: '',
+            productImageURL: items.find(it => it.productImageURL)?.productImageURL || null,
+            name: comboAlias,
+            count: 0, ids: [],
+          });
+        }
+        map.get(key).count++;
+        map.get(key).ids.push(id);
+        continue;
+      }
+
       const s = rec.skuList[0];
       const key = `${s.productId}:${s.skuId}`;
       if (!map.has(key)) {
         const alias = (getAlias(s.productId) || '').trim();
-        map.set(key, { key, productId: s.productId, skuId: s.skuId, name: alias || shortName(s.productName), count: 0, ids: [] });
+        const variantInfo = getVariantInfo(s.productId, s.skuId);
+        const variantName = (variantInfo?.alias || '').trim() || (s.skuName || s.sellerSkuName || '');
+        const officialName = s.productName || '';
+        const productImageURL = s.productImageURL || null;
+        map.set(key, {
+          key, productId: s.productId, skuId: s.skuId,
+          alias, officialName, variantName, productImageURL,
+          name: alias || shortName(officialName),
+          count: 0, ids: [],
+        });
       }
       map.get(key).count++;
       map.get(key).ids.push(id);
@@ -4517,14 +6632,14 @@
         <div class="qf-modal qf-plan-split-modal" role="dialog">
           <div class="qf-modal-title">วิธีแบ่งอัตโนมัติ</div>
           <div class="qf-plan-split-body">
-            <div class="qf-plan-split-opt">
+            <label class="qf-plan-split-opt">
               <input type="radio" name="qf-split-mode" value="even" checked/>
               <span>เฉลี่ยทุกใบ (หาร /คน)</span>
-            </div>
-            <div class="qf-plan-split-opt">
+            </label>
+            <label class="qf-plan-split-opt">
               <input type="radio" name="qf-split-mode" value="sku"/>
               <span>แยกตาม SKU</span>
-            </div>
+            </label>
             <div style="margin-top:10px;font-size:12px;font-weight:600;color:#555;">แบ่งให้:</div>
             <div class="qf-plan-workers-check">
               ${allWorkers.map(w => `
@@ -4577,7 +6692,7 @@
         const chunk = ids.slice(offset, offset + perWorker);
         offset += perWorker;
         if (!chunk.length) break;
-        const col = newSession.columns[w.id] || { workerId: w.id, workerName: w.name, workerIcon: w.icon, fulfillUnitIds: [], printedIds: [], failedIds: [], status: 'pending', lastPrintAt: null, errorMsg: null, retryCount: 0 };
+        const col = newSession.columns[w.id] || { kind: 'worker', columnId: w.id, workerId: w.id, workerName: w.name, workerIcon: w.icon, fulfillUnitIds: [], printedIds: [], failedIds: [], status: 'pending', lastPrintAt: null, errorMsg: null, retryCount: 0 };
         newSession.columns[w.id] = { ...col, fulfillUnitIds: [...col.fulfillUnitIds, ...chunk] };
       }
       newSession.unassignedIds = ids.slice(offset);
@@ -4596,7 +6711,7 @@
       for (const [, groupIds] of groups) {
         workerCounts.sort((a, b) => a.count - b.count);
         const { w } = workerCounts[0];
-        const col = newSession.columns[w.id] || { workerId: w.id, workerName: w.name, workerIcon: w.icon, fulfillUnitIds: [], printedIds: [], failedIds: [], status: 'pending', lastPrintAt: null, errorMsg: null, retryCount: 0 };
+        const col = newSession.columns[w.id] || { kind: 'worker', columnId: w.id, workerId: w.id, workerName: w.name, workerIcon: w.icon, fulfillUnitIds: [], printedIds: [], failedIds: [], status: 'pending', lastPrintAt: null, errorMsg: null, retryCount: 0 };
         newSession.columns[w.id] = { ...col, fulfillUnitIds: [...col.fulfillUnitIds, ...groupIds] };
         workerCounts[0].count += groupIds.length;
       }
@@ -4605,7 +6720,7 @@
     return newSession;
   }
 
-  async function printPlanColumn(session, workerId, ids, renderFn) {
+  async function printPlanColumn(session, workerId, ids, renderFn, opts = {}) {
     if (isShopee()) {
       showToast('การพิมพ์จากแผนยังไม่รองรับบน Shopee', 3000);
       return;
@@ -4618,23 +6733,46 @@
     renderFn(newSession);
 
     try {
-      const printIds_ = ids.filter(id => !col.printedIds.includes(id));
+      const printIds_ = opts.reprint ? [...ids] : ids.filter(id => !col.printedIds.includes(id));
       if (!printIds_.length) { renderFn({ ...newSession, columns: { ...newSession.columns, [workerId]: { ...newCol, status: 'done' } } }); return; }
 
-      const baseFilename = makeBaseFilename(col.workerName || 'plan');
-      const chunks = [];
-      const CHUNK_SZ = 200;
-      for (let i = 0; i < printIds_.length; i += CHUNK_SZ) {
-        const sl = printIds_.slice(i, i + CHUNK_SZ);
-        chunks.push({ ids: sl, label: col.workerName || 'แผน', filename: `${baseFilename}.pdf` });
+      // §3.6: Replace hard-coded CHUNK_SZ=200 with showChunkPlanModal for totals above threshold.
+      // §4.8: Detect multi-SKU to offer combined PDF option.
+      const skuBuckets = new Set();
+      let hasComboRecord = false;
+      for (const id of printIds_) {
+        const rec = state.records.get(id);
+        if (!rec?.skuList?.length) continue;
+        if (rec.skuList.length > 1) hasComboRecord = true;
+        for (const s of rec.skuList) {
+          skuBuckets.add(`${s.productId}:${s.skuId}`);
+        }
       }
-      const ok = await runChunkedExport(chunks, `พิมพ์: ${col.workerName}`, {
-        baseFilename,
-        totalLabels: printIds_.length,
-        workerId: col.workerId,
-        workerName: col.workerName,
-        workerIcon: col.workerIcon || null,
-      });
+      const multiSku = hasComboRecord || skuBuckets.size > 1;
+
+      let plan;
+      if (!multiSku && printIds_.length <= CHUNK_PROMPT_THRESHOLD) {
+        plan = { mode: 'single', withPickingList: loadPickingListPref(), combined: false, withDivider: false };
+      } else {
+        plan = await showChunkPlanModal({ total: printIds_.length, multiSku, defaultPickingList: loadPickingListPref() });
+        if (!plan) {
+          // User cancelled — restore column to pending.
+          renderFn({ ...newSession, columns: { ...newSession.columns, [workerId]: { ...col, status: 'pending' } } });
+          return;
+        }
+      }
+
+      // §8.1: Column name for filename: teamName (if team kind) or workerName.
+      const assigneeName = col.teamName || col.workerName || null;
+      const assigneeKind = col.kind === 'team' ? 'team' : (assigneeName ? 'worker' : null);
+
+      // §4.8: If multi-SKU and combined mode, build combined PDF per chunk.
+      let ok;
+      if (multiSku && plan.combined) {
+        ok = await printPlanColumnCombined(printIds_, plan, col, assigneeName, assigneeKind, newSession, newCol, workerId, renderFn);
+      } else {
+        ok = await printPlanColumnChunked(printIds_, plan, col, assigneeName, assigneeKind, newSession, newCol, workerId, renderFn);
+      }
 
       const updatedCol = {
         ...newCol,
@@ -4646,13 +6784,22 @@
         retryCount: ok ? col.retryCount : col.retryCount + 1,
       };
       if (ok) {
-        for (const id of printIds_) state.printedUnitIds.add(id);
+        for (const id of printIds_) {
+          state.printedUnitIds.add(id);
+          const rec = state.records.get(id);
+          if (rec) rec.labelStatus = LABEL_STATUS_PRINTED;
+        }
+        for (const combo of state.weirdCombos.values()) {
+          if ([...combo.fulfillUnitIds].every(cid => state.printedUnitIds.has(cid))) {
+            markComboDone(combo.sigKey);
+          }
+        }
+        try { if (typeof renderAll === 'function') renderAll(); } catch (_) {}
       }
       const finalSession = { ...newSession, columns: { ...newSession.columns, [workerId]: updatedCol } };
       debouncedSavePlan(finalSession);
       renderFn(finalSession);
     } catch (e) {
-      console.error('[QF] plan print failed:', e);
       const errCol = { ...newCol, status: 'error', errorMsg: e.message || 'ผิดพลาด', retryCount: col.retryCount + 1 };
       const errSession = { ...newSession, columns: { ...newSession.columns, [workerId]: errCol } };
       debouncedSavePlan(errSession);
@@ -4660,55 +6807,722 @@
     }
   }
 
-  function openPlanningPanel(initialSession) {
-    document.querySelectorAll('.qf-plan-overlay').forEach(e => e.remove());
+  // Helper: plan-column print using per-group combined PDF.
+  // Returns true on success, false on failure.
+  async function printPlanColumnCombined(printIds_, plan, col, assigneeName, assigneeKind, newSession, newCol, workerId, renderFn) {
+    // Build groups sorted by alias for combined PDF.
+    const groupMap = new Map();
+    for (const id of printIds_) {
+      const rec = state.records.get(id);
+      if (!rec?.skuList?.length) continue;
+      const s = rec.skuList[0];
+      const key = `${s.productId}:${s.skuId}`;
+      if (!groupMap.has(key)) {
+        const alias = (getAlias(s.productId) || '').trim();
+        const variantInfo = getVariantInfo(s.productId, s.skuId);
+        groupMap.set(key, {
+          productId: s.productId,
+          skuId: s.skuId,
+          alias: alias || shortName(s.productName),
+          officialName: s.productName || '',
+          variantName: (variantInfo?.alias || '').trim() || (s.skuName || s.sellerSkuName || ''),
+          productImageURL: s.productImageURL || null,
+          ids: [],
+        });
+      }
+      groupMap.get(key).ids.push(id);
+    }
+    const groups = [...groupMap.values()].sort((a, b) => a.alias.localeCompare(b.alias));
 
-    if (state.records.size === 0) {
-      const overlay = document.createElement('div');
-      overlay.className = 'qf-plan-overlay';
-      overlay.innerHTML = `<div class="qf-plan-panel qf-plan-empty-panel"><div class="qf-plan-empty-msg">ยังไม่ได้ scan — กด Scan ก่อน</div><button class="qf-plan-close-empty">ปิด</button></div>`;
-      document.body.appendChild(overlay);
-      overlay.querySelector('.qf-plan-close-empty').onclick = () => overlay.remove();
-      overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
-      return;
+    // Slice printIds_ into plan chunks; each chunk gets its own combined PDF.
+    const slices = planSlice(printIds_, plan);
+    const chunkCount = slices.length;
+    const baseHint = `รวม ${groups.length} SKU`;
+    const baseFilename = assigneeName
+      ? makeBaseFilename(`[${baseHint}] [${assigneeName}]`)
+      : makeBaseFilename(baseHint);
+    const displayTitle = `พิมพ์รวม ${groups.length} SKU: ${col.teamName || col.workerName || 'แผน'}`;
+
+    const chunks = slices.map((slice, i) => {
+      const idx = i + 1;
+      const chunkSuffix = chunkCount > 1 ? `-ชุด${idx}-${chunkCount}` : '';
+      // Re-group the slice for combined PDF building.
+      const sliceGroupMap = new Map();
+      for (const id of slice) {
+        const rec = state.records.get(id);
+        if (!rec?.skuList?.length) continue;
+        const s = rec.skuList[0];
+        const key = `${s.productId}:${s.skuId}`;
+        if (!sliceGroupMap.has(key)) {
+          const grp = groups.find(g => g.productId === s.productId && g.skuId === s.skuId);
+          sliceGroupMap.set(key, { ...grp, ids: [] });
+        }
+        sliceGroupMap.get(key).ids.push(id);
+      }
+      const sliceGroups = [...sliceGroupMap.values()].sort((a, b) => a.alias.localeCompare(b.alias));
+      return {
+        ids: slice,
+        label: chunkCount === 1 ? 'ไฟล์เดียว' : `ชุด ${idx}/${chunkCount}`,
+        filename: `${baseFilename}${chunkSuffix}.pdf`,
+        sliceGroups,
+        workerName: col.teamName || col.workerName || null,
+        workerIcon: col.workerIcon || null,
+        withPickingList: plan.withPickingList,
+        withDivider: plan.withDivider,
+      };
+    });
+
+    // Build combined PDFs using buildMultiSkuCombinedPdf.
+    const workerNameForPdf = col.teamName || col.workerName || null;
+    const workerIconForPdf = col.workerIcon || null;
+
+    const exportChunks = await Promise.all(chunks.map(async (chunk) => {
+      try {
+        const { bytes } = await buildMultiSkuCombinedPdf(
+          chunk.sliceGroups,
+          workerNameForPdf,
+          workerIconForPdf,
+          chunk.withPickingList,
+          () => {},
+          chunk.withDivider
+        );
+        const blob = new Blob([bytes], { type: 'application/pdf' });
+        const url = URL.createObjectURL(blob);
+        return { ...chunk, prebuiltUrl: url };
+      } catch (e) {
+        return { ...chunk, prebuiltUrl: null, buildError: e };
+      }
+    }));
+
+    // Fall back to flat runChunkedExport if any combined build failed.
+    const allBuilt = exportChunks.every(c => c.prebuiltUrl);
+    if (!allBuilt) {
+      return printPlanColumnChunked(printIds_, plan, col, assigneeName, assigneeKind, newSession, newCol, workerId, renderFn);
     }
 
-    if (state.workers.length === 0) {
-      const overlay = document.createElement('div');
-      overlay.className = 'qf-plan-overlay';
-      overlay.innerHTML = `<div class="qf-plan-panel qf-plan-empty-panel"><div class="qf-plan-empty-msg">ยังไม่มีคนแพ็ค</div><button class="qf-plan-add-workers-cta">+ เพิ่มคนแพ็ค</button></div>`;
-      document.body.appendChild(overlay);
-      overlay.querySelector('.qf-plan-add-workers-cta').onclick = () => { overlay.remove(); openWorkersModal(); };
-      overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+    // Use runChunkedExport with prebuilt chunks (each chunk is already a PDF blob URL).
+    const runChunks = exportChunks.map(c => ({ ids: c.ids, label: c.label, filename: c.filename }));
+    return runChunkedExport(runChunks, displayTitle, {
+      baseFilename,
+      totalLabels: printIds_.length,
+      workerId: col.workerId,
+      workerName: workerNameForPdf,
+      workerIcon: workerIconForPdf,
+      assigneeKind,
+      assigneeName,
+    });
+  }
+
+  // Helper: plan-column print using simple per-chunk flat export (non-combined or single-SKU).
+  async function printPlanColumnChunked(printIds_, plan, col, assigneeName, assigneeKind, newSession, newCol, workerId, renderFn) {
+    const slices = planSlice(printIds_, plan);
+    const chunkCount = slices.length;
+    const baseHint = col.teamName || col.workerName || 'plan';
+    const baseFilename = assigneeName
+      ? makeBaseFilename(`[${baseHint}] [${assigneeName}]`)
+      : makeBaseFilename(baseHint);
+    const displayTitle = `พิมพ์: ${col.teamName || col.workerName || 'แผน'}`;
+
+    const chunks = slices.map((slice, i) => {
+      const idx = i + 1;
+      const chunkSuffix = chunkCount > 1 ? `-ชุด${idx}-${chunkCount}` : '';
+      return {
+        ids: slice,
+        label: chunkCount === 1 ? 'ไฟล์เดียว' : `ชุด ${idx}/${chunkCount}`,
+        filename: `${baseFilename}${chunkSuffix}.pdf`,
+      };
+    });
+
+    return runChunkedExport(chunks, displayTitle, {
+      baseFilename,
+      totalLabels: printIds_.length,
+      workerId: col.workerId,
+      workerName: col.teamName || col.workerName || null,
+      workerIcon: col.workerIcon || null,
+      assigneeKind,
+      assigneeName,
+      withPickingList: plan.withPickingList || false,
+      withDivider: plan.withDivider || false,
+    });
+  }
+
+  // Utility: slice a flat array of ids per ChunkPlan into sub-arrays.
+  function planSlice(ids, plan) {
+    const total = ids.length;
+    switch (plan.mode) {
+      case 'even': {
+        const n = plan.n || 1;
+        const sz = Math.ceil(total / n);
+        const slices = [];
+        for (let i = 0; i < ids.length; i += sz) slices.push(ids.slice(i, i + sz));
+        return slices;
+      }
+      case 'every': {
+        const x = plan.x || CHUNK_AUTO_SAFE_SIZE;
+        const slices = [];
+        for (let i = 0; i < ids.length; i += x) slices.push(ids.slice(i, i + x));
+        return slices;
+      }
+      default:
+        return [ids];
+    }
+  }
+
+  function openPlanningPanel(initialSession) {
+    // Remove any lingering window or bubble from a previous open call
+    document.querySelectorAll('.qf-plan-window, .qf-plan-bubble').forEach(e => e.remove());
+
+    if (state.records.size === 0) {
+      showToast('ยังไม่ได้ scan — กด Scan ก่อน', 2500);
       return;
     }
 
     let session = initialSession || newPlanningSession();
 
-    // Ensure all current workers have a column entry
+    // Ensure all current workers have a column entry (kind='worker')
     for (const w of state.workers) {
       if (!session.columns[w.id]) {
-        session = { ...session, columns: { ...session.columns, [w.id]: { workerId: w.id, workerName: w.name, workerIcon: w.icon, fulfillUnitIds: [], printedIds: [], failedIds: [], status: 'pending', lastPrintAt: null, errorMsg: null, retryCount: 0 } } };
+        session = {
+          ...session,
+          columns: {
+            ...session.columns,
+            [w.id]: {
+              kind: 'worker', columnId: w.id, workerId: w.id,
+              workerName: w.name, workerIcon: w.icon,
+              fulfillUnitIds: [], printedIds: [], failedIds: [],
+              status: 'pending', lastPrintAt: null, errorMsg: null, retryCount: 0,
+            },
+          },
+        };
       }
     }
 
     // Fix stuck printing columns on load
-    for (const [wid, col] of Object.entries(session.columns)) {
+    for (const [cid, col] of Object.entries(session.columns)) {
       if (col.status === 'printing' && col.lastPrintAt && Date.now() - col.lastPrintAt > PLANNING_STUCK_TIMEOUT) {
-        session = { ...session, columns: { ...session.columns, [wid]: { ...col, status: 'error', errorMsg: 'อาจถูกขัดจังหวะ กดพิมพ์ซ้ำ' } } };
+        session = { ...session, columns: { ...session.columns, [cid]: { ...col, status: 'error', errorMsg: 'อาจถูกขัดจังหวะ กดพิมพ์ซ้ำ' } } };
       }
     }
 
     debouncedSavePlan(session);
     window.__qfPlanningSession = () => session;
 
-    const overlay = document.createElement('div');
-    overlay.className = 'qf-plan-overlay';
-    document.body.appendChild(overlay);
+    // ---- Floating window DOM ----
+    const win = document.createElement('div');
+    win.className = 'qf-plan-window';
+
+    // Restore or compute initial position
+    const savedPos = loadPanelPos();
+    const defaultW = 620, defaultH = 520;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const initX = savedPos ? Math.min(Math.max(0, savedPos.x), vw - defaultW) : Math.round((vw - defaultW) / 2);
+    const initY = savedPos ? Math.min(Math.max(0, savedPos.y), vh - 60) : Math.round((vh - defaultH) / 2);
+    win.style.left = initX + 'px';
+    win.style.top = initY + 'px';
+
+    document.body.appendChild(win);
 
     let _dragCardKey = null;
-    let _dragSourceZone = null; // 'unassigned' | workerId
+    let _dragSourceZone = null;
 
+    // ---- buildPlanCardNode: returns a DOM element ----
+    const buildPlanCardNode = (c, allCards) => {
+      // Compute split badge
+      const totalAcross = allCards
+        .filter(other => other.key === c.key)
+        .reduce((sum, other) => sum + other.count, 0);
+      const isSplit = totalAcross > c.count;
+
+      const card = document.createElement('div');
+      card.className = 'qf-plan-card' + (c.isCombo ? ' qf-plan-card--combo' : '');
+      card.draggable = true;
+      card.dataset.cardKey = c.key;
+      card.dataset.cardCount = String(c.count);
+      card.title = c.isCombo
+        ? `ออเดอร์รวม: ${c.items.map(it => `${it.alias || shortName(it.officialName)} ×${it.quantity}`).join(' + ')} (${c.count} ใบ)`
+        : `${c.name} (${c.count} ใบ)`;
+      card.style.position = 'relative';
+
+      if (c.isCombo && c.items?.length >= 2) {
+        const stack = document.createElement('div');
+        stack.className = 'qf-plan-card-img qf-plan-card-img--combo';
+        const topN = c.items.slice(0, 3);
+        topN.forEach((it, i) => {
+          if (it.productImageURL) {
+            const mini = document.createElement('img');
+            mini.src = it.productImageURL;
+            mini.className = 'qf-plan-card-img-mini';
+            mini.style.zIndex = String(10 - i);
+            mini.onerror = () => {
+              const fall = document.createElement('div');
+              fall.className = 'qf-plan-card-img-mini qf-plan-card-img-mini--fallback';
+              fall.style.zIndex = String(10 - i);
+              fall.textContent = ((it.alias || shortName(it.officialName) || '?')[0] || '?').toUpperCase();
+              mini.replaceWith(fall);
+            };
+            stack.appendChild(mini);
+          } else {
+            const fall = document.createElement('div');
+            fall.className = 'qf-plan-card-img-mini qf-plan-card-img-mini--fallback';
+            fall.style.zIndex = String(10 - i);
+            fall.textContent = ((it.alias || shortName(it.officialName) || '?')[0] || '?').toUpperCase();
+            stack.appendChild(fall);
+          }
+        });
+        if (c.items.length > 3) {
+          const more = document.createElement('div');
+          more.className = 'qf-plan-card-img-more';
+          more.textContent = `+${c.items.length - 3}`;
+          stack.appendChild(more);
+        }
+        card.appendChild(stack);
+      } else {
+        const img = document.createElement('img');
+        img.className = 'qf-plan-card-img';
+        const imgUrl = c.productImageURL;
+        if (imgUrl) {
+          img.src = imgUrl;
+          img.onerror = () => {
+            img.remove();
+            const fallback = buildCardImgFallback(c.alias || c.name);
+            card.insertBefore(fallback, card.firstChild);
+          };
+          card.appendChild(img);
+        } else {
+          const fallback = buildCardImgFallback(c.alias || c.name);
+          card.appendChild(fallback);
+        }
+      }
+
+      // Text area
+      const textDiv = document.createElement('div');
+      textDiv.className = 'qf-plan-card-text';
+
+      const aliasEl = document.createElement('div');
+      aliasEl.className = 'qf-plan-card-alias';
+      aliasEl.textContent = c.alias || c.name;
+      textDiv.appendChild(aliasEl);
+
+      if (c.officialName && c.officialName !== (c.alias || c.name)) {
+        const nameEl = document.createElement('div');
+        nameEl.className = 'qf-plan-card-name';
+        nameEl.textContent = c.officialName;
+        textDiv.appendChild(nameEl);
+      }
+
+      if (c.variantName) {
+        const varEl = document.createElement('div');
+        varEl.className = 'qf-plan-card-variant';
+        varEl.textContent = c.variantName;
+        textDiv.appendChild(varEl);
+      }
+
+      card.appendChild(textDiv);
+
+      // Badge
+      const badge = document.createElement('span');
+      badge.className = 'qf-plan-card-badge' + (isSplit ? ' qf-plan-card-badge--split' : '');
+      badge.textContent = isSplit ? `${c.count}/${totalAcross}` : String(c.count);
+      card.appendChild(badge);
+
+      return card;
+    };
+
+    // ---- Fallback image square ----
+    const buildCardImgFallback = (label) => {
+      const sq = document.createElement('div');
+      sq.className = 'qf-plan-card-img';
+      sq.style.background = '#e5e7eb';
+      sq.style.display = 'flex';
+      sq.style.alignItems = 'center';
+      sq.style.justifyContent = 'center';
+      sq.style.fontSize = '18px';
+      sq.style.fontWeight = '700';
+      sq.style.color = '#9ca3af';
+      sq.style.flexShrink = '0';
+      sq.textContent = (label || '?')[0].toUpperCase();
+      return sq;
+    };
+
+    // ---- renderPlanCardsInto: fills a container with card DOM nodes ----
+    const renderPlanCardsInto = (container, ids, allSessionCards) => {
+      container.innerHTML = '';
+      const cards = buildPlanCards(ids);
+      if (!cards.length) {
+        const hint = document.createElement('div');
+        hint.className = 'qf-plan-empty-hint';
+        hint.textContent = 'ว่าง — ลากการ์ดมาวางที่นี่';
+        container.appendChild(hint);
+        return;
+      }
+      for (const c of cards) {
+        const node = buildPlanCardNode(c, allSessionCards);
+        container.appendChild(node);
+      }
+    };
+
+    // ---- renderColumnZone: creates a zone element for a worker or team column ----
+    const renderColumnZone = (cid, col, s) => {
+      const locked = col.status === 'printing' || col.status === 'done';
+      const statusLabel = { pending: 'รอพิมพ์', printing: 'กำลังพิมพ์...', done: 'เสร็จ', partial: 'บางส่วน', error: 'ผิดพลาด' }[col.status] || col.status;
+      const isTeam = col.kind === 'team';
+
+      const zone = document.createElement('div');
+      zone.className = 'qf-plan-zone ' + (isTeam ? 'qf-zone-team' : 'qf-zone-worker');
+      zone.dataset.wzone = cid;
+
+      const header = document.createElement('div');
+      header.className = 'qf-plan-zone-header';
+
+      // Top row: badge + title + status + edit/delete
+      const headerRow = document.createElement('div');
+      headerRow.className = 'qf-plan-zone-header-row';
+
+      const badge = document.createElement('span');
+      badge.className = 'qf-plan-zone-badge';
+      badge.textContent = isTeam ? '👥' : (col.workerIcon || '●');
+      headerRow.appendChild(badge);
+
+      const titleWrap = document.createElement('div');
+      titleWrap.style.flex = '1';
+      titleWrap.style.minWidth = '0';
+      const title = document.createElement('span');
+      title.className = 'qf-plan-zone-title';
+      title.textContent = (isTeam ? col.teamName : col.workerName) + ` (${col.fulfillUnitIds.length})`;
+      titleWrap.appendChild(title);
+      if (isTeam && col.memberWorkerIds && col.memberWorkerIds.length) {
+        const memberNames = col.memberWorkerIds
+          .map(wid => state.workers.find(w => w.id === wid)?.name || wid)
+          .slice(0, 2);
+        const extra = col.memberWorkerIds.length > 2 ? ` +${col.memberWorkerIds.length - 2}` : '';
+        const sub = document.createElement('div');
+        sub.style.fontSize = '10px';
+        sub.style.color = '#888';
+        sub.style.overflow = 'hidden';
+        sub.style.whiteSpace = 'nowrap';
+        sub.style.textOverflow = 'ellipsis';
+        sub.textContent = memberNames.join(' · ') + extra;
+        titleWrap.appendChild(sub);
+      }
+      headerRow.appendChild(titleWrap);
+
+      const statusEl = document.createElement('span');
+      statusEl.className = `qf-plan-zone-status ${col.status}`;
+      statusEl.textContent = statusLabel;
+      headerRow.appendChild(statusEl);
+
+      const editBtn = document.createElement('button');
+      editBtn.className = 'qf-plan-zone-remove';
+      editBtn.dataset.action = 'editcol';
+      editBtn.dataset.wid = cid;
+      editBtn.title = isTeam ? 'แก้ไขทีม' : 'แก้ไขคน';
+      editBtn.textContent = '✎';
+      headerRow.appendChild(editBtn);
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'qf-plan-zone-remove';
+      delBtn.dataset.action = 'removecol';
+      delBtn.dataset.wid = cid;
+      delBtn.title = isTeam ? 'ลบทีม' : 'ลบคน';
+      delBtn.textContent = '🗑';
+      headerRow.appendChild(delBtn);
+
+      header.appendChild(headerRow);
+
+      // Action row: print / reprint / reset / retry / return
+      const actions = document.createElement('div');
+      actions.className = 'qf-plan-zone-actions';
+      const addBtn = (label, cls, action) => {
+        const b = document.createElement('button');
+        b.className = `qf-plan-zone-btn${cls ? ' ' + cls : ''}`;
+        b.dataset.action = action;
+        b.dataset.wid = cid;
+        b.textContent = label;
+        actions.appendChild(b);
+      };
+
+      if (col.status === 'pending') {
+        addBtn('🖨 พิมพ์', 'primary', 'print');
+      } else if (col.status === 'done') {
+        addBtn('🖨 พิมพ์ซ้ำ', 'primary', 'reprint');
+        addBtn('↻ รีเซ็ต', '', 'reset');
+      } else if (col.status === 'partial') {
+        addBtn(`🔁 ลองอีกครั้ง ${col.failedIds.length}`, 'primary', 'retry');
+        addBtn('↩ คืน', '', 'return');
+      } else if (col.status === 'error') {
+        if (col.retryCount < 3) addBtn('🔁 ลองอีกครั้ง', 'primary', 'retry');
+        addBtn('↩ คืน', '', 'return');
+      } else if (col.status === 'printing') {
+        const spin = document.createElement('span');
+        spin.className = 'qf-plan-zone-btn';
+        spin.style.cursor = 'default';
+        spin.textContent = '⏳';
+        actions.appendChild(spin);
+      }
+
+      if (actions.children.length > 0) header.appendChild(actions);
+
+      zone.appendChild(header);
+
+      if (col.errorMsg) {
+        const errDiv = document.createElement('div');
+        errDiv.style.cssText = 'font-size:10px;color:#991b1b;margin:0 14px 4px;';
+        errDiv.textContent = col.errorMsg;
+        zone.appendChild(errDiv);
+      }
+
+      // Cards scroll area
+      const scroll = document.createElement('div');
+      scroll.className = 'qf-plan-zone-scroll qf-plan-cards';
+      scroll.id = `qf-plan-cards-${cid}`;
+      scroll.dataset.zone = cid;
+      scroll.dataset.locked = locked ? '1' : '0';
+      zone.appendChild(scroll);
+
+      return zone;
+    };
+
+    // ---- renderAddZone: inline worker/team add form ----
+    const renderAddZone = (s, rerender, editingWorker = null, editingTeam = null) => {
+      const zone = document.createElement('div');
+      zone.className = 'qf-plan-zone qf-zone-add';
+
+      const title = document.createElement('div');
+      title.className = 'qf-zone-add-title';
+      title.style.cssText = 'font-weight:700;font-size:12px;color:#555;padding:10px 10px 6px;';
+      title.textContent = '+ เพิ่มคนหรือทีม';
+      zone.appendChild(title);
+
+      // Tabs
+      const tabs = document.createElement('div');
+      tabs.className = 'qf-zone-add-tabs';
+      let activeTab = editingTeam ? 'team' : 'worker';
+
+      const tabWorker = document.createElement('button');
+      tabWorker.className = 'qf-plan-zone-btn' + (activeTab === 'worker' ? ' primary' : '');
+      tabWorker.textContent = 'คนเดียว';
+      const tabTeam = document.createElement('button');
+      tabTeam.className = 'qf-plan-zone-btn' + (activeTab === 'team' ? ' primary' : '');
+      tabTeam.textContent = 'ทีม';
+      tabs.appendChild(tabWorker);
+      tabs.appendChild(tabTeam);
+      zone.appendChild(tabs);
+
+      // ---- Existing team list ----
+      const teamListDiv = document.createElement('div');
+      teamListDiv.style.cssText = 'padding:0 10px 4px;';
+      const renderTeamList = () => {
+        teamListDiv.innerHTML = '';
+        if (!state.teams.length) return;
+        const hdr = document.createElement('div');
+        hdr.style.cssText = 'font-size:10px;font-weight:600;color:#888;margin-bottom:4px;';
+        hdr.textContent = 'ทีมที่มีอยู่';
+        teamListDiv.appendChild(hdr);
+        for (const tm of state.teams) {
+          const row = document.createElement('div');
+          row.style.cssText = 'display:flex;align-items:center;gap:4px;font-size:11px;margin-bottom:3px;';
+          const nameSpan = document.createElement('span');
+          nameSpan.style.flex = '1';
+          nameSpan.textContent = '👥 ' + tm.name;
+          const eBtn = document.createElement('button');
+          eBtn.className = 'qf-plan-zone-btn';
+          eBtn.style.padding = '2px 6px';
+          eBtn.textContent = '✎';
+          eBtn.onclick = () => {
+            zone.remove();
+            win.querySelector('.qf-plan-window-body').appendChild(
+              renderAddZone(s, rerender, null, tm)
+            );
+          };
+          const dBtn = document.createElement('button');
+          dBtn.className = 'qf-plan-zone-btn';
+          dBtn.style.padding = '2px 6px';
+          dBtn.textContent = '🗑';
+          dBtn.onclick = async () => {
+            const ok = await confirmInline(`ลบทีม "${tm.name}"?`, 'ลบ');
+            if (!ok) return;
+            // Return team column ids to unassigned
+            let next = s;
+            if (s.columns[tm.id]) {
+              const returnIds = s.columns[tm.id].fulfillUnitIds;
+              const { [tm.id]: _dropped, ...restCols } = s.columns;
+              next = { ...s, columns: restCols, unassignedIds: [...s.unassignedIds, ...returnIds] };
+            }
+            deleteTeam(tm.id);
+            debouncedSavePlan(next);
+            rerender(next);
+          };
+          row.appendChild(nameSpan);
+          row.appendChild(eBtn);
+          row.appendChild(dBtn);
+          teamListDiv.appendChild(row);
+        }
+      };
+      renderTeamList();
+
+      // ---- Form area ----
+      const form = document.createElement('div');
+      form.className = 'qf-zone-add-form';
+
+      const nameInput = document.createElement('input');
+      nameInput.name = 'qf-new-name';
+      nameInput.maxLength = 30;
+      nameInput.placeholder = 'ชื่อ...';
+      nameInput.style.cssText = 'width:100%;box-sizing:border-box;padding:5px 8px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;';
+      if (editingWorker) nameInput.value = editingWorker.name;
+      if (editingTeam) nameInput.value = editingTeam.name;
+      form.appendChild(nameInput);
+
+      // Icon picker (worker only)
+      const iconPicker = document.createElement('div');
+      iconPicker.className = 'qf-zone-add-icons';
+      let selectedIcon = editingWorker ? editingWorker.icon : WORKER_ICONS[0];
+      for (const ic of WORKER_ICONS) {
+        const btn = document.createElement('button');
+        btn.className = 'qf-workers-icon-btn' + (ic === selectedIcon ? ' active' : '');
+        btn.dataset.icon = ic;
+        btn.textContent = ic;
+        btn.type = 'button';
+        btn.onclick = () => {
+          selectedIcon = ic;
+          iconPicker.querySelectorAll('.qf-workers-icon-btn').forEach(b => b.classList.toggle('active', b.dataset.icon === ic));
+        };
+        iconPicker.appendChild(btn);
+      }
+
+      // Team members checklist
+      const memberList = document.createElement('div');
+      memberList.className = 'qf-zone-add-team-members';
+      const existingMemberIds = editingTeam ? [...editingTeam.memberWorkerIds] : [];
+      for (const w of state.workers) {
+        const lbl = document.createElement('label');
+        lbl.style.cssText = 'display:flex;align-items:center;gap:5px;font-size:11px;cursor:pointer;';
+        const chk = document.createElement('input');
+        chk.type = 'checkbox';
+        chk.value = w.id;
+        chk.checked = existingMemberIds.includes(w.id);
+        lbl.appendChild(chk);
+        lbl.appendChild(document.createTextNode(`${w.icon} ${w.name}`));
+        memberList.appendChild(lbl);
+      }
+
+      const switchTab = (tab) => {
+        activeTab = tab;
+        tabWorker.className = 'qf-plan-zone-btn' + (tab === 'worker' ? ' primary' : '');
+        tabTeam.className = 'qf-plan-zone-btn' + (tab === 'team' ? ' primary' : '');
+        form.innerHTML = '';
+        form.appendChild(nameInput);
+        if (tab === 'worker') {
+          form.appendChild(iconPicker);
+          teamListDiv.style.display = 'none';
+        } else {
+          form.appendChild(memberList);
+          teamListDiv.style.display = '';
+        }
+        form.appendChild(actions);
+      };
+
+      tabWorker.onclick = () => switchTab('worker');
+      tabTeam.onclick = () => switchTab('team');
+
+      // Actions row
+      const actions = document.createElement('div');
+      actions.className = 'qf-zone-add-actions';
+      actions.style.cssText = 'display:flex;gap:6px;';
+
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'qf-plan-zone-btn';
+      cancelBtn.textContent = 'ยกเลิก';
+      cancelBtn.onclick = () => {
+        nameInput.value = '';
+        switchTab('worker');
+      };
+
+      const saveBtn = document.createElement('button');
+      saveBtn.className = 'qf-plan-zone-btn primary';
+      saveBtn.textContent = 'บันทึก';
+      saveBtn.onclick = () => {
+        const name = nameInput.value.trim();
+        if (!name) { showToast('กรุณากรอกชื่อ', 1800); return; }
+
+        if (activeTab === 'worker') {
+          if (editingWorker) {
+            state.workers = state.workers.map(w => w.id === editingWorker.id ? { ...w, name, icon: selectedIcon } : w);
+            // Update column name/icon in session
+            const cid = editingWorker.id;
+            if (s.columns[cid]) {
+              const updatedCol = { ...s.columns[cid], workerName: name, workerIcon: selectedIcon };
+              s = { ...s, columns: { ...s.columns, [cid]: updatedCol } };
+            }
+          } else {
+            const id = Math.random().toString(36).slice(2, 10);
+            const worker = { id, name, icon: selectedIcon };
+            state.workers = [...state.workers, worker];
+            s = {
+              ...s,
+              columns: {
+                ...s.columns,
+                [id]: {
+                  kind: 'worker', columnId: id, workerId: id,
+                  workerName: name, workerIcon: selectedIcon,
+                  fulfillUnitIds: [], printedIds: [], failedIds: [],
+                  status: 'pending', lastPrintAt: null, errorMsg: null, retryCount: 0,
+                },
+              },
+            };
+          }
+          saveWorkers();
+        } else {
+          // Team tab
+          const checkedIds = [...memberList.querySelectorAll('input[type=checkbox]:checked')].map(c => c.value);
+          if (!checkedIds.length) { showToast('เลือกสมาชิกอย่างน้อย 1 คน', 1800); return; }
+          if (editingTeam) {
+            updateTeam(editingTeam.id, { name, memberWorkerIds: checkedIds });
+            if (s.columns[editingTeam.id]) {
+              s = { ...s, columns: { ...s.columns, [editingTeam.id]: { ...s.columns[editingTeam.id], teamName: name, memberWorkerIds: checkedIds } } };
+            }
+          } else {
+            const team = createTeam({ name, memberWorkerIds: checkedIds });
+            s = {
+              ...s,
+              columns: {
+                ...s.columns,
+                [team.id]: {
+                  kind: 'team', columnId: team.id, teamId: team.id,
+                  teamName: name, memberWorkerIds: checkedIds,
+                  fulfillUnitIds: [], printedIds: [], failedIds: [],
+                  status: 'pending', lastPrintAt: null, errorMsg: null, retryCount: 0,
+                },
+              },
+            };
+          }
+        }
+        debouncedSavePlan(s);
+        nameInput.value = '';
+        switchTab('worker');
+        rerender(s);
+      };
+
+      actions.appendChild(cancelBtn);
+      actions.appendChild(saveBtn);
+
+      // Initial tab setup
+      form.appendChild(nameInput);
+      if (activeTab === 'worker') {
+        form.appendChild(iconPicker);
+        teamListDiv.style.display = 'none';
+      } else {
+        form.appendChild(memberList);
+        teamListDiv.style.display = '';
+      }
+      form.appendChild(actions);
+
+      zone.appendChild(teamListDiv);
+      zone.appendChild(form);
+      return zone;
+    };
+
+    // ---- Main render ----
     const render = (s) => {
       session = s;
       window.__qfPlanningSession = () => session;
@@ -4716,139 +7530,254 @@
       const printed = planPrintedIds(session).length;
       const anyPrinting = Object.values(session.columns).some(c => c.status === 'printing');
 
-      overlay.innerHTML = `
-        <div class="qf-plan-panel">
-          <div class="qf-plan-header">
-            <span class="qf-plan-title">🎨 แผนงานแพ็ค — ${total} ใบ · ${printed} พิมพ์แล้ว</span>
-            <button class="qf-plan-header-btn qf-plan-auto-btn" title="แบ่งอัตโนมัติ">💡 auto</button>
-            <button class="qf-plan-header-btn qf-plan-printall-btn" ${anyPrinting ? 'disabled' : ''}>🖨 พิมพ์ทั้งหมด</button>
-            <button class="qf-plan-close">✕</button>
-          </div>
-          <div class="qf-plan-body">
-            <div class="qf-plan-zone" id="qf-plan-zone-unassigned">
-              <div class="qf-plan-zone-header">
-                <span class="qf-plan-zone-title">📦 ยังไม่มอบหมาย (${session.unassignedIds.length} ใบ)</span>
-              </div>
-              <div class="qf-plan-cards" id="qf-plan-cards-unassigned" data-zone="unassigned">
-                ${renderPlanCards(session.unassignedIds)}
-              </div>
-            </div>
-            ${Object.entries(session.columns).map(([wid, col]) => renderColumn(wid, col, session)).join('')}
-          </div>
-        </div>
-      `;
+      // Compute all cards across all zones (for split detection)
+      const allIds = [...session.unassignedIds, ...Object.values(session.columns).flatMap(c => c.fulfillUnitIds)];
+      const allSessionCards = buildPlanCards(allIds);
 
-      attachPlanEvents(overlay, session, render);
-    };
+      // Update title
+      const titleEl = win.querySelector('.qf-plan-window-title');
+      if (titleEl) titleEl.textContent = `🎨 แผนงานแพ็ค — ${printed}/${total} ใบ`;
 
-    const renderPlanCards = (ids) => {
-      const cards = buildPlanCards(ids);
-      if (!cards.length) return `<div class="qf-plan-empty-hint">ว่าง — ลากการ์ดมาวางที่นี่</div>`;
-      return cards.map(c => `
-        <div class="qf-plan-card" draggable="true" data-card-key="${escapeHtml(c.key)}" data-card-count="${c.count}" title="${escapeHtml(c.name)} (${c.count} ใบ)">
-          ${escapeHtml(c.name)}<span class="qf-plan-card-count">${c.count}</span>
-        </div>
-      `).join('');
-    };
+      // Update print-all button state
+      const printAllBtn = win.querySelector('.qf-plan-printall-btn');
+      if (printAllBtn) printAllBtn.disabled = anyPrinting;
 
-    const renderColumn = (wid, col, s) => {
-      const locked = col.status === 'printing' || col.status === 'done';
-      const statusLabel = { pending: 'รอพิมพ์', printing: 'กำลังพิมพ์...', done: 'เสร็จ', partial: 'บางส่วน', error: 'ผิดพลาด' }[col.status] || col.status;
-      const dot = col.workerIcon ? `<span style="margin-right:4px;font-style:normal;">${escapeHtml(col.workerIcon)}</span>` : '';
+      // Rebuild body content
+      const body = win.querySelector('.qf-plan-window-body');
+      if (!body) return;
+      body.innerHTML = '';
 
-      let btns = '';
-      if (col.status === 'pending') btns = `<button class="qf-plan-zone-btn primary" data-action="print" data-wid="${escapeHtml(wid)}">🖨 พิมพ์</button>`;
-      else if (col.status === 'done') btns = `<button class="qf-plan-zone-btn primary" data-action="reprint" data-wid="${escapeHtml(wid)}">🖨 พิมพ์ซ้ำ</button><button class="qf-plan-zone-btn" data-action="reset" data-wid="${escapeHtml(wid)}">↻ รีเซ็ต</button>`;
-      else if (col.status === 'partial') {
-        const failCount = col.failedIds.length;
-        btns = `<button class="qf-plan-zone-btn primary" data-action="retry" data-wid="${escapeHtml(wid)}">🔁 ลองอีกครั้ง ${failCount}</button><button class="qf-plan-zone-btn" data-action="return" data-wid="${escapeHtml(wid)}">↩ คืน</button>`;
-      } else if (col.status === 'error') {
-        btns = col.retryCount < 3
-          ? `<button class="qf-plan-zone-btn primary" data-action="retry" data-wid="${escapeHtml(wid)}">🔁 ลองอีกครั้ง</button><button class="qf-plan-zone-btn" data-action="return" data-wid="${escapeHtml(wid)}">↩ คืน</button>`
-          : `<button class="qf-plan-zone-btn" data-action="return" data-wid="${escapeHtml(wid)}">↩ คืน</button>`;
-      } else if (col.status === 'printing') {
-        btns = `<span class="qf-plan-zone-btn" style="cursor:default;">⏳</span>`;
+      // Unassigned zone
+      const unassignedZone = document.createElement('div');
+      unassignedZone.className = 'qf-plan-zone qf-zone-unassigned';
+      const unassignedHeader = document.createElement('div');
+      unassignedHeader.className = 'qf-plan-zone-header';
+      const unassignedTitle = document.createElement('span');
+      unassignedTitle.className = 'qf-plan-zone-title';
+      unassignedTitle.textContent = `📦 ยังไม่มอบหมาย (${session.unassignedIds.length} ใบ)`;
+      unassignedHeader.appendChild(unassignedTitle);
+      unassignedZone.appendChild(unassignedHeader);
+      const unassignedScroll = document.createElement('div');
+      unassignedScroll.className = 'qf-plan-zone-scroll qf-plan-cards';
+      unassignedScroll.id = 'qf-plan-cards-unassigned';
+      unassignedScroll.dataset.zone = 'unassigned';
+      unassignedScroll.dataset.locked = '0';
+      unassignedZone.appendChild(unassignedScroll);
+      body.appendChild(unassignedZone);
+      renderPlanCardsInto(unassignedScroll, session.unassignedIds, allSessionCards);
+
+      // Worker/Team columns
+      for (const [cid, col] of Object.entries(session.columns)) {
+        const colZone = renderColumnZone(cid, col, session);
+        body.appendChild(colZone);
+        const scroll = colZone.querySelector('.qf-plan-zone-scroll');
+        if (scroll) renderPlanCardsInto(scroll, col.fulfillUnitIds, allSessionCards);
       }
 
-      const errHtml = col.errorMsg ? `<div style="font-size:10px;color:#991b1b;margin-top:4px;">${escapeHtml(col.errorMsg)}</div>` : '';
+      // Add zone
+      body.appendChild(renderAddZone(s, render));
 
-      return `
-        <div class="qf-plan-zone" data-wzone="${escapeHtml(wid)}">
-          <div class="qf-plan-zone-header">
-            <span class="qf-plan-zone-title">${dot}${escapeHtml(col.workerName)} (${col.fulfillUnitIds.length})</span>
-            <span class="qf-plan-zone-status ${col.status}">${statusLabel}</span>
-            ${btns}
-          </div>
-          ${errHtml}
-          <div class="qf-plan-cards" id="qf-plan-cards-${escapeHtml(wid)}" data-zone="${escapeHtml(wid)}" data-locked="${locked ? '1' : '0'}">
-            ${renderPlanCards(col.fulfillUnitIds)}
-          </div>
-        </div>
-      `;
+      // Wire events
+      attachPlanEvents(win, s, render);
     };
 
-    const attachPlanEvents = (root, s, rerender) => {
-      root.querySelector('.qf-plan-close').onclick = () => {
-        const anyPrinting = Object.values(s.columns).some(c => c.status === 'printing');
+    // ---- Wire titlebar drag ----
+    const titlebar = document.createElement('div');
+    titlebar.className = 'qf-plan-window-titlebar';
+
+    const titleSpan = document.createElement('span');
+    titleSpan.className = 'qf-plan-window-title';
+    titleSpan.textContent = '🎨 แผนงานแพ็ค';
+    titlebar.appendChild(titleSpan);
+
+    const actions = document.createElement('div');
+    actions.className = 'qf-plan-window-actions';
+
+    const autoBtn = document.createElement('button');
+    autoBtn.className = 'qf-plan-minimize-btn qf-plan-auto-btn';
+    autoBtn.title = 'แบ่งงานอัตโนมัติ — เฉลี่ยหรือแยกตาม SKU';
+    autoBtn.textContent = '💡 แบ่งอัตโนมัติ';
+    actions.appendChild(autoBtn);
+
+    const printAllBtn = document.createElement('button');
+    printAllBtn.className = 'qf-plan-minimize-btn qf-plan-printall-btn';
+    printAllBtn.title = 'พิมพ์ทั้งหมดทุกคอลัมน์';
+    printAllBtn.textContent = '🖨';
+    actions.appendChild(printAllBtn);
+
+    const minimizeBtn = document.createElement('button');
+    minimizeBtn.className = 'qf-plan-minimize-btn';
+    minimizeBtn.title = 'ย่อ';
+    minimizeBtn.textContent = '–';
+    actions.appendChild(minimizeBtn);
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'qf-plan-close-btn';
+    closeBtn.title = 'ปิด';
+    closeBtn.textContent = '×';
+    actions.appendChild(closeBtn);
+
+    titlebar.appendChild(actions);
+    win.appendChild(titlebar);
+
+    const body = document.createElement('div');
+    body.className = 'qf-plan-window-body';
+    win.appendChild(body);
+
+    // ---- Draggable titlebar ----
+    let _dragOffX = 0, _dragOffY = 0, _isDragging = false;
+
+    titlebar.addEventListener('mousedown', (e) => {
+      if (e.target.closest('.qf-plan-window-actions')) return;
+      _isDragging = true;
+      const rect = win.getBoundingClientRect();
+      _dragOffX = e.clientX - rect.left;
+      _dragOffY = e.clientY - rect.top;
+      e.preventDefault();
+    });
+
+    const onMouseMove = (e) => {
+      if (!_isDragging) return;
+      const vw2 = window.innerWidth, vh2 = window.innerHeight;
+      const winW = win.offsetWidth, winH = win.offsetHeight;
+      const nx = Math.min(Math.max(0, e.clientX - _dragOffX), vw2 - winW);
+      const ny = Math.min(Math.max(0, e.clientY - _dragOffY), vh2 - winH);
+      win.style.left = nx + 'px';
+      win.style.top = ny + 'px';
+    };
+
+    const onMouseUp = () => {
+      if (!_isDragging) return;
+      _isDragging = false;
+      savePanelPos({ x: parseInt(win.style.left) || 0, y: parseInt(win.style.top) || 0 });
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+
+    // ---- Minimize button ----
+    minimizeBtn.addEventListener('click', () => {
+      win.style.display = 'none';
+      renderPlanBubble(session, () => {
+        win.style.display = '';
+        document.querySelectorAll('.qf-plan-bubble').forEach(b => b.remove());
+      }, () => {
+        // Close from bubble
+        const anyPrinting = Object.values(session.columns).some(c => c.status === 'printing');
         if (anyPrinting) { showToast('กำลังพิมพ์อยู่ — รอให้เสร็จก่อนปิด', 2500); return; }
+        win.remove();
+        document.querySelectorAll('.qf-plan-bubble').forEach(b => b.remove());
         window.removeEventListener('beforeunload', beforeUnloadHandler);
-        overlay.remove();
         renderRecoveryBanner();
-      };
+      });
+    });
 
-      root.querySelector('.qf-plan-auto-btn').onclick = async () => {
-        const result = await showPlanAutoSplitModal(s);
-        if (!result || !result.workerIds.length) return;
-        const next = applyAutoSplit(s, result.mode, result.workerIds);
-        debouncedSavePlan(next);
-        rerender(next);
-      };
+    // ---- Close button ----
+    closeBtn.addEventListener('click', () => {
+      const anyPrinting = Object.values(session.columns).some(c => c.status === 'printing');
+      if (anyPrinting) { showToast('รอให้เสร็จก่อนปิด', 2500); return; }
+      win.remove();
+      document.querySelectorAll('.qf-plan-bubble').forEach(b => b.remove());
+      window.removeEventListener('beforeunload', beforeUnloadHandler);
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      renderRecoveryBanner();
+    });
 
-      root.querySelector('.qf-plan-printall-btn').onclick = async () => {
-        if (isShopee()) { showToast('การพิมพ์จากแผนยังไม่รองรับบน Shopee', 3000); return; }
-        const nonDone = Object.entries(s.columns).filter(([, c]) => c.status !== 'done' && c.status !== 'printing' && c.fulfillUnitIds.length > 0);
-        if (!nonDone.length) { showToast('ทุกคอลัมน์พิมพ์แล้วหรือว่างอยู่', 2000); return; }
-        const breakdown = nonDone.map(([, c]) => `${c.workerName}: ${c.fulfillUnitIds.length} ใบ`).join(', ');
-        const ok = await confirmInline(`พิมพ์ทั้งหมด? ${breakdown}`, 'พิมพ์');
-        if (!ok) return;
-        for (const [wid, col] of nonDone) {
-          printPlanColumn(s, wid, col.fulfillUnitIds, ns => { rerender(ns); s = ns; });
-        }
-      };
+    // ---- Auto-split button ----
+    autoBtn.addEventListener('click', async () => {
+      const result = await showPlanAutoSplitModal(session);
+      if (!result || !result.workerIds.length) return;
+      const next = applyAutoSplit(session, result.mode, result.workerIds);
+      debouncedSavePlan(next);
+      render(next);
+    });
 
+    // ---- Print-all button ----
+    printAllBtn.addEventListener('click', async () => {
+      if (isShopee()) { showToast('การพิมพ์จากแผนยังไม่รองรับบน Shopee', 3000); return; }
+      const s = session;
+      const nonDone = Object.entries(s.columns).filter(([, c]) => c.status !== 'done' && c.status !== 'printing' && c.fulfillUnitIds.length > 0);
+      if (!nonDone.length) { showToast('ทุกคอลัมน์พิมพ์แล้วหรือว่างอยู่', 2000); return; }
+      const breakdown = nonDone.map(([, c]) => `${c.teamName || c.workerName || c.columnId}: ${c.fulfillUnitIds.length} ใบ`).join(', ');
+      const ok = await confirmInline(`พิมพ์ทั้งหมด? ${breakdown}`, 'พิมพ์');
+      if (!ok) return;
+      let cur = s;
+      for (const [cid] of nonDone) {
+        const col = cur.columns[cid];
+        if (!col) continue;
+        printPlanColumn(cur, cid, col.fulfillUnitIds, ns => { render(ns); cur = ns; });
+      }
+    });
+
+    // ---- attachPlanEvents: column actions + drag-drop ----
+    const attachPlanEvents = (root, s, rerender) => {
+      // Column action buttons
       root.querySelectorAll('[data-action]').forEach(btn => {
+        const action = btn.dataset.action;
+        if (!action) return;
         btn.addEventListener('click', async () => {
-          const action = btn.dataset.action;
-          const wid = btn.dataset.wid;
-          const col = s.columns[wid];
-          if (!col) return;
+          const cid = btn.dataset.wid;
+          const col = s.columns[cid];
+          const colDisplayName = col ? (col.teamName || col.workerName || cid) : cid;
 
           if (action === 'print' || action === 'reprint') {
+            if (!col) return;
             const ids = action === 'reprint' ? col.fulfillUnitIds : col.fulfillUnitIds.filter(id => !col.printedIds.includes(id));
             if (action === 'print') {
-              const ok = await confirmInline(`พิมพ์ของ ${col.workerName} ${ids.length} ใบ?`, 'พิมพ์');
+              const ok = await confirmInline(`พิมพ์ของ ${colDisplayName} ${ids.length} ใบ?`, 'พิมพ์');
               if (!ok) return;
             }
-            printPlanColumn(s, wid, ids, ns => { rerender(ns); s = ns; });
+            printPlanColumn(s, cid, ids, ns => { rerender(ns); s = ns; }, { reprint: action === 'reprint' });
           } else if (action === 'retry') {
+            if (!col) return;
             const ids = col.failedIds.length > 0 ? col.failedIds : col.fulfillUnitIds;
-            printPlanColumn(s, wid, ids, ns => { rerender(ns); s = ns; });
+            printPlanColumn(s, cid, ids, ns => { rerender(ns); s = ns; });
           } else if (action === 'return') {
+            if (!col) return;
             const returnIds = col.failedIds.length > 0 ? col.failedIds : col.fulfillUnitIds;
             const updatedCol = { ...col, fulfillUnitIds: col.fulfillUnitIds.filter(id => !returnIds.includes(id)), failedIds: [], status: 'pending', errorMsg: null };
-            const next = { ...s, columns: { ...s.columns, [wid]: updatedCol }, unassignedIds: [...s.unassignedIds, ...returnIds] };
+            const next = { ...s, columns: { ...s.columns, [cid]: updatedCol }, unassignedIds: [...s.unassignedIds, ...returnIds] };
             debouncedSavePlan(next);
             rerender(next);
           } else if (action === 'reset') {
+            if (!col) return;
             const updatedCol = { ...col, status: 'pending', printedIds: [], failedIds: [], errorMsg: null, retryCount: 0 };
-            const next = { ...s, columns: { ...s.columns, [wid]: updatedCol } };
+            const next = { ...s, columns: { ...s.columns, [cid]: updatedCol } };
             debouncedSavePlan(next);
             rerender(next);
+          } else if (action === 'removecol') {
+            if (!col) return;
+            const ok = await confirmInline(`ลบ ${colDisplayName}? (ids จะคืนยังไม่มอบหมาย)`, 'ลบ');
+            if (!ok) return;
+            const returnIds = col.fulfillUnitIds;
+            const { [cid]: _dropped, ...restCols } = s.columns;
+            const next = { ...s, columns: restCols, unassignedIds: [...s.unassignedIds, ...returnIds] };
+            // Also delete worker/team from state
+            if (col.kind === 'worker') {
+              state.workers = state.workers.filter(w => w.id !== cid);
+              saveWorkers();
+              removeWorkerFromTeams(cid);
+            } else if (col.kind === 'team') {
+              deleteTeam(cid);
+            }
+            debouncedSavePlan(next);
+            rerender(next);
+          } else if (action === 'editcol') {
+            if (!col) return;
+            // Remove old add-zone, rebuild with editing state
+            const addZone = root.querySelector('.qf-zone-add');
+            if (addZone) addZone.remove();
+            const editingWorker = col.kind === 'worker' ? state.workers.find(w => w.id === cid) : null;
+            const editingTeam = col.kind === 'team' ? getTeam(cid) : null;
+            root.querySelector('.qf-plan-window-body').appendChild(
+              renderAddZone(s, rerender, editingWorker, editingTeam)
+            );
           }
         });
       });
 
-      // Drag-drop
+      // Drag-drop on plan cards
       root.querySelectorAll('.qf-plan-card[draggable]').forEach(card => {
         card.addEventListener('dragstart', e => {
           _dragCardKey = card.dataset.cardKey;
@@ -4879,7 +7808,6 @@
           const srcZone = _dragSourceZone;
           const cardKey = _dragCardKey;
 
-          // Find ids for this card in source zone
           const srcIds = srcZone === 'unassigned' ? s.unassignedIds : (s.columns[srcZone]?.fulfillUnitIds || []);
           const cardObj = buildPlanCards(srcIds).find(c => c.key === cardKey);
           if (!cardObj) return;
@@ -4887,19 +7815,15 @@
           const totalAvail = cardObj.count;
           let qty = totalAvail;
 
-          // Skip popup for qty=1 or dropping back to unassigned
           if (qty > 1 && targetZone !== 'unassigned') {
-            const targetWorker = state.workers.find(w => w.id === targetZone);
-            const workerName = targetWorker?.name || targetZone;
-            const chosen = await showPlanChunkPopup(workerName, totalAvail);
+            const targetCol = s.columns[targetZone];
+            const zoneName = targetCol ? (targetCol.teamName || targetCol.workerName || targetZone) : targetZone;
+            const chosen = await showPlanChunkPopup(zoneName, totalAvail);
             if (chosen === null) return;
             qty = chosen;
           }
 
-          // Transfer 'qty' ids of this card from srcZone to targetZone
-          let idsToMove = cardObj.ids.slice(0, qty);
-          const remaining = cardObj.ids.slice(qty);
-
+          const idsToMove = cardObj.ids.slice(0, qty);
           let next = { ...s, unassignedIds: [...s.unassignedIds], columns: { ...s.columns } };
 
           if (srcZone === 'unassigned') {
@@ -4933,18 +7857,49 @@
     render(session);
   }
 
+  // ---- renderPlanBubble: minimized pill shown when panel is hidden ----
+  function renderPlanBubble(session, onExpand, onClose) {
+    document.querySelectorAll('.qf-plan-bubble').forEach(b => b.remove());
+    const total = planTotalIds(session);
+    const printed = planPrintedIds(session).length;
+    const anyPrinting = Object.values(session.columns).some(c => c.status === 'printing');
+
+    const bubble = document.createElement('div');
+    bubble.className = 'qf-plan-bubble';
+
+    const txt = document.createElement('span');
+    txt.className = 'qf-plan-bubble-text';
+    txt.textContent = anyPrinting ? 'กำลังพิมพ์...' : `🎨 แผน ${printed}/${total} ใบ`;
+    bubble.appendChild(txt);
+
+    const closeX = document.createElement('button');
+    closeX.className = 'qf-plan-bubble-close';
+    closeX.title = 'ปิดแผน';
+    closeX.textContent = '×';
+    closeX.onclick = (e) => { e.stopPropagation(); onClose(); bubble.remove(); };
+    bubble.appendChild(closeX);
+
+    bubble.addEventListener('click', (e) => {
+      if (e.target === closeX) return;
+      onExpand();
+      bubble.remove();
+    });
+
+    document.body.appendChild(bubble);
+  }
+
   function renderRecoveryBanner() {
     document.getElementById('qf-plan-recovery')?.remove();
     const session = loadPlanningSession();
     if (!session) return;
     const total = planTotalIds(session);
-    const workerCount = Object.keys(session.columns).length;
+    const colCount = Object.keys(session.columns).length;
     if (!total) return;
     const banner = document.createElement('div');
     banner.id = 'qf-plan-recovery';
     banner.className = 'qf-plan-recovery';
     banner.innerHTML = `
-      <span class="qf-plan-recovery-msg">🎨 มีแผนงานค้างอยู่ (${total} ใบ, ${workerCount} คน)</span>
+      <span class="qf-plan-recovery-msg">🎨 มีแผนงานค้างอยู่ (${total} ใบ, ${colCount} คน/ทีม)</span>
       <button class="qf-plan-recovery-btn qf-plan-recovery-open">เปิด</button>
       <button class="qf-plan-recovery-btn qf-plan-recovery-discard">ละทิ้ง</button>
     `;
@@ -4968,6 +7923,11 @@
   // ==================== INIT ====================
   function init() {
     if (!isOrderPage() && !isLabelsPage()) return;
+    // §7.6: Populate seller email from TikTok's session cookie (best-effort).
+    try {
+      const emailCookie = document.cookie.split(';').map(c => c.trim()).find(c => c.startsWith('passport_user_email='));
+      if (emailCookie) state.sellerEmail = decodeURIComponent(emailCookie.split('=').slice(1).join('='));
+    } catch {}
     buildWidget();
     // Show recovery banner after widget is built (DOM must exist)
     setTimeout(renderRecoveryBanner, 0);
