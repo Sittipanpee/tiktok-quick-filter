@@ -1,0 +1,24 @@
+{
+  "name": "tiktok-quick-filter-main",
+  "version": "1.0.0",
+  "description": "Chrome Extension แบบ floating widget สำหรับ**หน้า \"ที่จะจัดส่ง\"** ของ TikTok Seller Center (TH) ช่วยให้พนักงานกรองออเดอร์ตามสินค้า + ประเภทออเดอร์ได้ด้วยคลิกเดียว และเลือก (select) ออเดอร์ทั้งหมดที่ตรงเงื่อนไขอัตโนมัติ",
+  "main": "asset-bridge.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Sittipanpee/tiktok-quick-filter.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Sittipanpee/tiktok-quick-filter/issues"
+  },
+  "homepage": "https://github.com/Sittipanpee/tiktok-quick-filter#readme"
+}

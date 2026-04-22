@@ -1,1 +1,4 @@
 .claude/worktrees/
+.claude/plans/
+node_modules/
+
