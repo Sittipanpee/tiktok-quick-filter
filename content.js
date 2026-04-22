@@ -106,6 +106,7 @@
   // ==================== STATE ====================
   const ALIAS_STORAGE_KEY = 'qf_product_aliases_v1';
   const VARIANT_ALIAS_STORAGE_KEY = 'qf_variant_aliases_v1';
+  const WORKERS_STORAGE_KEY = 'qf_workers_v1';
   const OVERLAY_PREF_KEY = 'qf_overlay_enabled_v1';
   function loadOverlayPref() {
     const v = localStorage.getItem(OVERLAY_PREF_KEY);
@@ -162,6 +163,7 @@
     advancedOpen: false,
     calendarMonth: null, // {year, month} cursor for the visible month
     overlayEnabled: loadOverlayPref(),
+    workers: loadWorkers(),          // [{id, name, color}] คนแพ็ค
   };
 
   function loadAliases() {
@@ -186,6 +188,17 @@
   function saveVariantAliases() {
     const obj = Object.fromEntries(state.variantAliases);
     localStorage.setItem(VARIANT_ALIAS_STORAGE_KEY, JSON.stringify(obj));
+  }
+
+  function loadWorkers() {
+    try {
+      const raw = localStorage.getItem(WORKERS_STORAGE_KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  }
+
+  function saveWorkers() {
+    localStorage.setItem(WORKERS_STORAGE_KEY, JSON.stringify(state.workers));
   }
 
   // ==================== PRINT HISTORY ====================
@@ -3252,6 +3265,117 @@
     }
   }
 
+  // ==================== WORKERS MODAL ====================
+  const WORKER_COLORS = [
+    { hex: '#2563eb', label: 'น้ำเงิน' },
+    { hex: '#16a34a', label: 'เขียว' },
+    { hex: '#ea580c', label: 'ส้ม' },
+    { hex: '#dc2626', label: 'แดง' },
+    { hex: '#9333ea', label: 'ม่วง' },
+  ];
+
+  function openWorkersModal() {
+    document.querySelectorAll('.qf-workers-overlay').forEach(e => e.remove());
+    const overlay = document.createElement('div');
+    overlay.className = 'qf-modal-overlay qf-workers-overlay';
+    document.body.appendChild(overlay);
+
+    function render(editingId = null, formName = '', formColor = WORKER_COLORS[0].hex) {
+      overlay.innerHTML = `
+        <div class="qf-modal qf-workers-modal" role="dialog">
+          <div class="qf-workers-header">
+            <div class="qf-modal-title" style="margin-bottom:0;">จัดการคนแพ็ค</div>
+            <button class="qf-workers-close">×</button>
+          </div>
+          <div class="qf-workers-list">
+            ${state.workers.length === 0
+              ? '<div class="qf-workers-empty">ยังไม่มีคนแพ็ค</div>'
+              : state.workers.map(w => `
+                <div class="qf-workers-row" data-id="${escapeHtml(w.id)}">
+                  <span class="qf-worker-dot" style="background:${escapeHtml(w.color)};"></span>
+                  <span class="qf-worker-name">${escapeHtml(w.name)}</span>
+                  <button class="qf-workers-edit" data-id="${escapeHtml(w.id)}">แก้</button>
+                  <button class="qf-workers-del" data-id="${escapeHtml(w.id)}">ลบ</button>
+                </div>`).join('')}
+          </div>
+          ${editingId !== null ? `
+          <div class="qf-workers-form">
+            <div class="qf-workers-form-row">
+              <label class="qf-workers-form-label">ชื่อ</label>
+              <input id="qf-worker-name-input" class="qf-workers-input" maxlength="30"
+                value="${escapeHtml(formName)}" placeholder="ชื่อคนแพ็ค" />
+            </div>
+            <div class="qf-workers-form-row">
+              <label class="qf-workers-form-label">สี</label>
+              <div class="qf-workers-colors">
+                ${WORKER_COLORS.map(c => `
+                  <button class="qf-workers-color-btn${c.hex === formColor ? ' active' : ''}"
+                    data-color="${c.hex}" style="background:${c.hex};" title="${c.label}"></button>`).join('')}
+              </div>
+            </div>
+            <div class="qf-workers-form-actions">
+              <button class="qf-workers-cancel">ยกเลิก</button>
+              <button class="qf-workers-save">บันทึก</button>
+            </div>
+          </div>` : `
+          <div class="qf-workers-add-row">
+            <button class="qf-workers-add-btn">+ เพิ่มคนแพ็ค</button>
+          </div>`}
+        </div>
+      `;
+
+      overlay.querySelector('.qf-workers-close').addEventListener('click', () => overlay.remove());
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+      overlay.querySelectorAll('.qf-workers-del').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const id = btn.dataset.id;
+          state.workers = state.workers.filter(w => w.id !== id);
+          saveWorkers();
+          render(null);
+        });
+      });
+
+      overlay.querySelectorAll('.qf-workers-edit').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const worker = state.workers.find(w => w.id === btn.dataset.id);
+          if (worker) render(worker.id, worker.name, worker.color);
+        });
+      });
+
+      overlay.querySelector('.qf-workers-add-btn')?.addEventListener('click', () => {
+        render('__new__', '', WORKER_COLORS[0].hex);
+      });
+
+      if (editingId !== null) {
+        let selectedColor = formColor;
+        overlay.querySelectorAll('.qf-workers-color-btn').forEach(btn => {
+          btn.addEventListener('click', () => {
+            selectedColor = btn.dataset.color;
+            overlay.querySelectorAll('.qf-workers-color-btn').forEach(b => b.classList.toggle('active', b.dataset.color === selectedColor));
+          });
+        });
+
+        overlay.querySelector('.qf-workers-cancel').addEventListener('click', () => render(null));
+
+        overlay.querySelector('.qf-workers-save').addEventListener('click', () => {
+          const name = overlay.querySelector('#qf-worker-name-input').value.trim();
+          if (!name) { showToast('กรุณากรอกชื่อ', 1800); return; }
+          if (editingId === '__new__') {
+            const id = Math.random().toString(36).slice(2, 10);
+            state.workers = [...state.workers, { id, name, color: selectedColor }];
+          } else {
+            state.workers = state.workers.map(w => w.id === editingId ? { ...w, name, color: selectedColor } : w);
+          }
+          saveWorkers();
+          render(null);
+        });
+      }
+    }
+
+    render(null);
+  }
+
   // ==================== UI ====================
   function buildWidget() {
     if (document.getElementById('qf-widget')) return;
@@ -3265,6 +3389,12 @@
         <div id="qf-header-actions">
           ${!labels ? '<button id="qf-reset-btn" title="รีเซ็ตฟิลเตอร์">↺</button>' : ''}
           ${isTikTok() && labels ? '<button id="qf-history-btn" class="qf-history-btn" title="ประวัติการพิมพ์">⏱<span class="qf-history-badge" style="display:none;">0</span></button>' : ''}
+          <div id="qf-settings-wrap" style="position:relative;">
+            <button id="qf-settings-btn" title="ตั้งค่า">⋮</button>
+            <div id="qf-settings-menu" class="qf-settings-menu" style="display:none;">
+              <button id="qf-menu-workers">จัดการคนแพ็ค</button>
+            </div>
+          </div>
           <button id="qf-toggle-btn" title="ย่อ/ขยาย">−</button>
         </div>
       </div>
@@ -3349,6 +3479,18 @@
     document.getElementById('qf-history-btn')?.addEventListener('click', (e) => {
       e.stopPropagation();
       openHistoryModal();
+    });
+    const settingsBtn = document.getElementById('qf-settings-btn');
+    const settingsMenu = document.getElementById('qf-settings-menu');
+    settingsBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      settingsMenu.style.display = settingsMenu.style.display === 'none' ? '' : 'none';
+    });
+    document.addEventListener('click', () => { settingsMenu.style.display = 'none'; });
+    document.getElementById('qf-menu-workers').addEventListener('click', (e) => {
+      e.stopPropagation();
+      settingsMenu.style.display = 'none';
+      openWorkersModal();
     });
     renderHistoryBadge();
     document.getElementById('qf-scan-btn').addEventListener('click', scanAllPages);

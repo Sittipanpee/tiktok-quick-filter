@@ -2112,3 +2112,179 @@ html[data-qf-theme="shopee"] .qf-history-redownload:hover { background: #d4441f;
   font-size: 12px;
   line-height: 1.5;
 }
+
+/* ==================== SETTINGS MENU ==================== */
+.qf-settings-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.14);
+  min-width: 140px;
+  z-index: 10000001;
+  overflow: hidden;
+}
+.qf-settings-menu button {
+  display: block;
+  width: 100%;
+  padding: 9px 14px;
+  background: transparent;
+  border: none;
+  text-align: left;
+  font-size: 12px;
+  font-weight: 500;
+  color: #161823;
+  cursor: pointer;
+  font-family: inherit;
+}
+.qf-settings-menu button:hover { background: #f6f7f8; }
+
+/* ==================== WORKERS MODAL ==================== */
+.qf-workers-modal {
+  width: 340px;
+  max-width: 95vw;
+  padding: 0 !important;
+  overflow: hidden;
+}
+.qf-workers-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid #eee;
+}
+.qf-workers-close {
+  background: none;
+  border: none;
+  font-size: 24px;
+  color: #888;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+.qf-workers-close:hover { color: #fe2c55; }
+.qf-workers-list { padding: 8px 0; min-height: 0; }
+.qf-workers-empty {
+  padding: 16px;
+  text-align: center;
+  color: #9ca3af;
+  font-size: 12px;
+}
+.qf-workers-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 16px;
+}
+.qf-workers-row:hover { background: #fafbfc; }
+.qf-worker-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.qf-worker-name {
+  flex: 1;
+  font-size: 13px;
+  color: #161823;
+  font-weight: 500;
+}
+.qf-workers-edit,
+.qf-workers-del {
+  background: transparent;
+  border: 1px solid #e5e7eb;
+  border-radius: 5px;
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  color: #555;
+}
+.qf-workers-edit:hover { background: #f3f4f6; }
+.qf-workers-del:hover { background: #fee2e2; color: #d32f2f; border-color: #fecaca; }
+.qf-workers-form {
+  border-top: 1px solid #f0f0f0;
+  padding: 12px 16px 14px;
+}
+.qf-workers-form-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.qf-workers-form-label {
+  font-size: 12px;
+  color: #555;
+  width: 28px;
+  flex-shrink: 0;
+}
+.qf-workers-input {
+  flex: 1;
+  padding: 6px 10px;
+  font-size: 13px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #fafbfc;
+  color: #161823;
+  outline: none;
+  font-family: inherit;
+}
+.qf-workers-input:focus { border-color: #fe2c55; background: #fff; }
+.qf-workers-colors { display: flex; gap: 8px; }
+.qf-workers-color-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: transform 0.1s, border-color 0.1s;
+}
+.qf-workers-color-btn:hover { transform: scale(1.15); }
+.qf-workers-color-btn.active { border-color: #161823; transform: scale(1.15); }
+.qf-workers-form-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+.qf-workers-cancel {
+  padding: 7px 14px;
+  background: #eee;
+  color: #444;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.qf-workers-cancel:hover { background: #ddd; }
+.qf-workers-save {
+  padding: 7px 14px;
+  background: #fe2c55;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.qf-workers-save:hover { background: #e02147; }
+.qf-workers-add-row {
+  border-top: 1px solid #f0f0f0;
+  padding: 10px 16px;
+}
+.qf-workers-add-btn {
+  width: 100%;
+  padding: 7px 0;
+  background: #fff;
+  border: 1px dashed #d1d5db;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #555;
+  cursor: pointer;
+}
+.qf-workers-add-btn:hover { background: #f6f7f8; border-color: #9ca3af; }
