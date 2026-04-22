@@ -3337,6 +3337,113 @@
     }
   }
 
+  // ==================== CSV EXPORT ====================
+  function buildHistoryCsv(entries) {
+    const q = (v) => '"' + String(v == null ? '' : v).replace(/[\r\n]+/g, ' ').replace(/"/g, '""') + '"';
+    const pad = n => String(n).padStart(2, '0');
+    const header = [q('วันที่'), q('เวลา'), q('คนแพ็ค'), q('สี'), q('platform'), q('ชื่อสินค้า'), q('จำนวน'), q('fulfillUnitIds')].join(',');
+    const rows = entries.map(e => {
+      const d = new Date(e.timestamp);
+      const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+      const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      const worker = state.workers.find(w => w.id === e.workerId);
+      const workerName = e.workerName || '';
+      const workerColor = worker ? worker.color : '';
+      const platform = e.platform || 'tiktok';
+      const title = e.title || '';
+      const totalLabels = e.totalLabels != null ? e.totalLabels : '';
+      const ids = e.chunks.flatMap(c => c.ids).join(';');
+      return [q(date), q(time), q(workerName), q(workerColor), q(platform), q(title), q(totalLabels), q(ids)].join(',');
+    });
+    return '\ufeff' + [header, ...rows].join('\r\n');
+  }
+
+  function downloadCsv(csv, filename) {
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function openCsvExportModal() {
+    document.querySelectorAll('.qf-csv-overlay').forEach(e => e.remove());
+    const overlay = document.createElement('div');
+    overlay.className = 'qf-modal-overlay qf-csv-overlay';
+
+    const workerOptions = [
+      '<option value="all">ทั้งหมด</option>',
+      ...state.workers.map(w => `<option value="${escapeHtml(w.id)}">${escapeHtml(w.name)}</option>`),
+      '<option value="none">ไม่ระบุ</option>',
+    ].join('');
+
+    overlay.innerHTML = `
+      <div class="qf-modal qf-csv-modal" role="dialog">
+        <div class="qf-workers-header">
+          <div class="qf-modal-title" style="margin-bottom:0;">ดาวน์โหลดประวัติ CSV</div>
+          <button class="qf-csv-close qf-workers-close">×</button>
+        </div>
+        <div class="qf-csv-body">
+          <div class="qf-csv-section-label">ช่วงเวลา:</div>
+          <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-range" value="today"> วันนี้</label>
+          <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-range" value="7d" checked> 7 วัน</label>
+          <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-range" value="all"> ทั้งหมด</label>
+          <div class="qf-csv-section-label" style="margin-top:12px;">คนแพ็ค:</div>
+          <select class="qf-csv-worker-select">${workerOptions}</select>
+        </div>
+        <div class="qf-modal-actions">
+          <button class="qf-btn-cancel qf-csv-cancel">ยกเลิก</button>
+          <button class="qf-btn-confirm qf-csv-download">ดาวน์โหลด</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const cleanup = () => overlay.remove();
+
+    overlay.querySelector('.qf-csv-close').onclick = (e) => { e.stopPropagation(); cleanup(); };
+    overlay.querySelector('.qf-csv-cancel').onclick = (e) => { e.stopPropagation(); cleanup(); };
+    overlay.onclick = (e) => { if (e.target === overlay) cleanup(); };
+    const onKey = (e) => { if (e.key === 'Escape') { cleanup(); document.removeEventListener('keydown', onKey); } };
+    document.addEventListener('keydown', onKey);
+
+    overlay.querySelector('.qf-csv-download').onclick = (e) => {
+      e.stopPropagation();
+      const range = overlay.querySelector('input[name="qf-csv-range"]:checked').value;
+      const workerVal = overlay.querySelector('.qf-csv-worker-select').value;
+
+      const now = Date.now();
+      const dayStart = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x.getTime(); };
+      let cutoff = 0;
+      if (range === 'today') cutoff = dayStart(now);
+      else if (range === '7d') cutoff = dayStart(now) - 6 * 24 * 60 * 60 * 1000;
+
+      let entries = loadHistory().filter(e => e.timestamp >= cutoff);
+
+      if (workerVal === 'none') {
+        entries = entries.filter(e => e.workerId == null);
+      } else if (workerVal !== 'all') {
+        entries = entries.filter(e => e.workerId === workerVal);
+      }
+
+      if (entries.length === 0) {
+        showToast('ไม่มีข้อมูลในช่วงที่เลือก', 2000);
+        return;
+      }
+
+      const today = new Date();
+      const pad = n => String(n).padStart(2, '0');
+      const filename = `print-history-${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}.csv`;
+      downloadCsv(buildHistoryCsv(entries), filename);
+      cleanup();
+    };
+  }
+
   // ==================== WORKERS MODAL ====================
   const WORKER_COLORS = [
     { hex: '#2563eb', label: 'น้ำเงิน' },
@@ -3465,6 +3572,7 @@
             <button id="qf-settings-btn" title="ตั้งค่า">⋮</button>
             <div id="qf-settings-menu" class="qf-settings-menu" style="display:none;">
               <button id="qf-menu-workers">จัดการคนแพ็ค</button>
+              <button id="qf-menu-csv">ดาวน์โหลดประวัติ CSV</button>
             </div>
           </div>
           <button id="qf-toggle-btn" title="ย่อ/ขยาย">−</button>
@@ -3563,6 +3671,11 @@
       e.stopPropagation();
       settingsMenu.style.display = 'none';
       openWorkersModal();
+    });
+    document.getElementById('qf-menu-csv').addEventListener('click', (e) => {
+      e.stopPropagation();
+      settingsMenu.style.display = 'none';
+      openCsvExportModal();
     });
     renderHistoryBadge();
     document.getElementById('qf-scan-btn').addEventListener('click', scanAllPages);
