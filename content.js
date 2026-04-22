@@ -2294,7 +2294,7 @@
         const wSize = Math.min(ph * 0.03, 14);
         const wText = `แพ็ค: ${workerName}`;
         page.drawText(wText, {
-          x: 6, y: 6, size: wSize, font,
+          x: 6, y: ph - wSize - 4, size: wSize, font,
           color: rgb(0, 0, 0), opacity: 0.4,
           maxWidth: pw - 12,
         });
@@ -3687,13 +3687,7 @@
     });
     const planBtn = document.getElementById('qf-menu-plan');
     if (planBtn) {
-      const updatePlanBtn = () => {
-        const hasRecords = state.records.size > 0;
-        const hasWorkers = state.workers.length > 0;
-        planBtn.disabled = !hasRecords || !hasWorkers;
-        planBtn.title = !hasRecords ? 'scan ก่อน' : (!hasWorkers ? 'เพิ่มคนแพ็คก่อน' : '');
-      };
-      updatePlanBtn();
+      updatePlanBtnState();
       planBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
         settingsMenu.style.display = 'none';
@@ -4087,6 +4081,15 @@
     }
   }
 
+  function updatePlanBtnState() {
+    const planBtn = document.getElementById('qf-menu-plan');
+    if (!planBtn) return;
+    const hasRecords = state.records.size > 0;
+    const hasWorkers = state.workers.length > 0;
+    planBtn.disabled = !hasRecords || !hasWorkers;
+    planBtn.title = !hasRecords ? 'scan ก่อน' : (!hasWorkers ? 'เพิ่มคนแพ็คก่อน' : '');
+  }
+
   function renderAll() {
     const labelsPg = isLabelsPage();
     const singleCount = labelsPg
@@ -4119,13 +4122,7 @@
       }
     }
     updateSelectionBar();
-    const planBtn = document.getElementById('qf-menu-plan');
-    if (planBtn) {
-      const hasRecords = state.records.size > 0;
-      const hasWorkers = state.workers.length > 0;
-      planBtn.disabled = !hasRecords || !hasWorkers;
-      planBtn.title = !hasRecords ? 'scan ก่อน' : (!hasWorkers ? 'เพิ่มคนแพ็คก่อน' : '');
-    }
+    updatePlanBtnState();
   }
 
   function renderContent() {
@@ -4519,7 +4516,6 @@
 
   function showPlanAutoSplitModal(session) {
     return new Promise(resolve => {
-      const workers = state.workers.filter(w => session.columns[w.id]);
       const allWorkers = state.workers;
       if (!allWorkers.length) { resolve(null); return; }
       const overlay = document.createElement('div');
@@ -4617,6 +4613,10 @@
   }
 
   async function printPlanColumn(session, workerId, ids, renderFn) {
+    if (isShopee()) {
+      showToast('การพิมพ์จากแผนยังไม่รองรับบน Shopee', 3000);
+      return;
+    }
     const col = session.columns[workerId];
     if (!col) return;
     const newCol = { ...col, status: 'printing', lastPrintAt: Date.now(), errorMsg: null };
@@ -4642,17 +4642,16 @@
         workerName: col.workerName,
       });
 
-      const success = ok;
       const updatedCol = {
         ...newCol,
-        status: success ? 'done' : 'error',
-        printedIds: success ? [...col.printedIds, ...printIds_] : col.printedIds,
-        failedIds: success ? [] : printIds_,
+        status: ok ? 'done' : 'error',
+        printedIds: ok ? [...col.printedIds, ...printIds_] : col.printedIds,
+        failedIds: ok ? [] : printIds_,
         lastPrintAt: Date.now(),
-        errorMsg: success ? null : 'พิมพ์ไม่สำเร็จ ลองใหม่',
-        retryCount: success ? col.retryCount : col.retryCount + 1,
+        errorMsg: ok ? null : 'พิมพ์ไม่สำเร็จ ลองใหม่',
+        retryCount: ok ? col.retryCount : col.retryCount + 1,
       };
-      if (success) {
+      if (ok) {
         for (const id of printIds_) state.printedUnitIds.add(id);
       }
       const finalSession = { ...newSession, columns: { ...newSession.columns, [workerId]: updatedCol } };
@@ -4740,7 +4739,7 @@
 
     const renderColumn = (wid, col, s) => {
       const locked = col.status === 'printing' || col.status === 'done';
-      const statusLabel = { pending: 'รอพิมพ์', printing: 'กำลังพิมพ์...', done: 'เสร็จ', partial: 'บางส่วน', error: 'ผิดพลาด', stale: 'คนแพ็คถูกลบ' }[col.status] || col.status;
+      const statusLabel = { pending: 'รอพิมพ์', printing: 'กำลังพิมพ์...', done: 'เสร็จ', partial: 'บางส่วน', error: 'ผิดพลาด' }[col.status] || col.status;
       const dot = col.workerColor ? `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${escapeHtml(col.workerColor)};margin-right:4px;vertical-align:middle;flex-shrink:0;"></span>` : '';
 
       let btns = '';
@@ -4751,7 +4750,7 @@
         btns = `<button class="qf-plan-zone-btn primary" data-action="retry" data-wid="${escapeHtml(wid)}">🔁 ลองอีกครั้ง ${failCount}</button><button class="qf-plan-zone-btn" data-action="return" data-wid="${escapeHtml(wid)}">↩ คืน</button>`;
       } else if (col.status === 'error') {
         btns = col.retryCount < 3
-          ? `<button class="qf-plan-zone-btn primary" data-action="retry" data-wid="${escapeHtml(wid)}">🔁 Retry</button><button class="qf-plan-zone-btn" data-action="return" data-wid="${escapeHtml(wid)}">↩ คืน</button>`
+          ? `<button class="qf-plan-zone-btn primary" data-action="retry" data-wid="${escapeHtml(wid)}">🔁 ลองอีกครั้ง</button><button class="qf-plan-zone-btn" data-action="return" data-wid="${escapeHtml(wid)}">↩ คืน</button>`
           : `<button class="qf-plan-zone-btn" data-action="return" data-wid="${escapeHtml(wid)}">↩ คืน</button>`;
       } else if (col.status === 'printing') {
         btns = `<span class="qf-plan-zone-btn" style="cursor:default;">⏳</span>`;
@@ -4778,6 +4777,7 @@
       root.querySelector('.qf-plan-close').onclick = () => {
         const anyPrinting = Object.values(s.columns).some(c => c.status === 'printing');
         if (anyPrinting) { showToast('กำลังพิมพ์อยู่ — รอให้เสร็จก่อนปิด', 2500); return; }
+        window.removeEventListener('beforeunload', beforeUnloadHandler);
         overlay.remove();
         renderRecoveryBanner();
       };
@@ -4791,6 +4791,7 @@
       };
 
       root.querySelector('.qf-plan-printall-btn').onclick = async () => {
+        if (isShopee()) { showToast('การพิมพ์จากแผนยังไม่รองรับบน Shopee', 3000); return; }
         const nonDone = Object.entries(s.columns).filter(([, c]) => c.status !== 'done' && c.status !== 'printing' && c.fulfillUnitIds.length > 0);
         if (!nonDone.length) { showToast('ทุกคอลัมน์พิมพ์แล้วหรือว่างอยู่', 2000); return; }
         const breakdown = nonDone.map(([, c]) => `${c.workerName}: ${c.fulfillUnitIds.length} ใบ`).join(', ');
@@ -4810,6 +4811,10 @@
 
           if (action === 'print' || action === 'reprint') {
             const ids = action === 'reprint' ? col.fulfillUnitIds : col.fulfillUnitIds.filter(id => !col.printedIds.includes(id));
+            if (action === 'print') {
+              const ok = await confirmInline(`พิมพ์ของ ${col.workerName} ${ids.length} ใบ?`, 'พิมพ์');
+              if (!ok) return;
+            }
             printPlanColumn(s, wid, ids, ns => { rerender(ns); s = ns; });
           } else if (action === 'retry') {
             const ids = col.failedIds.length > 0 ? col.failedIds : col.fulfillUnitIds;
@@ -4910,7 +4915,6 @@
       if (anyPrinting) { e.preventDefault(); e.returnValue = 'กำลังพิมพ์อยู่ — แน่ใจหรือว่าจะออก?'; return e.returnValue; }
     };
     window.addEventListener('beforeunload', beforeUnloadHandler);
-    overlay.addEventListener('remove', () => window.removeEventListener('beforeunload', beforeUnloadHandler), { once: true });
 
     render(session);
   }
