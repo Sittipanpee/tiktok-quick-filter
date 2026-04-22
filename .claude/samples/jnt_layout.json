@@ -1,0 +1,1523 @@
+{
+  "carrier": "jnt",
+  "pageSize": {
+    "w": 298,
+    "h": 420
+  },
+  "texts": [
+    {
+      "id": "t_0",
+      "text": "698",
+      "x": 275.81,
+      "y": 423.84,
+      "w": 72.73,
+      "size": 33,
+      "bold": false,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_1",
+      "text": "V",
+      "x": 4.59,
+      "y": 419.98,
+      "w": 95.33,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_2",
+      "text": "EZ",
+      "x": 188.18,
+      "y": 412.38,
+      "w": 195.95,
+      "size": 78,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_3",
+      "text": "เกม",
+      "x": 261.9,
+      "y": 409.2,
+      "w": 104.36,
+      "size": 20.8,
+      "bold": true,
+      "extensionOverlay": true
+    },
+    {
+      "id": "t_4",
+      "text": "7",
+      "x": 277.68,
+      "y": 390.45,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_5",
+      "text": "3",
+      "x": 9.62,
+      "y": 387.63,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_6",
+      "text": "9",
+      "x": 277.68,
+      "y": 386.62,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_7",
+      "text": "4",
+      "x": 9.62,
+      "y": 383.81,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_8",
+      "text": "5",
+      "x": 277.68,
+      "y": 382.8,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_9",
+      "text": "1",
+      "x": 9.62,
+      "y": 379.98,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_10",
+      "text": "5",
+      "x": 277.68,
+      "y": 378.98,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_11",
+      "text": "7",
+      "x": 9.62,
+      "y": 376.16,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_12",
+      "text": "3",
+      "x": 277.68,
+      "y": 375.17,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_13",
+      "text": "1",
+      "x": 9.62,
+      "y": 372.35,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_14",
+      "text": "4",
+      "x": 277.68,
+      "y": 371.34,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_15",
+      "text": "0",
+      "x": 9.62,
+      "y": 368.53,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_16",
+      "text": "0",
+      "x": 277.68,
+      "y": 367.52,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_17",
+      "text": "4",
+      "x": 9.62,
+      "y": 364.7,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_18",
+      "text": "1",
+      "x": 277.68,
+      "y": 363.7,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_19",
+      "text": "3",
+      "x": 9.62,
+      "y": 360.88,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_20",
+      "text": "7",
+      "x": 277.68,
+      "y": 359.87,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_21",
+      "text": "5",
+      "x": 9.62,
+      "y": 357.06,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_22",
+      "text": "1",
+      "x": 277.68,
+      "y": 356.06,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_23",
+      "text": "5",
+      "x": 9.62,
+      "y": 353.25,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_24",
+      "text": "4",
+      "x": 277.68,
+      "y": 352.24,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_25",
+      "text": "9",
+      "x": 9.62,
+      "y": 349.42,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_26",
+      "text": "3",
+      "x": 277.68,
+      "y": 348.42,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_27",
+      "text": "7",
+      "x": 9.62,
+      "y": 345.6,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_28",
+      "text": "7955••43",
+      "x": 105.86,
+      "y": 341.5,
+      "w": 206.14,
+      "size": 65,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_29",
+      "text": "เเ์",
+      "x": 40.03,
+      "y": 328.26,
+      "w": 60.6,
+      "size": 41,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_30",
+      "text": "** **",
+      "x": 42.98,
+      "y": 328.26,
+      "w": 70.23,
+      "size": 40,
+      "bold": false,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_31",
+      "text": "จาก",
+      "x": 16.22,
+      "y": 328.16,
+      "w": 109.64,
+      "size": 42,
+      "bold": false,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_32",
+      "text": "ตลาดเมืองนครราชเมื",
+      "x": 45.7,
+      "y": 316.9,
+      "w": 192.84,
+      "size": 46,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_33",
+      "text": "555/161 ,, ",
+      "x": 14.8,
+      "y": 316.9,
+      "w": 155.44,
+      "size": 45,
+      "bold": false,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_34",
+      "text": "7",
+      "x": 278.26,
+      "y": 316.45,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_35",
+      "text": "3",
+      "x": 9.62,
+      "y": 312.21,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_36",
+      "text": "9",
+      "x": 278.26,
+      "y": 312.62,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_37",
+      "text": "H1 F04-33",
+      "x": 164.38,
+      "y": 312.38,
+      "w": 360.69,
+      "size": 124,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_38",
+      "text": "4",
+      "x": 9.62,
+      "y": 308.4,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_39",
+      "text": "5",
+      "x": 278.26,
+      "y": 308.82,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_40",
+      "text": "องนครราชสมีานครราชสมีา",
+      "x": 14.8,
+      "y": 307.76,
+      "w": 207.15,
+      "size": 46,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_41",
+      "text": ", ",
+      "x": 72.9,
+      "y": 307.76,
+      "w": 48.67,
+      "size": 45,
+      "bold": false,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_42",
+      "text": "1",
+      "x": 9.62,
+      "y": 304.58,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_43",
+      "text": "5",
+      "x": 278.26,
+      "y": 304.99,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_44",
+      "text": "7",
+      "x": 9.62,
+      "y": 300.75,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_45",
+      "text": "3",
+      "x": 278.26,
+      "y": 301.17,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_46",
+      "text": "1",
+      "x": 9.62,
+      "y": 296.93,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_47",
+      "text": "4",
+      "x": 278.26,
+      "y": 297.34,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_48",
+      "text": "0",
+      "x": 9.62,
+      "y": 293.1,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_49",
+      "text": "0",
+      "x": 278.26,
+      "y": 293.52,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_50",
+      "text": "004A",
+      "x": 204.54,
+      "y": 290.38,
+      "w": 197.45,
+      "size": 66,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_51",
+      "text": "4",
+      "x": 9.62,
+      "y": 289.3,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_52",
+      "text": "1",
+      "x": 278.26,
+      "y": 289.71,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_53",
+      "text": "ถึง",
+      "x": 16.78,
+      "y": 285.74,
+      "w": 109.03,
+      "size": 45,
+      "bold": false,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_54",
+      "text": "3",
+      "x": 9.62,
+      "y": 285.47,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_55",
+      "text": "7",
+      "x": 278.26,
+      "y": 285.89,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_56",
+      "text": "praaorawee",
+      "x": 34.93,
+      "y": 285.04,
+      "w": 253.7,
+      "size": 71,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_57",
+      "text": "5",
+      "x": 9.62,
+      "y": 281.65,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_58",
+      "text": "1",
+      "x": 278.26,
+      "y": 282.06,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_59",
+      "text": "5",
+      "x": 9.62,
+      "y": 277.82,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_60",
+      "text": "4",
+      "x": 278.26,
+      "y": 278.24,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_61",
+      "text": "9",
+      "x": 9.62,
+      "y": 274,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_62",
+      "text": "3",
+      "x": 278.26,
+      "y": 274.42,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_63",
+      "text": "(+66)90*****49",
+      "x": 30.02,
+      "y": 273.87,
+      "w": 101.2,
+      "size": 34,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_64",
+      "text": "7",
+      "x": 9.62,
+      "y": 270.19,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_65",
+      "text": "ตําบลหลักหกอําเภอเมืองปทุมธานี ",
+      "x": 14.22,
+      "y": 253.63,
+      "w": 308.12,
+      "size": 59,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_67",
+      "text": "ปทุมธานีประเทศไทยบานเลขที่",
+      "x": 14.22,
+      "y": 241.57,
+      "w": 301.95,
+      "size": 59,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_69",
+      "text": " , 21 ",
+      "x": 129.2,
+      "y": 241.57,
+      "w": 186.16,
+      "size": 58,
+      "bold": false,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_70",
+      "text": "ู",
+      "x": 27.79,
+      "y": 239.17,
+      "w": 0,
+      "size": 59,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_71",
+      "text": "3",
+      "x": 9.62,
+      "y": 229.71,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_72",
+      "text": "7",
+      "x": 277.97,
+      "y": 231.12,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_73",
+      "text": "หมตหลักหกอเมืองจปทุมธานี",
+      "x": 14.22,
+      "y": 229.5,
+      "w": 311.52,
+      "size": 59,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_74",
+      "text": " 4 . . .",
+      "x": 30.53,
+      "y": 229.5,
+      "w": 171.01,
+      "size": 58,
+      "bold": false,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_75",
+      "text": "4",
+      "x": 9.62,
+      "y": 225.89,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_76",
+      "text": "9",
+      "x": 277.97,
+      "y": 227.3,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_77",
+      "text": "1",
+      "x": 9.62,
+      "y": 222.08,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_78",
+      "text": "5",
+      "x": 277.97,
+      "y": 223.47,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_79",
+      "text": "",
+      "x": 27.6,
+      "y": 220.22,
+      "w": 0,
+      "size": 59,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_80",
+      "text": "7",
+      "x": 9.62,
+      "y": 218.26,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_81",
+      "text": "5",
+      "x": 277.97,
+      "y": 219.65,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_82",
+      "text": "เมืองปทุมธานีปทุมธานี",
+      "x": 15.09,
+      "y": 216.1,
+      "w": 213.94,
+      "size": 49,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_83",
+      "text": " , ",
+      "x": 72.98,
+      "y": 216.1,
+      "w": 54.64,
+      "size": 48,
+      "bold": false,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_84",
+      "text": "1",
+      "x": 9.62,
+      "y": 214.43,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_85",
+      "text": "3",
+      "x": 277.97,
+      "y": 215.84,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_86",
+      "text": "0",
+      "x": 9.62,
+      "y": 210.61,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_87",
+      "text": "4",
+      "x": 277.97,
+      "y": 212.02,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_88",
+      "text": "4",
+      "x": 9.62,
+      "y": 206.78,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_89",
+      "text": "0",
+      "x": 277.97,
+      "y": 208.19,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_90",
+      "text": "3",
+      "x": 9.62,
+      "y": 202.98,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_91",
+      "text": "1",
+      "x": 277.97,
+      "y": 204.37,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_92",
+      "text": "12000",
+      "x": 15.36,
+      "y": 203.62,
+      "w": 118.46,
+      "size": 49,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_93",
+      "text": "5",
+      "x": 9.62,
+      "y": 199.15,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_94",
+      "text": "7",
+      "x": 277.97,
+      "y": 200.54,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_95",
+      "text": "5",
+      "x": 9.62,
+      "y": 195.33,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_96",
+      "text": "1",
+      "x": 277.97,
+      "y": 196.74,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_97",
+      "text": "9",
+      "x": 9.62,
+      "y": 191.5,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_98",
+      "text": "4",
+      "x": 277.97,
+      "y": 192.91,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_99",
+      "text": "7",
+      "x": 9.62,
+      "y": 187.68,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_100",
+      "text": "3",
+      "x": 277.97,
+      "y": 189.09,
+      "w": 79.49,
+      "size": 40,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_101",
+      "text": "DROP-OFF",
+      "x": 215.62,
+      "y": 186.42,
+      "w": 192.67,
+      "size": 56,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_102",
+      "text": " C OD",
+      "x": 53.28,
+      "y": 183.15,
+      "w": 335.47,
+      "size": 107,
+      "bold": false,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_103",
+      "text": "người mua không cần phải trả chuyển phát nhanh",
+      "x": 15.36,
+      "y": 181.54,
+      "w": 155.01,
+      "size": 27,
+      "bold": false,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_104",
+      "text": "23-04-2026",
+      "x": 203.33,
+      "y": 170.82,
+      "w": 92.8,
+      "size": 34,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_105",
+      "text": "Shipping Date:",
+      "x": 146.62,
+      "y": 169.82,
+      "w": 110.2,
+      "size": 33,
+      "bold": false,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_106",
+      "text": "Order ID:",
+      "x": 14.51,
+      "y": 163.31,
+      "w": 103.31,
+      "size": 33,
+      "bold": false,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_107",
+      "text": "58364{phone_redacted}26",
+      "x": 42.86,
+      "y": 162.83,
+      "w": 149.91,
+      "size": 41,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_108",
+      "text": "Estimated Date:",
+      "x": 147.47,
+      "y": 161.31,
+      "w": 112.67,
+      "size": 33,
+      "bold": false,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_109",
+      "text": "In transit by: 23/04/2026 23:59",
+      "x": 2.34,
+      "y": 132.62,
+      "w": 178.65,
+      "size": 41,
+      "bold": false,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_110",
+      "text": "Product NameSKUSeller SKUQty",
+      "x": 1.76,
+      "y": 122.11,
+      "w": 376.11,
+      "size": 42,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_111",
+      "text": "[ของแทจากบริษัท]ครมีคอนเกU C -BR-501",
+      "x": 1.76,
+      "y": 108.75,
+      "w": 346.76,
+      "size": 41,
+      "bold": false,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_112",
+      "text": "ครมีทารกัแรคอนเกรทส วิตามินรท",
+      "x": 1.76,
+      "y": 100.53,
+      "w": 227.03,
+      "size": 41,
+      "bold": false,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_113",
+      "text": "ไวทเทนน่ิง ขนาด 50 กรมั",
+      "x": 1.76,
+      "y": 92.32,
+      "w": 173.92,
+      "size": 41,
+      "bold": false,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_114",
+      "text": "Qty Total:",
+      "x": 248.02,
+      "y": 78.94,
+      "w": 117.34,
+      "size": 42,
+      "bold": true,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_115",
+      "text": " 1",
+      "x": 282.21,
+      "y": 78.94,
+      "w": 85.99,
+      "size": 41,
+      "bold": false,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_116",
+      "text": "Order ID: 58364{phone_redacted}26",
+      "x": 204.06,
+      "y": 63.47,
+      "w": 149.46,
+      "size": 34,
+      "bold": false,
+      "extensionOverlay": false
+    },
+    {
+      "id": "t_117",
+      "text": "ครีมรักแร้ 1",
+      "x": 95.02,
+      "y": 30.99,
+      "w": 399.76,
+      "size": 25,
+      "bold": true,
+      "extensionOverlay": true
+    },
+    {
+      "id": "t_118",
+      "text": "น้ำาตาล",
+      "x": 126.16,
+      "y": 16,
+      "w": 150.7,
+      "size": 17,
+      "bold": true,
+      "extensionOverlay": true
+    }
+  ],
+  "images": [],
+  "rects": [],
+  "hints": {
+    "locked": {
+      "orderId": {
+        "value": "5836••26",
+        "x": 42.86,
+        "y": 162.83,
+        "size": 41,
+        "textId": "t_107",
+        "reason": "digit run ≥14 chars — order/tracking ID"
+      },
+      "trackingNumber": {
+        "value": "7955••43",
+        "x": 105.86,
+        "y": 341.5,
+        "size": 65,
+        "textId": "t_28",
+        "reason": "isolated 10–13 digit string — carrier tracking number"
+      },
+      "sortCode": {
+        "value": "EZ",
+        "x": 188.18,
+        "y": 412.38,
+        "size": 78,
+        "textId": "t_2",
+        "reason": "large-font short alphanum — carrier sort code"
+      },
+      "routeCode": {
+        "value": "H1 F04-33",
+        "x": 164.38,
+        "y": 312.38,
+        "size": 124,
+        "textId": "t_37",
+        "reason": "very large alphanum string — carrier route/zone code"
+      },
+      "subZoneCode": {
+        "value": "004A",
+        "x": 204.54,
+        "y": 290.38,
+        "size": 66,
+        "textId": "t_50",
+        "reason": "medium alphanum — carrier sub-zone code"
+      },
+      "serviceType": {
+        "value": "DROP-OFF",
+        "x": 215.62,
+        "y": 186.42,
+        "size": 56,
+        "textId": "t_101",
+        "reason": "service type badge — carrier-defined, must stay readable"
+      },
+      "codLabel": {
+        "value": "C OD",
+        "x": 53.28,
+        "y": 183.15,
+        "size": 107,
+        "textId": "t_102",
+        "reason": "large COD label — cash-on-delivery flag (carrier-required)"
+      },
+      "barcodeLeft": {
+        "x": 9.62,
+        "y": 187.68,
+        "w": 14,
+        "h": 209.95,
+        "glyphCount": 36,
+        "reason": "vertical digit column on left edge — J&T side barcode mirror"
+      },
+      "barcodeRight": {
+        "x": 277.68,
+        "y": 78.94,
+        "w": 14,
+        "h": 321.51,
+        "glyphCount": 37,
+        "reason": "vertical digit column on right edge — J&T side barcode mirror"
+      }
+    },
+    "shrinkable": {
+      "skuTable": {
+        "x": 0,
+        "y": 78.94,
+        "w": 298,
+        "h": 51.57,
+        "reason": "SKU table — detected via \"Product Name/SKU/Qty\" header"
+      },
+      "addressBlock": {
+        "x": 0,
+        "y": 147,
+        "w": 298,
+        "h": 126,
+        "reason": "approximate — Thai sender/recipient address lines between tracking area and SKU table",
+        "needsVerification": true
+      }
+    },
+    "customizable": {
+      "aliasWatermark": {
+        "count": 2,
+        "sampleY": 30.99,
+        "extensionOverlay": true,
+        "reason": "added by QF extension overlayAliasOnPdf() — not a LOCKED carrier element"
+      },
+      "workerNameBadge": {
+        "count": 1,
+        "sampleY": 409.2,
+        "extensionOverlay": true,
+        "reason": "added by QF extension overlayAliasOnPdf() — worker name badge"
+      }
+    },
+    "unclassified": [
+      {
+        "id": "t_0",
+        "preview": "698",
+        "x": 275.81,
+        "y": 423.84,
+        "size": 33
+      },
+      {
+        "id": "t_1",
+        "preview": "V",
+        "x": 4.59,
+        "y": 419.98,
+        "size": 40
+      },
+      {
+        "id": "t_29",
+        "preview": "เเ์",
+        "x": 40.03,
+        "y": 328.26,
+        "size": 41
+      },
+      {
+        "id": "t_30",
+        "preview": "** **",
+        "x": 42.98,
+        "y": 328.26,
+        "size": 40
+      },
+      {
+        "id": "t_31",
+        "preview": "จาก",
+        "x": 16.22,
+        "y": 328.16,
+        "size": 42
+      },
+      {
+        "id": "t_32",
+        "preview": "ตลาดเมืองนครราชเมื",
+        "x": 45.7,
+        "y": 316.9,
+        "size": 46
+      },
+      {
+        "id": "t_33",
+        "preview": "555/161 ,, ",
+        "x": 14.8,
+        "y": 316.9,
+        "size": 45
+      },
+      {
+        "id": "t_40",
+        "preview": "องนครราชสมีานครราชสมีา",
+        "x": 14.8,
+        "y": 307.76,
+        "size": 46
+      },
+      {
+        "id": "t_41",
+        "preview": ", ",
+        "x": 72.9,
+        "y": 307.76,
+        "size": 45
+      },
+      {
+        "id": "t_53",
+        "preview": "ถึง",
+        "x": 16.78,
+        "y": 285.74,
+        "size": 45
+      },
+      {
+        "id": "t_56",
+        "preview": "praaorawee",
+        "x": 34.93,
+        "y": 285.04,
+        "size": 71
+      },
+      {
+        "id": "t_63",
+        "preview": "(+66)90*****49",
+        "x": 30.02,
+        "y": 273.87,
+        "size": 34
+      },
+      {
+        "id": "t_65",
+        "preview": "ตําบลหลักหกอําเภอเมืองปทุมธานี ",
+        "x": 14.22,
+        "y": 253.63,
+        "size": 59
+      },
+      {
+        "id": "t_67",
+        "preview": "ปทุมธานีประเทศไทยบานเลขที่",
+        "x": 14.22,
+        "y": 241.57,
+        "size": 59
+      },
+      {
+        "id": "t_69",
+        "preview": " , 21 ",
+        "x": 129.2,
+        "y": 241.57,
+        "size": 58
+      },
+      {
+        "id": "t_70",
+        "preview": "ู",
+        "x": 27.79,
+        "y": 239.17,
+        "size": 59
+      },
+      {
+        "id": "t_73",
+        "preview": "หมตหลักหกอเมืองจปทุมธานี",
+        "x": 14.22,
+        "y": 229.5,
+        "size": 59
+      },
+      {
+        "id": "t_74",
+        "preview": " 4 . . .",
+        "x": 30.53,
+        "y": 229.5,
+        "size": 58
+      },
+      {
+        "id": "t_79",
+        "preview": "",
+        "x": 27.6,
+        "y": 220.22,
+        "size": 59
+      },
+      {
+        "id": "t_82",
+        "preview": "เมืองปทุมธานีปทุมธานี",
+        "x": 15.09,
+        "y": 216.1,
+        "size": 49
+      },
+      {
+        "id": "t_83",
+        "preview": " , ",
+        "x": 72.98,
+        "y": 216.1,
+        "size": 48
+      },
+      {
+        "id": "t_92",
+        "preview": "12000",
+        "x": 15.36,
+        "y": 203.62,
+        "size": 49
+      },
+      {
+        "id": "t_103",
+        "preview": "người mua không cần phải trả chuyển phát",
+        "x": 15.36,
+        "y": 181.54,
+        "size": 27
+      },
+      {
+        "id": "t_104",
+        "preview": "23-04-2026",
+        "x": 203.33,
+        "y": 170.82,
+        "size": 34
+      },
+      {
+        "id": "t_105",
+        "preview": "Shipping Date:",
+        "x": 146.62,
+        "y": 169.82,
+        "size": 33
+      },
+      {
+        "id": "t_109",
+        "preview": "In transit by: 23/04/2026 23:59",
+        "x": 2.34,
+        "y": 132.62,
+        "size": 41
+      },
+      {
+        "id": "t_110",
+        "preview": "Product NameSKUSeller SKUQty",
+        "x": 1.76,
+        "y": 122.11,
+        "size": 42
+      },
+      {
+        "id": "t_111",
+        "preview": "[ของแทจากบริษัท]ครมีคอนเกU C -BR-501",
+        "x": 1.76,
+        "y": 108.75,
+        "size": 41
+      },
+      {
+        "id": "t_112",
+        "preview": "ครมีทารกัแรคอนเกรทส วิตามินรท",
+        "x": 1.76,
+        "y": 100.53,
+        "size": 41
+      },
+      {
+        "id": "t_113",
+        "preview": "ไวทเทนน่ิง ขนาด 50 กรมั",
+        "x": 1.76,
+        "y": 92.32,
+        "size": 41
+      },
+      {
+        "id": "t_114",
+        "preview": "Qty Total:",
+        "x": 248.02,
+        "y": 78.94,
+        "size": 42
+      },
+      {
+        "id": "t_116",
+        "preview": "Order ID: 58364{phone_redacted}26",
+        "x": 204.06,
+        "y": 63.47,
+        "size": 34
+      }
+    ]
+  },
+  "meta": {
+    "extractor": "pdf2json",
+    "pageCount": 21
+  },
+  "notes": [
+    "Phase 1 calibration output. SAMPLE PDF was already post-processed by this extension,",
+    "so bottom-band Thai text and top-right Thai text are extension overlays (not carrier LOCKED).",
+    "For 100% accurate LOCKED coords please re-run on a RAW J&T PDF from the generate API."
+  ]
+}
