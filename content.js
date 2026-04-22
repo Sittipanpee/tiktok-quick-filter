@@ -15,6 +15,13 @@
   // pre-order detection fails, so the user can report the real field name.
   // Reset per scan in scanAllPages so probing survives across scans.
   let _shopeePreOrderProbeLogged = false;
+  // Passive API sniffer — captures the live endpoint URL and request-body template
+  // the FIRST TIME TikTok/Shopee fires each order-list/labels API call, then stores
+  // them for replay (bulk scan across pages). This is why content.js runs in MAIN
+  // world at document_start: ISOLATED world cannot intercept window.fetch before
+  // TikTok's own wrapper wraps it again, and __reactFiber DOM properties are not
+  // accessible cross-world. The hook NEVER modifies requests or responses, NEVER
+  // exfiltrates data, and passes every call straight through to the original fetch.
   const _origFetch = window.fetch;
   window.fetch = async function(...args) {
     // Extract URL + body, robust to both URL-string and Request-object call shapes
@@ -65,7 +72,9 @@
     return await _origFetch.apply(this, args);
   };
 
-  // XMLHttpRequest hook (Shopee uses XHR for all order APIs)
+  // XMLHttpRequest hook — same purpose as the fetch hook above. Shopee routes all
+  // order-list API calls through XHR rather than fetch, so both must be covered.
+  // Stores URL + body on open/send, never modifies or exfiltrates requests.
   const _origXhrOpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(method, url, ...rest) {
     this._qfUrl = url;
@@ -470,40 +479,16 @@
     saveVariantAliases();
   }
 
-  // Listen for messages from asset-bridge (ISOLATED world) — handles font URL,
-  // local manifest version, and remote update check (CSP-safe in ISOLATED).
-  const REPO_URL = 'https://github.com/Sittipanpee/tiktok-quick-filter';
+  // Listen for messages from asset-bridge (ISOLATED world) — font URL + manifest version.
   state.localVersion = null;
-  state.remoteVersion = null;
   window.addEventListener('message', (e) => {
     if (e.source !== window) return;
     const d = e.data;
     if (!d?.__qfAsset) return;
     if (d.__qfAsset === 'font' && d.url) state.fontUrl = d.url;
     if (d.__qfAsset === 'manifest' && d.version) state.localVersion = d.version;
-    if (d.__qfAsset === 'update' && d.remoteVersion) {
-      state.remoteVersion = d.remoteVersion;
-      if (d.localVersion) state.localVersion = d.localVersion;
-      if (state.remoteVersion && state.localVersion && state.remoteVersion !== state.localVersion) {
-        renderUpdateBadge();
-      }
-    }
   });
   window.postMessage({ __qfAsset: 'request_font' }, '*');
-
-  function renderUpdateBadge() {
-    const actions = document.getElementById('qf-header-actions');
-    if (!actions || actions.querySelector('#qf-update-btn')) return;
-    const btn = document.createElement('button');
-    btn.id = 'qf-update-btn';
-    btn.title = `อัพเดตใหม่ v${state.remoteVersion} (ปัจจุบัน v${state.localVersion}) — คลิกเพื่อดาวน์โหลด`;
-    btn.textContent = `↑ v${state.remoteVersion}`;
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      window.open(REPO_URL + '#-ติดตั้ง', '_blank');
-    });
-    actions.insertBefore(btn, actions.firstChild);
-  }
   // Expose state so the top-level fetch hook can write apiListUrl into it
   window.__qfState = state;
 
