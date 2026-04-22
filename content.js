@@ -350,6 +350,10 @@
                   <span class="qf-history-title" title="${escapeHtml(e.title)}">${escapeHtml(e.title)}</span>
                 </div>
                 <div class="qf-history-meta">${e.chunks.length} ไฟล์ · ${e.totalLabels} ใบ</div>
+                ${e.workerName ? `<div class="qf-history-packer">
+                  <span class="qf-history-packer-dot" style="background:${escapeHtml(
+                    (state.workers.find(w => w.id === e.workerId) || {}).color || '#999'
+                  )};"></span>แพ็ค: ${escapeHtml(e.workerName)}</div>` : ''}
               </div>
               <div class="qf-history-row-actions">
                 <button class="qf-history-redownload" data-id="${escapeHtml(e.id)}">ดาวน์โหลดใหม่</button>
@@ -2230,7 +2234,7 @@
     return { mode: 'multi', text: parts.join(' + ') };
   }
 
-  async function overlayAliasOnPdf(pdfBytes, fulfillUnitIds, onProgress) {
+  async function overlayAliasOnPdf(pdfBytes, fulfillUnitIds, onProgress, workerName) {
     if (!window.PDFLib) return pdfBytes;
     const { PDFDocument, rgb } = window.PDFLib;
     const fontBytes = await ensureFontBytes();
@@ -2277,6 +2281,16 @@
         }
       } else if (lines?.mode === 'multi') {
         draw(page, lines.text, 6, bigSize);
+      }
+      if (workerName) {
+        const { width: pw, height: ph } = page.getSize();
+        const wSize = Math.min(ph * 0.03, 14);
+        const wText = `แพ็ค: ${workerName}`;
+        page.drawText(wText, {
+          x: 6, y: 6, size: wSize, font,
+          color: rgb(0, 0, 0), opacity: 0.4,
+          maxWidth: pw - 12,
+        });
       }
       if (onProgress && (i % 20 === 0 || i === total - 1)) {
         onProgress(i + 1, total);
@@ -2518,13 +2532,13 @@
     const sample = chunks.slice(0, 3).map(c => c.label).join(', ')
       + (chunks.length > 3 ? ` +อีก ${chunks.length - 3}` : '');
 
-    const confirmed = await showPrintConfirm({
+    const confirm = await showPrintConfirm({
       title: `พิมพ์ ${chunks.length} ไฟล์`,
       summary: `แยก 1 ไฟล์ต่อตัวเลือก (sub-chunk ถ้า >${SUB_CHUNK_THRESHOLD} ใบ)`,
       count: totalIds,
       sampleText: sample,
     });
-    if (!confirmed) return;
+    if (!confirm) return;
 
     const stamp = makeBaseFilename('').trim(); // YYYYMMDDHHMM only
     const exportChunks = chunks.map(c => ({
@@ -2537,6 +2551,8 @@
       const ok = await runChunkedExport(exportChunks, `พิมพ์รวม ${chunks.length} ไฟล์`, {
         baseFilename: makeBaseFilename(`พิมพ์รวม-${chunks.length}ไฟล์`),
         totalLabels: totalIds,
+        workerId: confirm.workerId,
+        workerName: confirm.workerName,
       });
       if (ok) {
         // Mark expanded items (variants/combos) done
@@ -2618,10 +2634,25 @@
       const overlay = document.createElement('div');
       overlay.className = 'qf-modal-overlay';
       const overlayChecked = state.overlayEnabled ? 'checked' : '';
+      const hasWorkers = state.workers.length > 0;
+      const packerRowHtml = hasWorkers ? `
+        <div class="qf-packer-row">
+          <span class="qf-packer-label">ใครแพ็ค?</span>
+          <div class="qf-packer-pills">
+            ${state.workers.map(w => `
+              <button type="button" class="qf-packer-pill" data-worker-id="${escapeHtml(w.id)}" data-worker-name="${escapeHtml(w.name)}" data-worker-color="${escapeHtml(w.color)}">
+                <span class="qf-packer-pill-dot" style="background:${escapeHtml(w.color)};"></span>${escapeHtml(w.name)}
+              </button>
+            `).join('')}
+            <button type="button" class="qf-packer-pill qf-packer-pill-skip active" data-worker-id="" data-worker-name="">— ข้าม</button>
+          </div>
+        </div>
+      ` : '';
       overlay.innerHTML = `
         <div class="qf-modal" role="dialog">
           <div class="qf-modal-title">ยืนยันพิมพ์</div>
           <div class="qf-modal-body">
+            ${packerRowHtml}
             <div class="qf-modal-target">${escapeHtml(title)}</div>
             ${summary ? `<div class="qf-modal-summary">${escapeHtml(summary)}</div>` : ''}
             <div class="qf-modal-count">${count} ฉลาก</div>
@@ -2645,7 +2676,40 @@
         state.overlayEnabled = overlayCheck.checked;
         saveOverlayPref(state.overlayEnabled);
       });
-      const cleanup = (val) => { overlay.remove(); resolve(val); };
+      // Packer pill single-select logic
+      if (hasWorkers) {
+        overlay.querySelectorAll('.qf-packer-pill').forEach(pill => {
+          pill.addEventListener('click', () => {
+            overlay.querySelectorAll('.qf-packer-pill').forEach(p => {
+              p.classList.remove('active');
+              p.style.background = '';
+              p.style.borderColor = '';
+              p.style.color = '';
+            });
+            pill.classList.add('active');
+            const color = pill.dataset.workerColor;
+            if (color) {
+              pill.style.borderColor = color;
+              pill.style.background = color + '22';
+              pill.style.color = color;
+            }
+          });
+        });
+      }
+      const getSelectedWorker = () => {
+        if (!hasWorkers) return { workerId: null, workerName: null };
+        const active = overlay.querySelector('.qf-packer-pill.active');
+        return {
+          workerId: active?.dataset.workerId || null,
+          workerName: active?.dataset.workerName || null,
+        };
+      };
+      const cleanup = (ok) => {
+        overlay.remove();
+        if (!ok) { resolve(false); return; }
+        const { workerId, workerName } = getSelectedWorker();
+        resolve({ ok: true, workerId: workerId || null, workerName: workerName || null });
+      };
       overlay.querySelector('.qf-btn-cancel').onclick = () => cleanup(false);
       overlay.querySelector('.qf-btn-confirm').onclick = () => cleanup(true);
       overlay.onclick = (e) => { if (e.target === overlay) cleanup(false); };
@@ -2654,7 +2718,7 @@
     });
   }
 
-  async function buildChunkPdf(ids, onProgress) {
+  async function buildChunkPdf(ids, onProgress, workerName) {
     const { PDFDocument } = window.PDFLib;
 
     // Split ids into API batches (max PRINT_BATCH_SIZE each)
@@ -2726,7 +2790,7 @@
           modifiedBytes = await overlayAliasOnPdf(pdfBytes, batch, (cur, totPages) => {
             batchProgress[bi] = 0.40 + 0.50 * (cur / totPages);
             reportProgress();
-          });
+          }, workerName);
         } catch (e) {
           console.warn('[QF] overlay failed, using original:', e);
           modifiedBytes = pdfBytes;
@@ -2776,12 +2840,13 @@
     }
     if (!ids.length) { showToast('ไม่พบ ID สำหรับพิมพ์ — ลองสแกนใหม่', 3000); return false; }
 
-    const confirmed = await showPrintConfirm({
+    const confirm = await showPrintConfirm({
       title: displayLabel || 'พิมพ์ฉลาก',
       count: ids.length,
       sampleText,
     });
-    if (!confirmed) return false;
+    if (!confirm) return false;
+    const { workerId, workerName } = confirm;
 
     let chunkCount = 1;
     if (!opts.forceSingleFile && ids.length > 200) {
@@ -2807,13 +2872,16 @@
     return runChunkedExport(chunks, displayLabel || 'พิมพ์ฉลาก', {
       baseFilename,
       totalLabels: ids.length,
+      workerId,
+      workerName,
     });
   }
 
   // runChunkedExport(chunks, title, historyMeta)
   //   historyMeta = null → skip history (e.g., re-download from history itself)
-  //   historyMeta = {baseFilename, totalLabels} → save entry after allDone
+  //   historyMeta = {baseFilename, totalLabels, workerId?, workerName?} → save entry after allDone
   async function runChunkedExport(chunks, displayTitle, historyMeta) {
+    const workerName = historyMeta?.workerName || null;
     const totalIds = chunks.reduce((a, c) => a + c.ids.length, 0);
     const result = showChunkedResult({
       title: displayTitle,
@@ -2826,7 +2894,7 @@
       try {
         const { bytes, pageCount } = await buildChunkPdf(chunks[ci].ids, (pct, label) => {
           result.updateChunkProgress(ci, pct, label);
-        });
+        }, workerName);
         const blob = new Blob([bytes], {type: 'application/pdf'});
         const url = URL.createObjectURL(blob);
         result.completeChunk(ci, {url, pageCount});
@@ -2863,6 +2931,8 @@
             ids: [...c.ids],
           })),
           platform: 'tiktok',
+          workerId: historyMeta.workerId || null,
+          workerName: historyMeta.workerName || null,
         });
         renderHistoryBadge();
       } catch (e) {
@@ -2952,16 +3022,18 @@
       }
     }
     const totalIds = chunks.reduce((s, c) => s + c.ids.length, 0);
-    const confirmed = await showPrintConfirm({
+    const confirm = await showPrintConfirm({
       title: `${product?.productName || productId}`,
       summary: `แยก ${chunks.length} ไฟล์ตามตัวเลือก`,
       count: totalIds,
       sampleText: `${baseName} · ...`,
     });
-    if (!confirmed) return false;
+    if (!confirm) return false;
     return runChunkedExport(chunks, `${alias || product?.productName} (แยกตามตัวเลือก)`, {
       baseFilename: makeBaseFilename(baseName),
       totalLabels: totalIds,
+      workerId: confirm.workerId,
+      workerName: confirm.workerName,
     });
   }
 

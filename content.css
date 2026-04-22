@@ -1268,6 +1268,63 @@ html[data-qf-theme="shopee"] .qf-combo-card.qf-select-mode {
   margin-top: 12px;
   line-height: 1.5;
 }
+.qf-packer-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  background: #fafafa;
+  border-radius: 6px;
+  margin-bottom: 10px;
+}
+.qf-packer-label {
+  font-size: 12px;
+  color: #555;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.qf-packer-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.qf-packer-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border: 1.5px solid #ddd;
+  border-radius: 12px;
+  background: #fff;
+  font-size: 12px;
+  color: #555;
+  cursor: pointer;
+  transition: all 0.12s;
+  white-space: nowrap;
+}
+.qf-packer-pill:hover {
+  border-color: #aaa;
+}
+.qf-packer-pill.active {
+  font-weight: 600;
+}
+.qf-packer-pill-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.qf-packer-pill-skip {
+  border-style: dashed;
+  color: #888;
+}
+.qf-packer-pill-skip.active {
+  border-color: #999;
+  background: #f5f5f5;
+  color: #444;
+  font-weight: 400;
+}
 .qf-modal-actions {
   display: flex;
   gap: 8px;
@@ -2049,6 +2106,20 @@ html[data-qf-theme="shopee"] .qf-history-modal-close:hover { color: #ee4d2d; }
   font-size: 11px;
   color: #6b7280;
   margin-top: 2px;
+}
+.qf-history-packer {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: #555;
+  margin-top: 2px;
+}
+.qf-history-packer-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
 }
 .qf-history-row-actions {
   display: flex;
