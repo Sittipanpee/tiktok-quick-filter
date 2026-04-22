@@ -2197,12 +2197,13 @@ html[data-qf-theme="shopee"] .qf-history-redownload:hover { background: #d4441f;
   z-index: 10000001;
   overflow: hidden;
 }
-.qf-settings-menu button {
+#qf-header-actions .qf-settings-menu button {
   display: block;
   width: 100%;
   padding: 9px 14px;
   background: transparent;
   border: none;
+  border-radius: 0;
   text-align: left;
   font-size: 12px;
   font-weight: 500;
@@ -2210,7 +2211,8 @@ html[data-qf-theme="shopee"] .qf-history-redownload:hover { background: #d4441f;
   cursor: pointer;
   font-family: inherit;
 }
-.qf-settings-menu button:hover { background: #f6f7f8; }
+#qf-header-actions .qf-settings-menu button:hover { background: #f6f7f8; }
+#qf-header-actions .qf-settings-menu button:disabled { color: #9ca3af; cursor: not-allowed; }
 
 /* ==================== WORKERS MODAL ==================== */
 .qf-workers-modal {
