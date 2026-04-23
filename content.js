@@ -285,9 +285,12 @@
   function saveLabelOverlay(cfg) { try { localStorage.setItem(LABEL_OVERLAY_KEY, JSON.stringify(cfg)); } catch {} }
 
   // Calibrated J&T mask rects (bottom-left PDF coords, A6 298×420pt, pixel-scanned @ 2x).
+  // Side column heights extended to y=400 to fully cover the vertical tracking
+  // numbers (calibrated at barcodeLeft y=187..397 and barcodeRight y=79..400).
+  // Width unchanged — widening would clip the address block which starts at x≈14.
   const J_AND_T_MASK_RECTS = [
-    { x: 0,   y: 38,   w: 17,  h: 244 }, // vertical OCR column L — top at y=282, extended bottom to y=38
-    { x: 283, y: 38,   w: 15,  h: 244 }, // vertical OCR column R — top at y=282, extended bottom to y=38
+    { x: 0,   y: 38,   w: 17,  h: 362 }, // vertical OCR column L — y=38..400 (was h=244 ending at y=282)
+    { x: 283, y: 38,   w: 15,  h: 362 }, // vertical OCR column R — y=38..400 (was h=244)
     { x: 0,   y: 41.5, w: 95,  h: 20  }, // TikTok Shop footer logo (preserve Order ID x>190)
     { x: 0,   y: 75,   w: 298, h: 3   }, // h-line above Qty Total
     { x: 0,   y: 62,   w: 298, h: 2   }, // h-line above footer row
@@ -2602,12 +2605,17 @@
         row.querySelector('.qf-chunk-row-fill').style.width = (pct * 100).toFixed(0) + '%';
         if (label) row.querySelector('.qf-chunk-row-status').textContent = label;
       },
-      completeChunk(i, {url, pageCount}) {
+      completeChunk(i, {url, pageCount, labelCount}) {
         const row = cards[i];
         const filename = chunks[i].filename || `chunk-${i+1}.pdf`;
         blobUrls[i] = {url, filename, downloaded: false};
         row.querySelector('.qf-chunk-row-fill').style.width = '100%';
-        row.querySelector('.qf-chunk-row-status').textContent = `${pageCount} หน้า`;
+        // Display "N ใบ · M หน้า" when dividers/picking-lists add pages beyond
+        // the label count. When page count equals label count, keep the short form.
+        const statusText = (labelCount != null && pageCount != null && pageCount !== labelCount)
+          ? `${labelCount} ใบ · ${pageCount} หน้า`
+          : (labelCount != null ? `${labelCount} ใบ` : `${pageCount} หน้า`);
+        row.querySelector('.qf-chunk-row-status').textContent = statusText;
         row.classList.remove('qf-chunk-active');
         row.classList.add('qf-chunk-done');
         const actions = row.querySelector('.qf-chunk-row-actions');
@@ -2988,34 +2996,44 @@
           page.drawRectangle({ x: r.x, y: r.y, width: r.w, height: r.h, color: rgb(1,1,1), borderWidth: 0 });
         }
 
-        // 2. Vertical marketing text in masked columns (rotated 90°), centered in 220pt zone
+        // 2. Vertical marketing text in masked columns (rotated 90°), centered in 362pt zone
         const mktText = (lo.marketingText || '').slice(0, 50);
         if (mktText) {
-          const colSize = Math.max(5.5, Math.min(9, 120 / Math.max(mktText.length, 13)));
+          // Font scale: short text (≤13 chars) gets max 12pt; longer text scales down to 7pt floor.
+          // Coefficient 160 = designer's visual sweet spot between legibility and restraint.
+          const colSize = Math.max(7, Math.min(12, 160 / Math.max(mktText.length, 13)));
           const mktW = font.widthOfTextAtSize(mktText, colSize);
-          // Mask zone: y=38..282 (244pt). Aim center at y=200 (upper half) for visual emphasis.
-          const colY = Math.max(64, Math.min(200 - mktW / 2, 278 - mktW));
-          page.drawText(mktText, { x: 9,   y: colY, size: colSize, font, color: rgb(0,0,0), rotate: degrees(90), opacity: OP });
-          page.drawText(mktText, { x: 291, y: colY, size: colSize, font, color: rgb(0,0,0), rotate: degrees(90), opacity: OP });
+          // Mask zone: y=38..400 (362pt). Center at y=219 → vertical midpoint, reads calmly.
+          const colY = Math.max(38, Math.min(219 - mktW / 2, 400 - mktW));
+          // Baseline x shifted inward to keep ascenders inside mask at larger font sizes:
+          //   left mask  x=0..17  → baseline x=11.5 (ascenders reach x≈2.5 at 12pt)
+          //   right mask x=283..298 → baseline x=293.5 (ascenders reach x≈284.5 at 12pt)
+          page.drawText(mktText, { x: 11.5,  y: colY, size: colSize, font, color: rgb(0,0,0), rotate: degrees(90), opacity: OP });
+          page.drawText(mktText, { x: 293.5, y: colY, size: colSize, font, color: rgb(0,0,0), rotate: degrees(90), opacity: OP });
         }
 
         // 3. Shop image + header main/sub — only for single-SKU orders (not multi-SKU combo)
         const isSingleSku = lines?.mode !== 'multi';
         if (isSingleSku) {
-          // Image slot: x=2..24, y=42..64 (22×22pt, inside masked footer zone)
+          // Image slot: x=5..27, y=42..64 (22×22pt). Left padding 5pt (was 2pt) for breathing room.
           if (shopImg) {
-            page.drawImage(shopImg, { x: 2, y: 42, width: 22, height: 22, opacity: OP });
+            page.drawImage(shopImg, { x: 5, y: 42, width: 22, height: 22, opacity: OP });
           }
-          const hdrX = shopImg ? 26 : 2;
-          const hdrMaxW = 163; // up to x=189 (Order ID starts x>190)
+          // Header left padding: 30pt from edge (image+gap 22+3=25, then 5pt base = 30)
+          // No-image fallback: 12pt indent for aligned visual rhythm.
+          const hdrX = shopImg ? 30 : 12;
+          // maxW: Order ID starts x≈190 — leave 5pt safety margin (ends at x=185).
+          const hdrMaxW = shopImg ? 155 : 173;
           const h1 = (lo.headerMain || '').slice(0, 50);
           const h2 = (lo.headerSub || '').slice(0, 50);
+          // h1 baseline y=54 @ 9pt → occupies y≈51.75..60.75 (safely between masks at 62 and 41.5)
+          // h2 baseline y=44 @ 7pt → occupies y≈42.25..49.25 (3pt gap from h1 for designer rhythm)
           if (h1) {
-            const { size: s1, width: w1 } = fitWidth(h1, 7, hdrMaxW);
-            page.drawText(h1, { x: hdrX, y: 55, size: s1, font, color: rgb(0,0,0), opacity: OP });
+            const { size: s1 } = fitWidth(h1, 9, hdrMaxW);
+            page.drawText(h1, { x: hdrX, y: 54, size: s1, font, color: rgb(0,0,0), opacity: OP });
           }
           if (h2) {
-            const { size: s2 } = fitWidth(h2, 5.5, hdrMaxW);
+            const { size: s2 } = fitWidth(h2, 7, hdrMaxW);
             page.drawText(h2, { x: hdrX, y: 44, size: s2, font, color: rgb(0,0,0), opacity: OP });
           }
         }
@@ -3727,9 +3745,16 @@
     return { bytes, pageCount };
   }
 
-  // Sub-group ids by (productId:skuId) then by carrier so each SKU × carrier
-  // combination gets its own divider. Sorted by alias → carrierName.
-  function subGroupByCarrier(ids) {
+  // Sub-group ids by (productId:skuId, carrier, qty) so each SKU × carrier × qty
+  // combination gets its own divider. Sorted by alias → variant → qty ASC → carrier.
+  //
+  // Qty dimension added so "1 SKU หลายชิ้น" (e.g. mint soap qty:2 vs qty:3) gets
+  // separate dividers per qty bucket — makes packers' life easier when they need
+  // to stuff N items per order.
+  //
+  // When all ids in a result bucket share qty=1 (or qty=null), divider renders
+  // without qty suffix (backward-compat visual).
+  function subGroupByCarrierAndQty(ids) {
     const bucketMap = new Map();
     for (const id of ids) {
       const rec = state.records.get(id);
@@ -3738,13 +3763,16 @@
       const skuKey = `${s.productId || ''}:${s.skuId || ''}`;
       const carrierId = state.carrierOf.get(id) || 'unknown';
       const carrier = state.carriers.get(carrierId) || { name: 'ไม่ระบุ', iconUrl: '' };
-      const key = `${skuKey}|${carrierId}`;
+      // Normalize qty: treat 0 / null / undefined as 1 (defensive).
+      const qty = Math.max(1, Number(s.quantity) || 1);
+      const key = `${skuKey}|${carrierId}|q${qty}`;
       if (!bucketMap.has(key)) {
         const aliasRaw = (getAlias(s.productId) || '').trim();
         const variantInfo = getVariantInfo(s.productId, s.skuId);
         bucketMap.set(key, {
           skuKey,
           carrierId,
+          qty,
           alias: aliasRaw || shortName(s.productName || ''),
           officialName: s.productName || '',
           variantName: (variantInfo?.alias || '').trim() || (s.skuName || ''),
@@ -3759,8 +3787,31 @@
     return [...bucketMap.values()].sort((a, b) => {
       const aliasCmp = a.alias.localeCompare(b.alias, 'th');
       if (aliasCmp !== 0) return aliasCmp;
+      const variantCmp = a.variantName.localeCompare(b.variantName, 'th');
+      if (variantCmp !== 0) return variantCmp;
+      if (a.qty !== b.qty) return a.qty - b.qty;
       return a.carrierName.localeCompare(b.carrierName, 'th');
     });
+  }
+
+  // Backward-compat alias — older callers expect the non-qty grouping.
+  // Kept because callers outside the divider-insertion path (e.g. filenames)
+  // may still expect flat SKU × carrier semantics.
+  function subGroupByCarrier(ids) {
+    // Re-bucket the qty-grouped results back to (sku, carrier) level by merging
+    // qty buckets. Preserves sort order of the first qty bucket we see.
+    const qtyGrouped = subGroupByCarrierAndQty(ids);
+    const merged = new Map();
+    for (const b of qtyGrouped) {
+      const k = `${b.skuKey}|${b.carrierId}`;
+      if (!merged.has(k)) {
+        merged.set(k, { ...b, ids: [...b.ids] });
+        delete merged.get(k).qty; // non-qty grouping drops the qty field
+      } else {
+        merged.get(k).ids.push(...b.ids);
+      }
+    }
+    return [...merged.values()];
   }
 
   // Prepend per-subgroup divider pages to an existing label PDF. Reorders by
@@ -3769,7 +3820,9 @@
   // the API so page index → id can be inferred.
   async function prependDividersToChunk(labelBytes, idOrder, workerName) {
     const { PDFDocument } = window.PDFLib;
-    const subs = subGroupByCarrier(idOrder);
+    // Phase 2: group by (sku, carrier, qty) — creates divider per qty bucket
+    // so mixed-qty prints (e.g. soap ×2 + soap ×3) get separate headers.
+    const subs = subGroupByCarrierAndQty(idOrder);
     if (subs.length === 0) return { bytes: labelBytes, pageCount: null };
 
     const labelDoc = await PDFDocument.load(labelBytes);
@@ -3799,6 +3852,7 @@
         carrierName: sub.carrierName,
         carrierIconURL: sub.carrierIconURL,
         qty: sub.ids.length,
+        orderQty: sub.qty || 1, // per-order item count — divider highlights when > 1
       }, font, workerName);
       const pageIdx = sub.ids
         .map(id => pageByIdIdx.get(id))
@@ -4095,8 +4149,13 @@
     }
 
     // Qty (always shown unless preset hides)
+    // When orderQty > 1 (same SKU ordered in multi-units per order), highlight
+    // the per-order qty prominently — packers must pack N pieces per waybill.
     if (cfg.showQty) {
-      const qtyText = `จำนวนทั้งหมด: ${payload.qty} ใบ`;
+      const orderQty = Math.max(1, Number(payload.orderQty) || 1);
+      const qtyText = orderQty > 1
+        ? `×${orderQty} ชิ้น/ออเดอร์ · ${payload.qty} ใบ`
+        : `จำนวนทั้งหมด: ${payload.qty} ใบ`;
       const qtySize = 13 * mult('qty');
       const qtyW = font.widthOfTextAtSize(qtyText, qtySize);
       page.drawText(qtyText, {
@@ -4464,10 +4523,11 @@
     for (let gi = 0; gi < groups.length; gi++) {
       const grp = groups[gi];
 
-      // When divider is on, sub-group by carrier so each (SKU × carrier)
-      // combination gets its own divider + block of labels — กันแพ็คผิด
-      // เมื่อ SKU เดียวกันมีหลายขนส่ง.
-      const subs = withDivider ? subGroupByCarrier(grp.ids) : null;
+      // When divider is on, sub-group by (carrier, qty) so each
+      // (SKU × carrier × qty) combination gets its own divider + block of labels
+      // — กันแพ็คผิดเมื่อ SKU เดียวกันมีหลายขนส่ง / หลาย qty
+      // (e.g. สบู่มิ้น ×2 กับ สบู่มิ้น ×3 คนละหน้าคั่น).
+      const subs = withDivider ? subGroupByCarrierAndQty(grp.ids) : null;
       const parts = (subs && subs.length > 0)
         ? subs.map(s => ({
             ids: s.ids,
@@ -4477,6 +4537,7 @@
             productImageURL: s.productImageURL || grp.productImageURL,
             carrierName: s.carrierName,
             carrierIconURL: s.carrierIconURL,
+            orderQty: s.qty || 1,
           }))
         : [{
             ids: grp.ids,
@@ -4486,6 +4547,7 @@
             productImageURL: grp.productImageURL,
             carrierName: null,
             carrierIconURL: null,
+            orderQty: 1,
           }];
 
       for (let pi = 0; pi < parts.length; pi++) {
@@ -4519,6 +4581,7 @@
             carrierName: part.carrierName,
             carrierIconURL: part.carrierIconURL,
             qty: part.ids.length,
+            orderQty: part.orderQty || 1,
           }, font, workerName);
         }
 
@@ -4724,7 +4787,14 @@
       chunks: chunks.map(c => ({count: c.ids.length, label: c.label, filename: c.filename})),
     });
 
+    // §Parallelism diagnostic — emit per-chunk timing so user can verify in DevTools
+    // that all chunks fire concurrently (start deltas should be <100ms between chunks).
+    const runStartMs = performance.now();
+    console.log(`[QF] runChunkedExport: ${chunks.length} chunks start (parallel)`);
+
     const runChunk = async (ci) => {
+      const chunkStartMs = performance.now();
+      console.log(`[QF]   chunk ${ci + 1}/${chunks.length} start @ +${(chunkStartMs - runStartMs).toFixed(0)}ms`);
       result.startChunk(ci);
       try {
         let bytes, pageCount;
@@ -4813,7 +4883,9 @@
 
         const blob = new Blob([bytes], {type: 'application/pdf'});
         const url = URL.createObjectURL(blob);
-        result.completeChunk(ci, {url, pageCount});
+        const labelCount = (chunks[ci].ids || []).length;
+        console.log(`[QF]   chunk ${ci + 1}/${chunks.length} done in ${(performance.now() - chunkStartMs).toFixed(0)}ms (${labelCount} ใบ → ${pageCount} หน้า)`);
+        result.completeChunk(ci, {url, pageCount, labelCount});
         return true;
       } catch (e) {
         console.error('[QF] chunk', ci+1, 'failed:', e);
@@ -4828,6 +4900,7 @@
     // Run all chunks fully in parallel — user can throttle by choosing fewer
     // chunks; each chunk already fires its own batches in parallel internally.
     await Promise.all(chunks.map((_, ci) => runChunk(ci)));
+    console.log(`[QF] runChunkedExport: all ${chunks.length} chunks done in ${(performance.now() - runStartMs).toFixed(0)}ms total`);
     result.allDone();
 
     // Save history entry for TikTok prints only. Shopee print isn't wired
@@ -7667,49 +7740,72 @@
         });
 
       } else if (mode === 'combined-per-person') {
-        // Each worker gets a prebuilt combined-SKU PDF
-        const exportChunks = [];
+        // Each worker gets a prebuilt combined-SKU PDF — run in parallel with
+        // concurrency cap 3 to avoid RAM spike + main-thread overload.
+        const exportChunks = new Array(nonDone.length);
         const prepProgress = showProgress(`กำลังเตรียม PDF รวม (${nonDone.length} คน · ${allPrintIds.length} ฉลาก)`);
+        const workerProgress = new Float64Array(nonDone.length);
+        const CONCURRENCY = 3;
+        const reportAggregate = () => {
+          const sum = workerProgress.reduce((a, b) => a + b, 0);
+          const pct = (sum / nonDone.length) * 100;
+          const active = [...workerProgress].filter(p => p > 0 && p < 1).length;
+          prepProgress.update(pct, active > 0
+            ? `กำลังสร้าง ${active} ไฟล์พร้อมกัน · ${pct.toFixed(0)}%`
+            : 'พร้อมแล้ว');
+        };
         try {
-          for (let wi = 0; wi < nonDone.length; wi++) {
-            const [, col] = nonDone[wi];
-            const colIds = col.fulfillUnitIds.filter(id => !col.printedIds.includes(id));
-            const workerName = col.teamName || col.workerName || null;
-            const hint = workerName || 'plan';
-            const basePct = (wi / nonDone.length) * 100;
-            prepProgress.update(basePct, `กำลังสร้าง ${hint} (${wi + 1}/${nonDone.length})`);
-            const groupMap = new Map();
-            for (const id of colIds) {
-              const rec = state.records.get(id);
-              if (!rec?.skuList?.length) continue;
-              const s = rec.skuList[0];
-              const key = `${s.productId}:${s.skuId}`;
-              if (!groupMap.has(key)) {
-                const alias = (getAlias(s.productId) || '').trim();
-                const variantInfo = getVariantInfo(s.productId, s.skuId);
-                groupMap.set(key, {
-                  productId: s.productId, skuId: s.skuId,
-                  alias: alias || shortName(s.productName),
-                  officialName: s.productName || '',
-                  variantName: (variantInfo?.alias || '').trim() || (s.skuName || s.sellerSkuName || ''),
-                  productImageURL: s.productImageURL || null,
-                  ids: [],
-                });
+          console.time('[QF] combined-per-person parallel build');
+          // Simple promise-pool: keep ≤CONCURRENCY in-flight at any time.
+          let nextIdx = 0;
+          const runOne = async () => {
+            while (nextIdx < nonDone.length) {
+              const wi = nextIdx++;
+              const [, col] = nonDone[wi];
+              const colIds = col.fulfillUnitIds.filter(id => !col.printedIds.includes(id));
+              const workerName = col.teamName || col.workerName || null;
+              const hint = workerName || 'plan';
+              const groupMap = new Map();
+              for (const id of colIds) {
+                const rec = state.records.get(id);
+                if (!rec?.skuList?.length) continue;
+                const s = rec.skuList[0];
+                const key = `${s.productId}:${s.skuId}`;
+                if (!groupMap.has(key)) {
+                  const alias = (getAlias(s.productId) || '').trim();
+                  const variantInfo = getVariantInfo(s.productId, s.skuId);
+                  groupMap.set(key, {
+                    productId: s.productId, skuId: s.skuId,
+                    alias: alias || shortName(s.productName),
+                    officialName: s.productName || '',
+                    variantName: (variantInfo?.alias || '').trim() || (s.skuName || s.sellerSkuName || ''),
+                    productImageURL: s.productImageURL || null,
+                    ids: [],
+                  });
+                }
+                groupMap.get(key).ids.push(id);
               }
-              groupMap.get(key).ids.push(id);
+              const groups = [...groupMap.values()].sort((a, b) => a.alias.localeCompare(b.alias));
+              workerProgress[wi] = 0.01; // mark in-flight
+              reportAggregate();
+              try {
+                const { bytes } = await buildMultiSkuCombinedPdf(
+                  groups, workerName, col.workerIcon || null, plan.withPickingList,
+                  (pct) => { workerProgress[wi] = pct / 100; reportAggregate(); },
+                  plan.withDivider
+                );
+                workerProgress[wi] = 1;
+                reportAggregate();
+                exportChunks[wi] = { ids: colIds, label: hint, filename: makeBaseFilename(`[${hint}]`) + '.pdf', prebuiltBytes: bytes };
+              } catch (_) {
+                workerProgress[wi] = 1;
+                reportAggregate();
+                exportChunks[wi] = { ids: colIds, label: hint, filename: makeBaseFilename(`[${hint}]`) + '.pdf' };
+              }
             }
-            const groups = [...groupMap.values()].sort((a, b) => a.alias.localeCompare(b.alias));
-            try {
-              const { bytes } = await buildMultiSkuCombinedPdf(
-                groups, workerName, col.workerIcon || null, plan.withPickingList,
-                (pct) => prepProgress.update(basePct + (pct / nonDone.length), `${hint} · ${pct.toFixed(0)}%`),
-                plan.withDivider
-              );
-              exportChunks.push({ ids: colIds, label: hint, filename: makeBaseFilename(`[${hint}]`) + '.pdf', prebuiltBytes: bytes });
-            } catch (_) {
-              exportChunks.push({ ids: colIds, label: hint, filename: makeBaseFilename(`[${hint}]`) + '.pdf' });
-            }
-          }
+          };
+          await Promise.all(Array.from({ length: Math.min(CONCURRENCY, nonDone.length) }, () => runOne()));
+          console.timeEnd('[QF] combined-per-person parallel build');
           prepProgress.update(100, 'พร้อมแล้ว');
         } finally {
           document.querySelectorAll('.qf-progress-overlay').forEach(e => e.remove());

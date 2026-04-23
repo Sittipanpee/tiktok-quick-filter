@@ -57,7 +57,8 @@ Chrome Extension (Manifest V3) ฝัง floating widget ในหน้า TikT
 | Fetch hook | `const _origFetch = window.fetch` (บรรทัดต้นๆ) | ดักจับ API ทุก call |
 | Scan labels page | `scanLabelsPage()` | API + DOM fallback |
 | Scan order page | `scanOrderPage()` / `awaitBodyTemplate()` | capture body template |
-| Print labels | `printIds()` → `runChunkedExport()` | chunk + PDF overlay |
+| Print labels | `printIds()` → `runChunkedExport()` | chunk + PDF overlay · id-based budget |
+| Divider per (sku × carrier × qty) | `subGroupByCarrierAndQty()` → `buildDividerPage()` | group by qty; `×N ชิ้น/ออเดอร์` เมื่อ qty>1 |
 | PDF alias overlay | `overlayAliasOnPdf()` | Sarabun, opacity 0.4 |
 | Product alias | `getAlias()` / `setAlias()` | localStorage, platform-prefixed |
 | Variant alias | `getVariantInfo()` / `setVariantInfo()` | same key pattern |
@@ -145,6 +146,17 @@ Scan → state.records (Map<fulfillUnitId, record>)
      → รับ doc_url → fetch PDF → overlayAliasOnPdf() → blob URL
      → window.open() / runChunkedExport() → showChunkedResult()
 ```
+
+**Chunk budget semantics (id-based, Option A):**
+- `every:200` → 200 labels per chunk = 200 ids per chunk
+- Dividers + picking-list pages are added **after** chunking → extras ไม่ถูกนับเป็นสมาชิก chunk
+- ดังนั้น 1700 labels × 200/chunk = 9 ไฟล์ (200+200+...+100 = 1700 labels) แต่ page count จริงของแต่ละไฟล์อาจ 205/208 ฯลฯ
+- `showChunkedResult.completeChunk()` แสดง `${labelCount} ใบ · ${pageCount} หน้า` เมื่อสองค่าต่างกัน
+
+**Parallel execution (all chunked paths):**
+- `runChunkedExport` ใช้ `Promise.all(chunks.map(runChunk))` → ทุก chunk ยิง API + overlay + merge พร้อมกัน
+- `printAllPlanColumns` combined-per-person path → promise pool CONCURRENCY=3 (กัน RAM spike จาก pdf-lib)
+- Diagnostic: DevTools console จะ print `[QF] chunk N/M start @ +Xms` → ค่าเริ่มต้น chunks ทั้งหมดควรอยู่ภายใน 100ms (ยืนยัน parallelism)
 
 ### Planning mode flow
 
