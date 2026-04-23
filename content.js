@@ -2886,20 +2886,46 @@
     return (s.skuName || s.sellerSkuName || '').trim();
   }
 
-  function buildSkuRender(s) {
-    // primary = big top line (alias + qty), secondary = small bottom (variant name only)
+  // Resolve alias lines for a SKU with strict "user-set wins" semantics.
+  //
+  //   rawAlias        = explicit product alias set by user (empty string if not set)
+  //   variantOverride = explicit variant alias set by user (empty if not set)
+  //
+  // Rule (per user request): when the user has set a product alias, we must NOT
+  // fall back to the SKU default name from the API in the secondary/variant slot
+  // — otherwise the user's customization is drowned out by TikTok's verbose
+  // default names. Fallback to API/shortName only applies when NO product alias
+  // is set (so the label is still readable for un-aliased products).
+  function resolveSkuAlias(s) {
     const v = getVariantInfo(s.productId, s.skuId);
-    const productAlias = (getAlias(s.productId) || '').trim() || shortName(s.productName);
+    const rawAlias = (getAlias(s.productId) || '').trim();
     const variantOverride = (v?.alias || '').trim();
-    const variantName = variantOverride || variantDisplayName(s);
-    const qty = s.quantity || 1;
+    const hasProductAlias = !!rawAlias;
+    const productDisplay = rawAlias || shortName(s.productName);
+    // Variant slot: prefer explicit override; fall back to API name ONLY when
+    // no product alias is set; otherwise blank (user has spoken).
+    const variantDisplay = variantOverride
+      || (hasProductAlias ? '' : variantDisplayName(s));
+    return {
+      productDisplay,
+      variantDisplay,
+      variantOverride,
+      hasProductAlias,
+      replace: !!(v?.replace && variantOverride),
+      qty: s.quantity || 1,
+    };
+  }
 
-    if (v?.replace && variantOverride) {
-      return { primary: `${variantOverride} x${qty}`, secondary: '' };
+  function buildSkuRender(s) {
+    // primary = big top line (alias + qty), secondary = small bottom (variant-only).
+    // Replace mode → variant alias fully stands in for product display.
+    const r = resolveSkuAlias(s);
+    if (r.replace) {
+      return { primary: `${r.variantOverride} x${r.qty}`, secondary: '' };
     }
     return {
-      primary: `${productAlias} x${qty}`,
-      secondary: variantName,
+      primary: `${r.productDisplay} x${r.qty}`,
+      secondary: r.variantDisplay,
     };
   }
 
@@ -2911,13 +2937,11 @@
     }
     // Multi-SKU: "alias variant qty + alias variant qty"
     const parts = record.skuList.map(s => {
-      const v = getVariantInfo(s.productId, s.skuId);
-      const productAlias = (getAlias(s.productId) || '').trim() || shortName(s.productName);
-      const variantOverride = (v?.alias || '').trim();
-      const variantName = variantOverride || variantDisplayName(s);
-      const qty = s.quantity || 1;
-      if (v?.replace && variantOverride) return `${variantOverride} x${qty}`;
-      return variantName ? `${productAlias} ${variantName} x${qty}` : `${productAlias} x${qty}`;
+      const r = resolveSkuAlias(s);
+      if (r.replace) return `${r.variantOverride} x${r.qty}`;
+      return r.variantDisplay
+        ? `${r.productDisplay} ${r.variantDisplay} x${r.qty}`
+        : `${r.productDisplay} x${r.qty}`;
     });
     return { mode: 'multi', text: parts.join(' + ') };
   }
