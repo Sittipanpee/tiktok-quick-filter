@@ -919,22 +919,23 @@
     return true;
   }
 
-  // Labels-page done: computed per active filter, not stored as product-level timestamp.
-  // A product/variant/combo is done iff every fulfillUnitId that's currently visible
-  // (passes carrier + pre-order filter) has been printed this session OR was already
-  // marked printed (labelStatus=50) by the API. Resets on scan.
+  // Labels-page done: session-local only — a product/variant/combo is "done"
+  // iff every visible fulfillUnitId was printed through THIS extension session
+  // (tracked in state.printedUnitIds, which clears on each scan).
   //
-  // Under "พิมพ์แล้ว" filter, every visible item is inherently printed, so marking
-  // them as done/locked would block reprinting — which IS the point of that filter.
-  // Treat that filter as a dedicated reprint view: no done state applies.
+  // Server-side labelStatus=50 is intentionally NOT treated as done here: the
+  // user may re-scan previously printed labels specifically TO reprint them
+  // (replacement after lost/damaged labels), so cards must remain clickable.
+  // The only signal that truly means "user just printed this" is the extension
+  // having added the id to printedUnitIds.
+  //
+  // Under "พิมพ์แล้ว" filter every visible item is already printed server-side;
+  // marking them done would defeat the filter's purpose (reprint view).
   function isLabelsDone(idSet) {
     if (state.labelStatusFilter === 'printed') return false;
     const visible = [...idSet].filter(id => passesCarrier(id) && passesPreOrder(id));
     if (!visible.length) return false;
-    return visible.every(id => {
-      if (state.printedUnitIds.has(id)) return true;
-      return state.records.get(id)?.labelStatus === LABEL_STATUS_PRINTED;
-    });
+    return visible.every(id => state.printedUnitIds.has(id));
   }
 
   function simulateClick(el) {
@@ -6632,11 +6633,17 @@
             const chipsRow = document.createElement('div');
             chipsRow.className = 'qf-qty-chips';
             for (const b of qtyBuckets) {
-              // allDone = no pending items left in this bucket (and some existed).
-              const allDone = b.ids.length === 0 && b.totalIds.length > 0 && state.labelStatusFilter !== 'printed';
-              // When chip is done, "ids" is empty — swap to totalIds so the reprint
+              // Done only when EVERY visible id was printed through this session
+              // (state.printedUnitIds). Server-side labelStatus=50 is ignored so
+              // the chip stays clickable when user scans previously-printed
+              // labels intending to reprint.
+              const allDone = state.labelStatusFilter !== 'printed'
+                && b.totalIds.length > 0
+                && b.totalIds.every(id => state.printedUnitIds.has(id));
+              // When chip is done and current filter hides printed items, the
+              // "ids" (pending list) is empty — swap to totalIds so the reprint
               // handler has something to work with.
-              if (allDone) b.ids = b.totalIds;
+              if (allDone && b.ids.length === 0) b.ids = b.totalIds;
               const chip = document.createElement('span');
               chip.className = 'qf-qty-chip' + (allDone ? ' qf-qty-chip--done' : '');
               chip.dataset.qty = b.qty;

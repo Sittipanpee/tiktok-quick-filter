@@ -355,6 +355,13 @@ agent-browser --cdp 9222 snapshot -i
 - Sort: done cards ถูก push ไปท้ายลิสต์ (`a._count === 0` → bottom)
 - ทั้ง products, variant badges, qty chips, combos ใช้ pattern เดียวกัน
 
+**Done state = session-local เท่านั้น** (สำคัญสำหรับ reprint):
+- `isLabelsDone(idSet)` ดูแค่ `state.printedUnitIds.has(id)` — **ไม่** ดู `rec.labelStatus === 50` จาก server
+- qty chip `allDone` ก็ใช้ `totalIds.every(id => state.printedUnitIds.has(id))` เช่นเดียวกัน
+- เหตุผล: user อาจ scan สินค้าที่พิมพ์ไปแล้ว (ฉลากหาย/เสีย) เพื่อจะ reprint → card ต้องคลิกพิมพ์ได้ทันที ไม่ต้องผ่าน unmark modal
+- scan ใหม่ → `printedUnitIds.clear()` (line 1298) → done state reset → ทุกการ์ด enabled
+- พิมพ์ผ่าน extension → `printedUnitIds.add(id)` → disabled (greyed ✓) ใน session นั้น
+
 ### Conventions
 
 - ภาษา: UI strings + comments = ไทย, code identifiers = English
