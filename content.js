@@ -2208,7 +2208,7 @@
     });
   }
 
-  function showChunkPlanModal({ total, multiSku = false, defaultPickingList = null, title = null }) {
+  function showChunkPlanModal({ total, multiSku = false, defaultPickingList = null, title = null, skuCount = null }) {
     const lastPickingList = defaultPickingList !== null ? defaultPickingList : loadPickingListPref();
     const defaultN = Math.max(2, Math.ceil(total / CHUNK_AUTO_SAFE_SIZE));
 
@@ -2223,10 +2223,15 @@
     const buildOptionsHtml = () => {
       if (isSmallMultiSku) {
         // Case A: no radios — only checkboxes inline
+        // "รวม SKU ไว้ด้วยกัน" (was "รวมสินค้าเป็นไฟล์เดียว"):
+        // old wording promised "one file" but when paired with chunk splitting
+        // (even/every) the result is N files, not one — the new phrase makes
+        // clear what "combined" actually controls: whether SKUs are mixed
+        // across files or kept each in its own file.
         return `<div class="qf-chunk-plan-options qf-chunk-plan-simple">
           <label class="qf-chunk-plan-extra-opt">
             <input type="checkbox" class="qf-chunk-combined-chk"/>
-            รวมสินค้าเป็นไฟล์เดียว
+            รวม SKU ไว้ด้วยกัน
           </label>
           <label class="qf-chunk-plan-extra-opt">
             <input type="checkbox" class="qf-chunk-picking-chk" ${lastPickingList ? 'checked' : ''}/>
@@ -2298,7 +2303,7 @@
           </label>
           ${isLargeMultiSku ? `<label class="qf-chunk-plan-extra-opt">
             <input type="checkbox" class="qf-chunk-combined-chk"/>
-            รวมทุกสินค้าเป็นไฟล์เดียว
+            รวม SKU ไว้ด้วยกัน
           </label>` : ''}
           <label class="qf-chunk-plan-extra-opt">
             <input type="checkbox" class="qf-chunk-divider-chk" checked/>
@@ -2332,21 +2337,41 @@
       const xInput    = overlay.querySelector('.qf-chunk-x-input');
       const nPreview  = overlay.querySelector('.qf-chunk-n-preview');
       const xPreview  = overlay.querySelector('.qf-chunk-x-preview');
+      const combinedChk = overlay.querySelector('.qf-chunk-combined-chk');
       const submitBtn = overlay.querySelector('.qf-chunk-plan-submit');
 
       const getMode = () => (radioEls().find(r => r.checked) || {}).value || 'single';
 
+      // Preview adapts to the combined-SKU checkbox so the same N/X value
+      // tells two very different stories:
+      //   - combined ON  → N/X slices the TOTAL label set (mixed SKU per file)
+      //   - combined OFF → N/X slices EACH SKU separately (×skuCount files)
+      // Previously the UI showed one formula for both cases, which caused
+      // users to type a number expecting global behavior but get per-SKU.
       const updatePreviews = () => {
+        const combined = !!(combinedChk && combinedChk.checked);
         if (nInput && nPreview) {
           const n = parseInt(nInput.value) || defaultN;
-          nPreview.textContent = `~${Math.floor(total/n)}–${Math.ceil(total/n)} ใบ/ไฟล์`;
+          const sz = `~${Math.floor(total/n)}–${Math.ceil(total/n)} ใบ/ไฟล์`;
+          if (combined || !multiSku) {
+            nPreview.textContent = `${sz} · ${n} ไฟล์ (ผสม SKU)`;
+          } else if (skuCount && skuCount > 1) {
+            nPreview.textContent = `แต่ละ SKU แบ่ง ${n} ชุด · รวม ~${n * skuCount} ไฟล์`;
+          } else {
+            nPreview.textContent = `แต่ละ SKU แบ่ง ${n} ชุด`;
+          }
         }
         if (xInput && xPreview) {
           const x = parseInt(xInput.value) || CHUNK_AUTO_SAFE_SIZE;
-          xPreview.textContent = `${Math.ceil(total/x)} ไฟล์`;
+          if (combined || !multiSku) {
+            xPreview.textContent = `${Math.ceil(total/x)} ไฟล์ (ผสม SKU · ~${x} ใบ/ไฟล์)`;
+          } else {
+            xPreview.textContent = `แบ่งทุก ${x} ใบต่อ SKU`;
+          }
         }
       };
       updatePreviews();
+      if (combinedChk) combinedChk.addEventListener('change', updatePreviews);
 
       [nInput, xInput].filter(Boolean).forEach(inp => {
         inp.addEventListener('focus', () => {
@@ -3385,7 +3410,12 @@
     if (!multiSku && totalIds <= CHUNK_PROMPT_THRESHOLD) {
       plan = { mode: 'single', withPickingList: loadPickingListPref(), combined: false, withDivider: false };
     } else {
-      plan = await showChunkPlanModal({ total: totalIds, multiSku, defaultPickingList: loadPickingListPref() });
+      plan = await showChunkPlanModal({
+        total: totalIds,
+        multiSku,
+        defaultPickingList: loadPickingListPref(),
+        skuCount: skuBuckets.size,  // for preview: "×skuCount ไฟล์" hint when not combined
+      });
       if (!plan) return;
     }
 
