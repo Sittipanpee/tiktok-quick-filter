@@ -2039,7 +2039,10 @@
       for (let i = 0; i < backoffs.length; i++) {
         if (backoffs[i]) await sleep(backoffs[i]);
         try {
-          const r = await fetch(state.fontUrl);
+          // Use `_origFetch` to bypass TikTok's fetch wrapper — the font lives
+          // on `chrome-extension://…`, and going through the wrapper adds
+          // signing overhead / potential serialization for no reason.
+          const r = await _origFetch.call(window, state.fontUrl);
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           const bytes = await r.arrayBuffer();
           if (!bytes || !bytes.byteLength) throw new Error('empty font response');
@@ -3752,7 +3755,15 @@
       }
 
       setP(0.25);
-      const pdfBytes = await fetch(docUrl).then(r => r.arrayBuffer());
+      // IMPORTANT: use `_origFetch` (captured at document_start before TikTok's
+      // own wrapper installed itself) so concurrent chunk downloads don't get
+      // serialized behind TikTok's signing/queueing mutex. Without this, the
+      // outer `Promise.all(chunks.map…)` + inner `Promise.all(batches.map…)`
+      // effectively run one-at-a-time because TikTok's wrapper holds a lock
+      // while it synchronously signs each request. `credentials: 'omit'` is
+      // fine here — `docUrl` is a pre-signed TikTok CDN URL, not an API call.
+      const pdfResp = await _origFetch.call(window, docUrl, { credentials: 'omit' });
+      const pdfBytes = await pdfResp.arrayBuffer();
       setP(0.40);
 
       let modifiedBytes;
@@ -9732,7 +9743,12 @@
     const url = state.carrierLogoUrls?.[key];
     if (!url) return null;
     try {
-      const r = await fetch(url);
+      // `_origFetch` bypasses TikTok's fetch wrapper — carrier logos live on
+      // extension-bundled asset URLs (chrome-extension://…) which shouldn't be
+      // passing through TikTok's signing path in the first place, and the
+      // wrapper's mutex would still serialize them when dividers from
+      // parallel chunks all ask for the same logo simultaneously.
+      const r = await _origFetch.call(window, url);
       if (!r.ok) return null;
       const buf = new Uint8Array(await r.arrayBuffer());
       state.carrierLogoBytes = { ...state.carrierLogoBytes, [key]: buf };
