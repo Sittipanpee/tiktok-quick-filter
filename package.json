@@ -20,5 +20,11 @@
   "bugs": {
     "url": "https://github.com/Sittipanpee/tiktok-quick-filter/issues"
   },
-  "homepage": "https://github.com/Sittipanpee/tiktok-quick-filter#readme"
+  "homepage": "https://github.com/Sittipanpee/tiktok-quick-filter#readme",
+  "devDependencies": {
+    "@pdf-lib/fontkit": "^1.1.1",
+    "canvas": "^3.2.3",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^5.6.205"
+  }
 }

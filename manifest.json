@@ -33,7 +33,12 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["vendor/Sarabun-Bold.ttf"],
+      "resources": [
+        "vendor/Sarabun-Bold.ttf",
+        "vendor/jnt_sample_preview.png",
+        "vendor/tiktok_shop_logo.png",
+        "vendor/jnt_express_logo.png"
+      ],
       "matches": ["https://seller-th.tiktok.com/*", "https://seller.shopee.co.th/*"]
     }
   ]

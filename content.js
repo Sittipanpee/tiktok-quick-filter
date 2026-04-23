@@ -276,6 +276,24 @@
     } catch {}
   }
 
+  // ── Label overlay config (masks + marketing text + shop image + headers) ──
+  const LABEL_OVERLAY_KEY = 'qf_label_overlay_v1';
+  function loadLabelOverlay() {
+    try { return Object.assign({ enabled: false, marketingText: 'กรุณาถ่ายรูปก่อนเปิดกล่องพัสดุ', shopImageDataUrl: '', headerMain: '', headerSub: '', opacity: 0.85 }, JSON.parse(localStorage.getItem(LABEL_OVERLAY_KEY) || 'null') || {}); }
+    catch { return { enabled: false, marketingText: 'กรุณาถ่ายรูปก่อนเปิดกล่องพัสดุ', shopImageDataUrl: '', headerMain: '', headerSub: '', opacity: 0.85 }; }
+  }
+  function saveLabelOverlay(cfg) { try { localStorage.setItem(LABEL_OVERLAY_KEY, JSON.stringify(cfg)); } catch {} }
+
+  // Calibrated J&T mask rects (bottom-left PDF coords, A6 298×420pt, pixel-scanned @ 2x).
+  const J_AND_T_MASK_RECTS = [
+    { x: 0,   y: 38,   w: 17,  h: 244 }, // vertical OCR column L — top at y=282, extended bottom to y=38
+    { x: 283, y: 38,   w: 15,  h: 244 }, // vertical OCR column R — top at y=282, extended bottom to y=38
+    { x: 0,   y: 41.5, w: 95,  h: 20  }, // TikTok Shop footer logo (preserve Order ID x>190)
+    { x: 0,   y: 75,   w: 298, h: 3   }, // h-line above Qty Total
+    { x: 0,   y: 62,   w: 298, h: 2   }, // h-line above footer row
+    { x: 0,   y: 39.5, w: 298, h: 2   }, // h-line below footer row
+  ];
+
   const state = {
     scanning: false,
     products: new Map(),
@@ -288,6 +306,9 @@
     variantAliases: loadVariantAliases(), // `${productId}:${skuId}` → {alias: string, replace: boolean}
     fontUrl: null,                 // Sarabun-Bold.ttf URL from asset-bridge
     fontBytes: null,               // cached ArrayBuffer
+    samplePreviewUrl: null,        // vendor/jnt_sample_preview.png URL (PDF editor background)
+    carrierLogoUrls: {},           // { tiktok: url, jnt: url } — phase 3 system element overrides
+    carrierLogoBytes: {},          // { tiktok: Uint8Array, jnt: Uint8Array } — cached after first fetch
     records: new Map(),            // fulfillUnitId → {skuList:[{productId,productName,quantity,...}]}
     weirdFulfillUnitIds: new Set(),
     weirdCombos: new Map(),        // sigKey → {sigKey, items:[{productId,productName,productImageURL,quantity}], fulfillUnitIds: Set, count}
@@ -472,6 +493,74 @@
     saveHistory([]);
   }
 
+  // ==================== ORDER HISTORY (IndexedDB) ====================
+  // Stores one record per orderId per print job — 90-day rolling window.
+  // Schema: { orderId, fulfillUnitId, ts, date, carrier,
+  //           assigneeKind, teamId, teamName, teamSnapshot, workerId, workerName }
+
+  const ORDER_HISTORY_DB = 'qf_order_history';
+  const ORDER_HISTORY_STORE = 'orders';
+  const ORDER_HISTORY_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+
+  let _orderHistoryDb = null;
+
+  function openOrderHistoryDb() {
+    if (_orderHistoryDb) return Promise.resolve(_orderHistoryDb);
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(ORDER_HISTORY_DB, 1);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(ORDER_HISTORY_STORE)) {
+          const store = db.createObjectStore(ORDER_HISTORY_STORE, { autoIncrement: true });
+          store.createIndex('orderId', 'orderId', { unique: false });
+          store.createIndex('ts', 'ts', { unique: false });
+        }
+      };
+      req.onsuccess = (e) => { _orderHistoryDb = e.target.result; resolve(_orderHistoryDb); };
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function saveOrderHistoryBatch(records) {
+    if (!records.length) return;
+    try {
+      const db = await openOrderHistoryDb();
+      const cutoff = Date.now() - ORDER_HISTORY_MAX_AGE_MS;
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(ORDER_HISTORY_STORE, 'readwrite');
+        const store = tx.objectStore(ORDER_HISTORY_STORE);
+        // Purge old records via ts index
+        const idx = store.index('ts');
+        const range = IDBKeyRange.upperBound(cutoff);
+        idx.openCursor(range).onsuccess = function(e) {
+          const cursor = e.target.result;
+          if (cursor) { cursor.delete(); cursor.continue(); }
+        };
+        for (const r of records) store.add(r);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) {
+      console.warn('[QF] saveOrderHistoryBatch failed:', e);
+    }
+  }
+
+  async function queryOrderHistory(orderId) {
+    try {
+      const db = await openOrderHistoryDb();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(ORDER_HISTORY_STORE, 'readonly');
+        const idx = tx.objectStore(ORDER_HISTORY_STORE).index('orderId');
+        const req = idx.getAll(IDBKeyRange.only(String(orderId)));
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => reject(req.error);
+      });
+    } catch (e) {
+      console.warn('[QF] queryOrderHistory failed:', e);
+      return [];
+    }
+  }
+
   function historyRecentCount(windowMs = 24 * 60 * 60 * 1000) {
     const cutoff = Date.now() - windowMs;
     return loadHistory().filter(e => e.timestamp >= cutoff).length;
@@ -538,6 +627,11 @@
           <div class="qf-history-modal-title">ประวัติการพิมพ์</div>
           <button class="qf-history-modal-close" aria-label="ปิด">×</button>
         </div>
+        <div class="qf-history-search-bar">
+          <input class="qf-history-order-input" type="text" placeholder="ค้นหา Order ID (เคลมลูกค้า)…" autocomplete="off" />
+          <button class="qf-history-order-search-btn">ค้นหา</button>
+        </div>
+        <div class="qf-history-order-results" style="display:none;"></div>
         <div class="qf-history-modal-body"></div>
         <div class="qf-history-modal-footer">
           <button class="qf-history-clear-all">ล้างทั้งหมด</button>
@@ -571,8 +665,7 @@
                   <span class="qf-history-title" title="${escapeHtml(e.title)}">${escapeHtml(e.title)}</span>
                 </div>
                 <div class="qf-history-meta">${e.chunks.length} ไฟล์ · ${e.totalLabels} ใบ</div>
-                ${e.workerName ? `<div class="qf-history-packer">
-                  <span class="qf-history-packer-icon">${escapeHtml((state.workers.find(w => w.id === e.workerId) || {}).icon || '')}</span>แพ็ค: ${escapeHtml(e.workerName)}</div>` : ''}
+                ${e.workerName ? `<div class="qf-history-packer">แพ็ค: ${escapeHtml(e.workerName)}</div>` : ''}
               </div>
               <div class="qf-history-row-actions">
                 <button class="qf-history-redownload" data-id="${escapeHtml(e.id)}">ดาวน์โหลดใหม่</button>
@@ -621,13 +714,48 @@
 
     render();
 
+    // Order search (IndexedDB)
+    const orderInput = overlay.querySelector('.qf-history-order-input');
+    const orderResultsEl = overlay.querySelector('.qf-history-order-results');
+    const doOrderSearch = async () => {
+      const q = orderInput.value.trim();
+      if (!q) { orderResultsEl.style.display = 'none'; return; }
+      orderResultsEl.style.display = '';
+      orderResultsEl.innerHTML = '<div class="qf-history-order-loading">กำลังค้นหา…</div>';
+      const results = await queryOrderHistory(q);
+      if (!results.length) {
+        orderResultsEl.innerHTML = `<div class="qf-history-order-empty">ไม่พบประวัติออเดอร์ <b>${escapeHtml(q)}</b></div>`;
+        return;
+      }
+      const pad = n => String(n).padStart(2, '0');
+      orderResultsEl.innerHTML = `
+        <div class="qf-history-order-header">พบ ${results.length} รายการ สำหรับ <b>${escapeHtml(q)}</b></div>
+        ${results.map(r => {
+          const d = new Date(r.ts);
+          const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+          const assignee = r.assigneeKind === 'team'
+            ? `ทีม: ${escapeHtml(r.teamName || '')}` + (Array.isArray(r.teamSnapshot) && r.teamSnapshot.length
+                ? ` (${r.teamSnapshot.map(m => escapeHtml(m.workerName || m.workerId)).join(', ')})`
+                : '')
+            : r.workerName ? `คน: ${escapeHtml(r.workerName)}` : 'ไม่ระบุ';
+          return `<div class="qf-history-order-row">
+            <span class="qf-history-order-date">${escapeHtml(r.date)} ${time}</span>
+            <span class="qf-history-order-carrier">${escapeHtml(r.carrier || '—')}</span>
+            <span class="qf-history-order-assignee">${assignee}</span>
+          </div>`;
+        }).join('')}
+      `;
+    };
+    overlay.querySelector('.qf-history-order-search-btn').onclick = (e) => { e.stopPropagation(); doOrderSearch(); };
+    orderInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doOrderSearch(); });
+
     overlay.querySelector('.qf-history-modal-close').onclick = (e) => {
       e.stopPropagation();
       cleanup();
     };
     clearAllBtn.onclick = async (e) => {
       e.stopPropagation();
-      const ok = await confirmInline('ล้างประวัติทั้งหมด?', 'ล้าง');
+      const ok = await confirmInline('ล้างประวัติทั้งหมด?', 'ล้าง', true);
       if (ok) {
         clearAllHistory();
         renderHistoryBadge();
@@ -639,17 +767,18 @@
     document.addEventListener('keydown', onKey);
   }
 
-  // Small inline confirm used by history "ล้างทั้งหมด". Matches qf-modal style.
-  function confirmInline(title, dangerLabel) {
+  // Small inline confirm used throughout the app. isDanger=true for destructive actions.
+  function confirmInline(title, confirmLabel, isDanger = false) {
     return new Promise(resolve => {
       const overlay = document.createElement('div');
       overlay.className = 'qf-modal-overlay';
+      const btnCls = isDanger ? 'qf-btn-confirm qf-btn-danger' : 'qf-btn-confirm';
       overlay.innerHTML = `
         <div class="qf-modal" role="dialog">
           <div class="qf-modal-title">${escapeHtml(title)}</div>
           <div class="qf-modal-actions">
             <button class="qf-btn-cancel">ยกเลิก</button>
-            <button class="qf-btn-confirm qf-btn-danger">${escapeHtml(dangerLabel || 'ยืนยัน')}</button>
+            <button class="${btnCls}">${escapeHtml(confirmLabel || 'ยืนยัน')}</button>
           </div>
         </div>
       `;
@@ -722,6 +851,10 @@
     const d = e.data;
     if (!d?.__qfAsset) return;
     if (d.__qfAsset === 'font' && d.url) state.fontUrl = d.url;
+    if (d.__qfAsset === 'samplePreview' && d.url) state.samplePreviewUrl = d.url;
+    if (d.__qfAsset === 'carrierLogo' && d.carrier && d.url) {
+      state.carrierLogoUrls = { ...state.carrierLogoUrls, [d.carrier]: d.url };
+    }
     if (d.__qfAsset === 'manifest' && d.version) state.localVersion = d.version;
   });
   window.postMessage({ __qfAsset: 'request_font' }, '*');
@@ -1125,7 +1258,7 @@
     if (state.scanning) return;
     // Warn user if an active planning session exists — scan would invalidate its IDs
     if (loadPlanningSession()) {
-      const ok = await confirmInline('มีแผนค้างอยู่ — ละทิ้งแผนและ scan ใหม่?', 'ละทิ้ง');
+      const ok = await confirmInline('มีแผนค้างอยู่ — ละทิ้งแผนและ scan ใหม่?', 'ละทิ้ง', true);
       if (!ok) return;
       deletePlanningSession();
       document.getElementById('qf-plan-recovery')?.remove();
@@ -1959,56 +2092,56 @@
     try { localStorage.setItem(PICKING_LIST_PREF_KEY, val ? 'true' : 'false'); } catch {}
   }
 
-  function showChunkPlanModal({ total, multiSku = false, defaultPickingList = null }) {
+  // Modal for print-all in planning mode: 3 worker-centric modes.
+  function showPrintAllPlanModal({ total, nonDone, hasMultiSku, defaultPickingList = null }) {
     const lastPickingList = defaultPickingList !== null ? defaultPickingList : loadPickingListPref();
-    const defaultN = Math.max(2, Math.ceil(total / CHUNK_AUTO_SAFE_SIZE));
-    // §3.7: Default radio: 'single' if total<=200; else 'every' with X=200.
-    const defaultMode = total <= CHUNK_PROMPT_THRESHOLD ? 'single' : 'every';
+    const names = nonDone.map(([, c]) => c.teamName || c.workerName || '?');
+    const titleStr = `พิมพ์ทุกคน · ${names.slice(0, 3).join(', ')}${names.length > 3 ? ` +${names.length - 3}` : ''}`;
+    const maxPerPerson = Math.max(...nonDone.map(([, col]) =>
+      col.fulfillUnitIds.filter(id => !col.printedIds.includes(id)).length
+    ));
+    const showChunkOpt = maxPerPerson > CHUNK_AUTO_SAFE_SIZE;
+
+    const skuOpts = hasMultiSku ? `
+      <label class="qf-chunk-plan-opt">
+        <input type="radio" name="qf-pa-mode" value="by-person-sku">
+        <span class="qf-chunk-plan-opt-body">
+          <span class="qf-chunk-plan-opt-title">ไฟล์ตาม SKU</span>
+          <span class="qf-chunk-plan-opt-sub">แยก PDF ต่อสินค้า-คน เช่น เก๋·สินค้า1, เกม·สินค้า1</span>
+        </span>
+      </label>
+      <label class="qf-chunk-plan-opt">
+        <input type="radio" name="qf-pa-mode" value="combined-per-person">
+        <span class="qf-chunk-plan-opt-body">
+          <span class="qf-chunk-plan-opt-title">รวม SKU แยกตามคน</span>
+          <span class="qf-chunk-plan-opt-sub">แต่ละคนได้ PDF รวมทุก SKU พร้อมหน้าคั่น</span>
+        </span>
+      </label>` : '';
+
+    const chunkOptHtml = showChunkOpt ? `
+      <label class="qf-chunk-plan-extra-opt">
+        <input type="checkbox" name="qf-pa-chunk" class="qf-pa-chunk-chk"/>
+        แยกไฟล์เมื่อเกิน ${CHUNK_AUTO_SAFE_SIZE} ใบ/คน
+      </label>` : '';
 
     return new Promise(resolve => {
       const overlay = document.createElement('div');
       overlay.className = 'qf-modal-overlay qf-chunk-plan-overlay';
       overlay.innerHTML = `
         <div class="qf-modal qf-chunk-plan-modal" role="dialog">
-          <div class="qf-modal-title">เตรียมพิมพ์ฉลาก</div>
+          <div class="qf-modal-title">${escapeHtml(titleStr)}</div>
           <div class="qf-modal-body">
             <div class="qf-modal-count">${total} ใบ</div>
-            <div class="qf-modal-summary">เลือกวิธีแบ่งไฟล์</div>
+            <div class="qf-modal-summary">${nonDone.length} คน · เลือกรูปแบบไฟล์</div>
             <div class="qf-chunk-plan-options">
               <label class="qf-chunk-plan-opt">
-                <input type="radio" name="qf-chunk-mode" value="single"
-                  ${defaultMode === 'single' ? 'checked' : ''}>
+                <input type="radio" name="qf-pa-mode" value="by-person" checked>
                 <span class="qf-chunk-plan-opt-body">
-                  <span class="qf-chunk-plan-opt-title">ไฟล์เดียว</span>
-                  <span class="qf-chunk-plan-opt-sub qf-chunk-single-label">${multiSku ? `แยก 1 ไฟล์ต่อสินค้า` : `${total} ใบในไฟล์เดียว`}</span>
+                  <span class="qf-chunk-plan-opt-title">แบ่งตามคน</span>
+                  <span class="qf-chunk-plan-opt-sub">${nonDone.length} ไฟล์ · แต่ละคนได้ PDF ของตัวเอง</span>
                 </span>
               </label>
-              <label class="qf-chunk-plan-opt">
-                <input type="radio" name="qf-chunk-mode" value="even"
-                  ${defaultMode === 'even' ? 'checked' : ''}>
-                <span class="qf-chunk-plan-opt-body">
-                  <span class="qf-chunk-plan-opt-title">
-                    แบ่งเท่า ๆ กัน
-                    <input type="number" name="qf-chunk-N" class="qf-chunk-plan-input qf-chunk-n-input"
-                      min="2" max="${total}" value="${defaultN}"/>
-                    <span class="qf-chunk-unit">ชุด</span>
-                  </span>
-                  <span class="qf-chunk-plan-opt-sub qf-chunk-n-preview"></span>
-                </span>
-              </label>
-              <label class="qf-chunk-plan-opt">
-                <input type="radio" name="qf-chunk-mode" value="every"
-                  ${defaultMode === 'every' ? 'checked' : ''}>
-                <span class="qf-chunk-plan-opt-body">
-                  <span class="qf-chunk-plan-opt-title">
-                    กำหนดจำนวน
-                    <input type="number" name="qf-chunk-X" class="qf-chunk-plan-input qf-chunk-x-input"
-                      min="1" max="${total}" value="${CHUNK_AUTO_SAFE_SIZE}"/>
-                    <span class="qf-chunk-unit">ใบ/ไฟล์</span>
-                  </span>
-                  <span class="qf-chunk-plan-opt-sub qf-chunk-x-preview"></span>
-                </span>
-              </label>
+              ${skuOpts}
             </div>
             <button type="button" class="qf-chunk-plan-more" aria-expanded="false">
               <span class="qf-chunk-plan-more-label">ตัวเลือกเพิ่มเติม</span>
@@ -2017,19 +2150,167 @@
             </button>
             <div class="qf-chunk-plan-extras" hidden>
               <label class="qf-chunk-plan-extra-opt">
-                <input type="checkbox" name="qf-chunk-picking" class="qf-chunk-picking-chk"
-                  ${lastPickingList ? 'checked' : ''}/>
+                <input type="checkbox" name="qf-pa-picking" class="qf-pa-picking-chk" ${lastPickingList ? 'checked' : ''}/>
                 แนบใบสรุปรายการ
               </label>
-              ${multiSku ? `<label class="qf-chunk-plan-extra-opt">
-                <input type="checkbox" name="qf-chunk-combined" class="qf-chunk-combined-chk"/>
-                รวมทุกสินค้าเป็นไฟล์เดียว
-              </label>` : ''}
               <label class="qf-chunk-plan-extra-opt">
-                <input type="checkbox" name="qf-chunk-divider" class="qf-chunk-divider-chk" checked/>
+                <input type="checkbox" name="qf-pa-divider" class="qf-pa-divider-chk" checked/>
                 ใส่หน้าคั่นระหว่างสินค้าแต่ละแบบ
               </label>
+              ${chunkOptHtml}
             </div>
+          </div>
+          <div class="qf-modal-actions">
+            <button class="qf-btn-cancel">ยกเลิก</button>
+            <button class="qf-btn-confirm qf-pa-submit">เริ่มพิมพ์</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+
+      const moreBtn = overlay.querySelector('.qf-chunk-plan-more');
+      const extrasEl = overlay.querySelector('.qf-chunk-plan-extras');
+      const moreCountEl = overlay.querySelector('.qf-chunk-plan-more-count');
+      const extraChecks = () => [...overlay.querySelectorAll('.qf-chunk-plan-extras input[type="checkbox"]')];
+      const updateMoreCount = () => {
+        const n = extraChecks().filter(c => c.checked).length;
+        moreCountEl.textContent = n > 0 ? `· เปิด ${n} รายการ` : '';
+      };
+      moreBtn.addEventListener('click', () => {
+        const expanded = moreBtn.getAttribute('aria-expanded') === 'true';
+        moreBtn.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+        extrasEl.hidden = expanded;
+      });
+      extraChecks().forEach(c => c.addEventListener('change', updateMoreCount));
+      updateMoreCount();
+
+      const cleanup = (val) => { overlay.remove(); resolve(val); };
+      overlay.querySelector('.qf-btn-cancel').onclick = () => cleanup(null);
+      overlay.onclick = (e) => { if (e.target === overlay) cleanup(null); };
+      const onKey = (e) => { if (e.key === 'Escape') { cleanup(null); document.removeEventListener('keydown', onKey); } };
+      document.addEventListener('keydown', onKey);
+
+      overlay.querySelector('.qf-pa-submit').onclick = () => {
+        const mode = (overlay.querySelector('input[name="qf-pa-mode"]:checked') || {}).value || 'by-person';
+        const withPickingList = overlay.querySelector('.qf-pa-picking-chk')?.checked || false;
+        const withDivider = overlay.querySelector('.qf-pa-divider-chk')?.checked || false;
+        const chunkAt = overlay.querySelector('.qf-pa-chunk-chk')?.checked ? CHUNK_AUTO_SAFE_SIZE : null;
+        savePickingListPref(withPickingList);
+        cleanup({ mode, withPickingList, withDivider, chunkAt });
+      };
+    });
+  }
+
+  function showChunkPlanModal({ total, multiSku = false, defaultPickingList = null, title = null }) {
+    const lastPickingList = defaultPickingList !== null ? defaultPickingList : loadPickingListPref();
+    const defaultN = Math.max(2, Math.ceil(total / CHUNK_AUTO_SAFE_SIZE));
+
+    // Case A: small multi-SKU — simplified checkboxes only, no radios
+    const isSmallMultiSku = multiSku && total <= CHUNK_AUTO_SAFE_SIZE;
+    // Case B: large multi-SKU — radios with renamed "แยกตาม SKU"
+    const isLargeMultiSku = multiSku && total > CHUNK_AUTO_SAFE_SIZE;
+    // Default radio: by-sku for large multiSku, single for small single-sku, every for large single-sku
+    const defaultMode = isLargeMultiSku ? 'by-sku' : (total <= CHUNK_PROMPT_THRESHOLD ? 'single' : 'every');
+
+    // Build the options section based on case
+    const buildOptionsHtml = () => {
+      if (isSmallMultiSku) {
+        // Case A: no radios — only checkboxes inline
+        return `<div class="qf-chunk-plan-options qf-chunk-plan-simple">
+          <label class="qf-chunk-plan-extra-opt">
+            <input type="checkbox" class="qf-chunk-combined-chk"/>
+            รวมสินค้าเป็นไฟล์เดียว
+          </label>
+          <label class="qf-chunk-plan-extra-opt">
+            <input type="checkbox" class="qf-chunk-picking-chk" ${lastPickingList ? 'checked' : ''}/>
+            แนบใบสรุปรายการ
+          </label>
+          <label class="qf-chunk-plan-extra-opt">
+            <input type="checkbox" class="qf-chunk-divider-chk" checked/>
+            ใส่หน้าคั่นระหว่างสินค้าแต่ละแบบ
+          </label>
+        </div>`;
+      }
+      // Cases B and C: radio options
+      const singleOrSkuOpt = isLargeMultiSku
+        ? `<label class="qf-chunk-plan-opt">
+            <input type="radio" name="qf-chunk-mode" value="by-sku" ${defaultMode === 'by-sku' ? 'checked' : ''}>
+            <span class="qf-chunk-plan-opt-body">
+              <span class="qf-chunk-plan-opt-title">แยกตาม SKU</span>
+              <span class="qf-chunk-plan-opt-sub">1 ไฟล์ต่อสินค้า</span>
+            </span>
+          </label>`
+        : `<label class="qf-chunk-plan-opt">
+            <input type="radio" name="qf-chunk-mode" value="single" ${defaultMode === 'single' ? 'checked' : ''}>
+            <span class="qf-chunk-plan-opt-body">
+              <span class="qf-chunk-plan-opt-title">ไฟล์เดียว</span>
+              <span class="qf-chunk-plan-opt-sub">${total} ใบในไฟล์เดียว</span>
+            </span>
+          </label>`;
+      return `<div class="qf-chunk-plan-options">
+        ${singleOrSkuOpt}
+        <label class="qf-chunk-plan-opt">
+          <input type="radio" name="qf-chunk-mode" value="even" ${defaultMode === 'even' ? 'checked' : ''}>
+          <span class="qf-chunk-plan-opt-body">
+            <span class="qf-chunk-plan-opt-title">
+              แบ่งเท่า ๆ กัน
+              <input type="number" name="qf-chunk-N" class="qf-chunk-plan-input qf-chunk-n-input"
+                min="2" max="${total}" value="${defaultN}"/>
+              <span class="qf-chunk-unit">ชุด</span>
+            </span>
+            <span class="qf-chunk-plan-opt-sub qf-chunk-n-preview"></span>
+          </span>
+        </label>
+        ${total > CHUNK_AUTO_SAFE_SIZE ? `<label class="qf-chunk-plan-opt">
+          <input type="radio" name="qf-chunk-mode" value="every" ${defaultMode === 'every' ? 'checked' : ''}>
+          <span class="qf-chunk-plan-opt-body">
+            <span class="qf-chunk-plan-opt-title">
+              กำหนดจำนวน
+              <input type="number" name="qf-chunk-X" class="qf-chunk-plan-input qf-chunk-x-input"
+                min="1" max="${total}" value="${CHUNK_AUTO_SAFE_SIZE}"/>
+              <span class="qf-chunk-unit">ใบ/ไฟล์</span>
+            </span>
+            <span class="qf-chunk-plan-opt-sub qf-chunk-x-preview"></span>
+          </span>
+        </label>` : ''}
+      </div>`;
+    };
+
+    // Extras section (only for Cases B and C — Case A has inline checkboxes)
+    const buildExtrasHtml = () => {
+      if (isSmallMultiSku) return '';
+      return `<button type="button" class="qf-chunk-plan-more" aria-expanded="false">
+          <span class="qf-chunk-plan-more-label">ตัวเลือกเพิ่มเติม</span>
+          <span class="qf-chunk-plan-more-count"></span>
+          <span class="qf-chunk-plan-chevron">›</span>
+        </button>
+        <div class="qf-chunk-plan-extras" hidden>
+          <label class="qf-chunk-plan-extra-opt">
+            <input type="checkbox" class="qf-chunk-picking-chk" ${lastPickingList ? 'checked' : ''}/>
+            แนบใบสรุปรายการ
+          </label>
+          ${isLargeMultiSku ? `<label class="qf-chunk-plan-extra-opt">
+            <input type="checkbox" class="qf-chunk-combined-chk"/>
+            รวมทุกสินค้าเป็นไฟล์เดียว
+          </label>` : ''}
+          <label class="qf-chunk-plan-extra-opt">
+            <input type="checkbox" class="qf-chunk-divider-chk" checked/>
+            ใส่หน้าคั่นระหว่างสินค้าแต่ละแบบ
+          </label>
+        </div>`;
+    };
+
+    return new Promise(resolve => {
+      const overlay = document.createElement('div');
+      overlay.className = 'qf-modal-overlay qf-chunk-plan-overlay';
+      overlay.innerHTML = `
+        <div class="qf-modal qf-chunk-plan-modal" role="dialog">
+          <div class="qf-modal-title">${escapeHtml(title || 'เตรียมพิมพ์ฉลาก')}</div>
+          <div class="qf-modal-body">
+            <div class="qf-modal-count">${total} ใบ</div>
+            <div class="qf-modal-summary">${isSmallMultiSku ? 'เลือกตัวเลือกการพิมพ์' : 'เลือกวิธีแบ่งไฟล์'}</div>
+            ${buildOptionsHtml()}
+            ${buildExtrasHtml()}
           </div>
           <div class="qf-modal-actions">
             <button class="qf-btn-cancel">ยกเลิก</button>
@@ -2049,30 +2330,30 @@
       const getMode = () => (radioEls().find(r => r.checked) || {}).value || 'single';
 
       const updatePreviews = () => {
-        const n = parseInt(nInput.value) || defaultN;
-        const x = parseInt(xInput.value) || CHUNK_AUTO_SAFE_SIZE;
-        nPreview.textContent = `~${Math.floor(total/n)}–${Math.ceil(total/n)} ใบ/ไฟล์`;
-        xPreview.textContent = `${Math.ceil(total/x)} ไฟล์`;
+        if (nInput && nPreview) {
+          const n = parseInt(nInput.value) || defaultN;
+          nPreview.textContent = `~${Math.floor(total/n)}–${Math.ceil(total/n)} ใบ/ไฟล์`;
+        }
+        if (xInput && xPreview) {
+          const x = parseInt(xInput.value) || CHUNK_AUTO_SAFE_SIZE;
+          xPreview.textContent = `${Math.ceil(total/x)} ไฟล์`;
+        }
       };
       updatePreviews();
 
-      // Clicking a number input should auto-select the parent radio.
-      [nInput, xInput].forEach(inp => {
+      [nInput, xInput].filter(Boolean).forEach(inp => {
         inp.addEventListener('focus', () => {
           const radioVal = inp.name === 'qf-chunk-N' ? 'even' : 'every';
           const radio = overlay.querySelector(`input[value="${radioVal}"]`);
           if (radio) radio.checked = true;
         });
         inp.addEventListener('input', updatePreviews);
-
-        // §3.3: On blur, clamp and flash red border if out-of-range.
         inp.addEventListener('blur', () => {
           const isN = inp.name === 'qf-chunk-N';
           const min = isN ? 2 : 1;
-          const max = total;
           let val = parseInt(inp.value);
           if (isNaN(val) || val < min) val = min;
-          if (val > max) val = max;
+          if (val > total) val = total;
           if (String(val) !== inp.value) {
             inp.value = val;
             inp.classList.add('qf-input-error');
@@ -2080,7 +2361,6 @@
           }
           updatePreviews();
         });
-
         inp.addEventListener('keydown', (e) => {
           if (e.key === 'Enter') { e.preventDefault(); submitBtn.click(); }
         });
@@ -2088,35 +2368,24 @@
 
       radioEls().forEach(r => r.addEventListener('change', updatePreviews));
 
-      // Update the single-mode sub-label based on combined checkbox state.
-      const combinedChk = overlay.querySelector('.qf-chunk-combined-chk');
-      const singleLabel = overlay.querySelector('.qf-chunk-single-label');
-      if (combinedChk) {
-        combinedChk.addEventListener('change', () => {
-          if (singleLabel && multiSku) {
-            singleLabel.textContent = combinedChk.checked
-              ? `รวม ${total} ใบในไฟล์เดียว`
-              : `แยก 1 ไฟล์ต่อสินค้า`;
-          }
-        });
-      }
-
-      // Collapsible "ตัวเลือกเพิ่มเติม" — collapsed by default, counter shows how many are on.
+      // Collapsible extras (Cases B and C only)
       const moreBtn = overlay.querySelector('.qf-chunk-plan-more');
       const extrasEl = overlay.querySelector('.qf-chunk-plan-extras');
       const moreCountEl = overlay.querySelector('.qf-chunk-plan-more-count');
-      const extraChecks = () => [...overlay.querySelectorAll('.qf-chunk-plan-extras input[type="checkbox"]')];
-      const updateMoreCount = () => {
-        const n = extraChecks().filter(c => c.checked).length;
-        moreCountEl.textContent = n > 0 ? `· เปิด ${n} รายการ` : '';
-      };
-      moreBtn.addEventListener('click', () => {
-        const expanded = moreBtn.getAttribute('aria-expanded') === 'true';
-        moreBtn.setAttribute('aria-expanded', expanded ? 'false' : 'true');
-        extrasEl.hidden = expanded;
-      });
-      extraChecks().forEach(c => c.addEventListener('change', updateMoreCount));
-      updateMoreCount();
+      if (moreBtn) {
+        const extraChecks = () => [...overlay.querySelectorAll('.qf-chunk-plan-extras input[type="checkbox"]')];
+        const updateMoreCount = () => {
+          const cnt = extraChecks().filter(c => c.checked).length;
+          moreCountEl.textContent = cnt > 0 ? `· เปิด ${cnt} รายการ` : '';
+        };
+        moreBtn.addEventListener('click', () => {
+          const expanded = moreBtn.getAttribute('aria-expanded') === 'true';
+          moreBtn.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+          extrasEl.hidden = expanded;
+        });
+        extraChecks().forEach(c => c.addEventListener('change', updateMoreCount));
+        updateMoreCount();
+      }
 
       const cleanup = (val) => { overlay.remove(); resolve(val); };
 
@@ -2126,14 +2395,20 @@
       document.addEventListener('keydown', onKey);
 
       submitBtn.onclick = () => {
-        const mode = getMode();
         const withPickingList = overlay.querySelector('.qf-chunk-picking-chk')?.checked || false;
         const combined = overlay.querySelector('.qf-chunk-combined-chk')?.checked || false;
-        const withDivider = overlay.querySelector('.qf-chunk-divider-chk')?.checked || false;
+        const withDivider = overlay.querySelector('.qf-chunk-divider-chk')?.checked !== false;
         savePickingListPref(withPickingList);
 
-        let n = null;
-        let x = null;
+        // Case A: small multi-SKU — no radio, mode from combined checkbox
+        if (isSmallMultiSku) {
+          const mode = combined ? 'single' : 'by-sku';
+          cleanup({ mode, n: null, x: null, withPickingList, combined, withDivider });
+          return;
+        }
+
+        const mode = getMode();
+        let n = null, x = null;
 
         if (mode === 'even') {
           n = parseInt(nInput.value);
@@ -2142,7 +2417,7 @@
             nInput.value = clamped;
             nInput.classList.add('qf-input-error');
             setTimeout(() => nInput.classList.remove('qf-input-error'), 600);
-            return; // Don't submit yet — let user see the correction.
+            return;
           }
           n = clamped;
         } else if (mode === 'every') {
@@ -2608,10 +2883,10 @@
     const qty = s.quantity || 1;
 
     if (v?.replace && variantOverride) {
-      return { primary: `${variantOverride} ${qty}`, secondary: '' };
+      return { primary: `${variantOverride} x${qty}`, secondary: '' };
     }
     return {
-      primary: `${productAlias} ${qty}`,
+      primary: `${productAlias} x${qty}`,
       secondary: variantName,
     };
   }
@@ -2629,15 +2904,15 @@
       const variantOverride = (v?.alias || '').trim();
       const variantName = variantOverride || variantDisplayName(s);
       const qty = s.quantity || 1;
-      if (v?.replace && variantOverride) return `${variantOverride} ${qty}`;
-      return variantName ? `${productAlias} ${variantName} ${qty}` : `${productAlias} ${qty}`;
+      if (v?.replace && variantOverride) return `${variantOverride} x${qty}`;
+      return variantName ? `${productAlias} ${variantName} x${qty}` : `${productAlias} x${qty}`;
     });
     return { mode: 'multi', text: parts.join(' + ') };
   }
 
   async function overlayAliasOnPdf(pdfBytes, fulfillUnitIds, onProgress, workerName, workerIcon) {
     if (!window.PDFLib) return pdfBytes;
-    const { PDFDocument, rgb } = window.PDFLib;
+    const { PDFDocument, rgb, degrees } = window.PDFLib;
     const fontBytes = await ensureFontBytes();
     const pdfDoc = await PDFDocument.load(pdfBytes);
     if (window.fontkit) pdfDoc.registerFontkit(window.fontkit);
@@ -2645,63 +2920,127 @@
     const pages = pdfDoc.getPages();
     if (!pages.length || !fulfillUnitIds?.length) return await pdfDoc.save();
 
-    // Pages may be grouped per fulfillUnit (e.g., shipping label + packing list = 2 pages per unit)
+    const lo = loadLabelOverlay();
+    const OP = Math.min(lo.opacity ?? 0.85, 0.90);
+
+    // Pre-embed shop image once for all pages
+    let shopImg = null;
+    if (lo.enabled && lo.shopImageDataUrl) {
+      try {
+        const b64 = lo.shopImageDataUrl.split(',')[1] || '';
+        const raw = atob(b64);
+        const u8 = new Uint8Array(raw.length);
+        for (let j = 0; j < raw.length; j++) u8[j] = raw.charCodeAt(j);
+        shopImg = lo.shopImageDataUrl.startsWith('data:image/png')
+          ? await pdfDoc.embedPng(u8) : await pdfDoc.embedJpg(u8);
+      } catch { shopImg = null; }
+    }
+
     const pagesPerUnit = Math.max(1, Math.round(pages.length / fulfillUnitIds.length));
     const total = pages.length;
 
+    // Fit text to maxWidth, shrink size if needed
     const fitWidth = (text, baseSize, maxWidth) => {
       let size = baseSize;
-      let w = font.widthOfTextAtSize(text, size);
-      if (w > maxWidth) { size = size * (maxWidth / w); w = font.widthOfTextAtSize(text, size); }
-      return { size, width: w };
+      const w = font.widthOfTextAtSize(text, size);
+      if (w > maxWidth) size = size * (maxWidth / w);
+      return { size, width: font.widthOfTextAtSize(text, size) };
     };
-    const draw = (page, text, y, baseSize) => {
+
+    // Draw centered text with optional white stroke (for alias/product labels)
+    const draw = (page, text, y, baseSize, opts = {}) => {
       const { width } = page.getSize();
       const { size, width: tw } = fitWidth(text, baseSize, width - 16);
-      page.drawText(text, {
-        x: (width - tw) / 2, y, size, font,
-        color: rgb(0, 0, 0), opacity: 0.55,
-      });
+      const x = (width - tw) / 2;
+      const op = opts.opacity ?? 0.85;
+      if (opts.stroke) {
+        for (const [dx, dy] of [[-1,0],[1,0],[0,-1],[0,1]]) {
+          page.drawText(text, { x: x+dx, y: y+dy, size, font, color: rgb(1,1,1), opacity: Math.min(op+0.05, 0.95) });
+        }
+      }
+      page.drawText(text, { x, y, size, font, color: rgb(0,0,0), opacity: op });
     };
 
     for (let i = 0; i < pages.length; i++) {
       const unitIdx = Math.min(fulfillUnitIds.length - 1, Math.floor(i / pagesPerUnit));
-      const rec = state.records.get(fulfillUnitIds[unitIdx]);
+      const fulfillId = fulfillUnitIds[unitIdx];
+      const rec = state.records.get(fulfillId);
       const lines = buildPageLines(rec);
       const page = pages[i];
-      const { height } = page.getSize();
-      const bigSize = Math.min(height * 0.05, 22);
-      const smallSize = Math.min(height * 0.032, 13);
+      const { width: pw, height: ph } = page.getSize();
+      // Alias text sizes reduced by 10% per user request (keeps overlay unobtrusive).
+      const bigSize = Math.min(ph * 0.05, 22) * 0.9;
+      const smallSize = Math.min(ph * 0.032, 13) * 0.9;
+
+      // ── J&T carrier detection ────────────────────────────────────────────
+      const carrierId = state.carrierOf.get(fulfillId) || '';
+      const carrierName = (state.carriers.get(carrierId)?.name || '').toLowerCase();
+      const isJnT = carrierName.includes('j&t') || carrierName.includes('j and t') || carrierName.includes('jnt') || carrierId.toLowerCase().includes('jt') || carrierId.toLowerCase().includes('j&t');
+      // Only apply J&T masks when page dimensions exactly match calibrated A6 (298×420pt ±5pt).
+      // Live labels from different batches may be A4 or other sizes — wrong-size masks corrupt content.
+      const isA6 = Math.abs(pw - 298) <= 5 && Math.abs(ph - 420) <= 5;
+
+      // ── Label overlay (J&T A6 only when enabled) ─────────────────────────
+      if (lo.enabled && isJnT && isA6) {
+        // 1. White mask rects
+        for (const r of J_AND_T_MASK_RECTS) {
+          page.drawRectangle({ x: r.x, y: r.y, width: r.w, height: r.h, color: rgb(1,1,1), borderWidth: 0 });
+        }
+
+        // 2. Vertical marketing text in masked columns (rotated 90°), centered in 220pt zone
+        const mktText = (lo.marketingText || '').slice(0, 50);
+        if (mktText) {
+          const colSize = Math.max(5.5, Math.min(9, 120 / Math.max(mktText.length, 13)));
+          const mktW = font.widthOfTextAtSize(mktText, colSize);
+          // Mask zone: y=38..282 (244pt). Aim center at y=200 (upper half) for visual emphasis.
+          const colY = Math.max(64, Math.min(200 - mktW / 2, 278 - mktW));
+          page.drawText(mktText, { x: 9,   y: colY, size: colSize, font, color: rgb(0,0,0), rotate: degrees(90), opacity: OP });
+          page.drawText(mktText, { x: 291, y: colY, size: colSize, font, color: rgb(0,0,0), rotate: degrees(90), opacity: OP });
+        }
+
+        // 3. Shop image + header main/sub — only for single-SKU orders (not multi-SKU combo)
+        const isSingleSku = lines?.mode !== 'multi';
+        if (isSingleSku) {
+          // Image slot: x=2..24, y=42..64 (22×22pt, inside masked footer zone)
+          if (shopImg) {
+            page.drawImage(shopImg, { x: 2, y: 42, width: 22, height: 22, opacity: OP });
+          }
+          const hdrX = shopImg ? 26 : 2;
+          const hdrMaxW = 163; // up to x=189 (Order ID starts x>190)
+          const h1 = (lo.headerMain || '').slice(0, 50);
+          const h2 = (lo.headerSub || '').slice(0, 50);
+          if (h1) {
+            const { size: s1, width: w1 } = fitWidth(h1, 7, hdrMaxW);
+            page.drawText(h1, { x: hdrX, y: 55, size: s1, font, color: rgb(0,0,0), opacity: OP });
+          }
+          if (h2) {
+            const { size: s2 } = fitWidth(h2, 5.5, hdrMaxW);
+            page.drawText(h2, { x: hdrX, y: 44, size: s2, font, color: rgb(0,0,0), opacity: OP });
+          }
+        }
+      }
+
+      // ── Alias/product label — opacity reduced a further 10% (×0.9) vs global OP
+      const ALIAS_OP = OP * 0.9;
       if (lines?.mode === 'single') {
-        // big top, small below
         if (lines.secondary) {
-          draw(page, lines.primary, 4 + smallSize + 2, bigSize); // top line above small
-          draw(page, lines.secondary, 4, smallSize);             // bottom line
+          draw(page, lines.primary, 4 + smallSize + 2, bigSize, { stroke: true, opacity: ALIAS_OP });
+          draw(page, lines.secondary, 4, smallSize, { stroke: true, opacity: ALIAS_OP });
         } else {
-          draw(page, lines.primary, 6, bigSize);
+          draw(page, lines.primary, 6, bigSize, { stroke: true, opacity: ALIAS_OP });
         }
       } else if (lines?.mode === 'multi') {
-        draw(page, lines.text, 6, bigSize);
+        draw(page, lines.text, 6, bigSize, { stroke: true, opacity: ALIAS_OP });
       }
+
+      // ── Worker name (top-right) ──────────────────────────────────────────
       if (workerName) {
-        const { width: pw, height: ph } = page.getSize();
         const wSize = Math.min(ph * 0.04, 18);
-        // §6.2: Drop "แพ็ค: " prefix and icon — Sarabun-Bold lacks Unicode symbol
-        // glyphs so they render as □. Worker is identified by name only.
-        // Position: top-RIGHT (user request) with measured text width.
-        const wText = workerName;
-        const wWidth = font.widthOfTextAtSize(wText, wSize);
-        page.drawText(wText, {
-          x: Math.max(6, pw - wWidth - 6),
-          y: ph - wSize - 6,
-          size: wSize, font,
-          color: rgb(0, 0, 0), opacity: 0.85,
-        });
+        const wWidth = font.widthOfTextAtSize(workerName, wSize);
+        page.drawText(workerName, { x: Math.max(6, pw - wWidth - 6), y: ph - wSize - 6, size: wSize, font, color: rgb(0,0,0), opacity: OP });
       }
-      if (onProgress && (i % 20 === 0 || i === total - 1)) {
-        onProgress(i + 1, total);
-        await sleep(0);
-      }
+
+      if (onProgress && (i % 20 === 0 || i === total - 1)) { onProgress(i + 1, total); await sleep(0); }
     }
     return await pdfDoc.save();
   }
@@ -3174,6 +3513,19 @@
     return n;
   }
 
+  // Same as carrierFilteredSize but IGNORES labelStatus filter. Used to decide
+  // whether a printed card should remain visible (greyed-out) under "ยังไม่พิมพ์"
+  // filter — otherwise _count drops to 0 after print and the card disappears
+  // entirely instead of showing as done visual feedback.
+  function carrierFilteredSizeIgnoreLabel(idSet) {
+    if (!idSet) return 0;
+    let n = 0;
+    for (const id of idSet) {
+      if (passesCarrier(id) && passesPreOrder(id) && passesDate(id)) n++;
+    }
+    return n;
+  }
+
   function collectFulfillIds(productId, skuId, scenario) {
     // scenario: 'single' (1 SKU qty=1) | 'multi' (1 SKU qty>1)
     const product = state.products.get(productId);
@@ -3208,7 +3560,7 @@
       const teams = state.teams || [];
       const hasAssignees = state.workers.length > 0 || teams.length > 0;
       const last = loadLastAssignee();
-      const workerOpts = state.workers.length ? `<optgroup label="คน">${state.workers.map(w => `<option value="worker:${escapeHtml(w.id)}"${last === 'worker:' + w.id ? ' selected' : ''}>${escapeHtml(w.icon)}  ${escapeHtml(w.name)}</option>`).join('')}</optgroup>` : '';
+      const workerOpts = state.workers.length ? `<optgroup label="คน">${state.workers.map(w => `<option value="worker:${escapeHtml(w.id)}"${last === 'worker:' + w.id ? ' selected' : ''}>${escapeHtml(w.name)}</option>`).join('')}</optgroup>` : '';
       const teamOpts = teams.length ? `<optgroup label="ทีม">${teams.map(t => `<option value="team:${escapeHtml(t.id)}"${last === 'team:' + t.id ? ' selected' : ''}>👥  ${escapeHtml(t.name)}</option>`).join('')}</optgroup>` : '';
       const skipOpt = `<option value=""${!last ? ' selected' : ''}>— ไม่ระบุ —</option>`;
       const packerRowHtml = hasAssignees ? `
@@ -3221,7 +3573,6 @@
         <div class="qf-modal" role="dialog">
           <div class="qf-modal-title">ยืนยันพิมพ์</div>
           <div class="qf-modal-body">
-            ${packerRowHtml}
             <div class="qf-modal-target">${escapeHtml(title)}</div>
             ${summary ? `<div class="qf-modal-summary">${escapeHtml(summary)}</div>` : ''}
             <div class="qf-modal-count">${count} ฉลาก</div>
@@ -3232,6 +3583,7 @@
               <span class="qf-modal-toggle-hint">ปิดถ้าอยากได้ฉลากดิบ ไม่มีตัวอักษรใต้ฉลาก</span>
             </label>
             <div class="qf-modal-warn">ระบบจะส่งคำสั่งพิมพ์ทันที TikTok จะบันทึกว่าฉลากถูกพิมพ์</div>
+            ${packerRowHtml}
           </div>
           <div class="qf-modal-actions">
             <button class="qf-btn-cancel">ยกเลิก</button>
@@ -3353,16 +3705,6 @@
       } else {
         modifiedBytes = pdfBytes;
       }
-      // Apply user-chosen PDF template ON TOP of (after) the alias watermark so
-      // custom logos/text can optionally cover or sit alongside it.
-      try {
-        const _activeTpl = getActivePdfTemplate();
-        if (_activeTpl && modifiedBytes) {
-          modifiedBytes = await applyPdfTemplate(modifiedBytes, _activeTpl, buildTemplateRecordData(batch));
-        }
-      } catch (_tplErr) {
-        console.warn('[QF] pdf template apply failed, using overlay-only bytes:', _tplErr);
-      }
 
       setP(1.0);
       return modifiedBytes;
@@ -3470,6 +3812,58 @@
     return { bytes, pageCount: finalDoc.getPageCount() };
   }
 
+  // Convert an image URL to a grayscale JPEG ArrayBuffer using an off-screen canvas.
+  // Returns null on failure so callers can skip the image gracefully.
+  async function toGrayscaleJpeg(url) {
+    try {
+      const resp = await _origFetch.call(window, url, { credentials: 'omit' });
+      if (!resp.ok) return null;
+      const blob = await resp.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      return await new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0);
+          const d = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          for (let i = 0; i < d.data.length; i += 4) {
+            const g = Math.round(0.299 * d.data[i] + 0.587 * d.data[i + 1] + 0.114 * d.data[i + 2]);
+            d.data[i] = d.data[i + 1] = d.data[i + 2] = g;
+          }
+          ctx.putImageData(d, 0, 0);
+          canvas.toBlob(async (b) => {
+            URL.revokeObjectURL(blobUrl);
+            resolve(b ? await b.arrayBuffer() : null);
+          }, 'image/jpeg', 0.85);
+        };
+        img.onerror = () => { URL.revokeObjectURL(blobUrl); resolve(null); };
+        img.src = blobUrl;
+      });
+    } catch { return null; }
+  }
+
+  // Split text into lines that fit within maxW at the given font size (word-wrap).
+  function wrapTextLines(font, text, size, maxW) {
+    const words = text.split(/\s+/).filter(Boolean);
+    const lines = [];
+    let cur = '';
+    for (const word of words) {
+      const candidate = cur ? `${cur} ${word}` : word;
+      if (font.widthOfTextAtSize(candidate, size) <= maxW) {
+        cur = candidate;
+      } else {
+        if (cur) lines.push(cur);
+        // If a single word is wider than maxW, let it overflow (no mid-word break).
+        cur = word;
+      }
+    }
+    if (cur) lines.push(cur);
+    return lines;
+  }
+
   // §4.5 / §4.6: Build a single divider page for the combined multi-SKU PDF.
   // payload = {alias, officialName, variantName, productImageURL, qty,
   //            carrierName?, carrierIconURL?}
@@ -3484,15 +3878,17 @@
     const mult = (k) => DIVIDER_SIZE_MAP[f[k]?.size] || 1.0;
     const vis = (k) => !!f[k]?.visible;
     // Map new config → existing cfg.* flags expected by downstream code (minimal churn).
+    // name / variant / image / footer always forced on — divider must be a
+    // reliable pack-check reference regardless of which preset the user chose.
     const cfg = {
       showAlias:   vis('alias'),
-      showName:    vis('name'),
-      showVariant: vis('variant'),
+      showName:    true,
+      showVariant: true,
       showCarrier: vis('carrier'),
-      showImage:   vis('image'),
+      showImage:   true,
       showQty:     vis('qty'),
       showWorker:  vis('worker'),
-      showFooter:  vis('footer'),
+      showFooter:  true,
       aliasScale:  mult('alias'),
       imageFirst:  !!eff.imageFirst,
     };
@@ -3538,18 +3934,33 @@
       topCursor -= 4;
     }
 
+    // --- Print timestamp (always shown) ---
+    {
+      const now = new Date();
+      const pad2 = n => String(n).padStart(2, '0');
+      const tsText = `พิมพ์เมื่อ ${pad2(now.getDate())}/${pad2(now.getMonth() + 1)}/${now.getFullYear()}  ${pad2(now.getHours())}:${pad2(now.getMinutes())} น.`;
+      const tsSize = 8;
+      topCursor -= tsSize + 2;
+      page.drawText(tsText, {
+        x: PAD_X,
+        y: topCursor,
+        size: tsSize,
+        font,
+        color: LIGHT,
+        maxWidth: contentMaxW,
+      });
+      topCursor -= 6;
+    }
+
     // --- photo-first preset renders image FIRST, at top ---
     // For other presets image is placed between carrier and qty.
     const IMG_MAX = 70 * imgMult; // max side for product image (shrunk from 120 to leave room)
     let topImageBottom = null;
     if (cfg.imageFirst && cfg.showImage && payload.productImageURL) {
       try {
-        const imgResp = await _origFetch.call(window, payload.productImageURL, { credentials: 'omit' });
-        if (imgResp.ok) {
-          const imgBuf = await imgResp.arrayBuffer();
-          const ct = imgResp.headers.get('content-type') || '';
-          const isPng = ct.includes('png') || payload.productImageURL.toLowerCase().includes('.png');
-          const image = isPng ? await pdfDoc.embedPng(imgBuf) : await pdfDoc.embedJpg(imgBuf);
+        const grayBuf = await toGrayscaleJpeg(payload.productImageURL);
+        if (grayBuf) {
+          const image = await pdfDoc.embedJpg(grayBuf);
           const maxSide = 100; // photo-first: bigger
           const ratio = image.width / image.height;
           const iw = ratio >= 1 ? maxSide : maxSide * ratio;
@@ -3564,7 +3975,7 @@
 
     // --- Alias block (always the biggest element when shown) ---
     if (cfg.showAlias && payload.alias) {
-      const baseSize = Math.min(H * 0.08, 36) * (cfg.aliasScale || 1);
+      const baseSize = Math.min(H * 0.05, 20) * (cfg.aliasScale || 1);
       const aliasW0 = font.widthOfTextAtSize(payload.alias, baseSize);
       const scale = aliasW0 > contentMaxW ? contentMaxW / aliasW0 : 1;
       const aliasSize = baseSize * scale;
@@ -3580,42 +3991,38 @@
       topCursor -= 4;
     }
 
-    // --- Official name (truncate, 10pt) ---
+    // --- Official name (word-wrap, up to 3 lines, 10pt) ---
     if (cfg.showName && payload.officialName) {
       const nameSize = 10 * mult('name');
-      let nameText = payload.officialName;
-      while (nameText.length > 2 && font.widthOfTextAtSize(nameText, nameSize) > contentMaxW) {
-        nameText = nameText.slice(0, -1);
+      const nameLines = wrapTextLines(font, payload.officialName, nameSize, contentMaxW).slice(0, 3);
+      for (const line of nameLines) {
+        const lineW = font.widthOfTextAtSize(line, nameSize);
+        topCursor -= nameSize + 2;
+        page.drawText(line, {
+          x: (W - lineW) / 2,
+          y: topCursor,
+          size: nameSize,
+          font,
+          color: DARK,
+        });
       }
-      if (nameText !== payload.officialName) nameText = nameText.slice(0, -1) + '…';
-      const nameW = font.widthOfTextAtSize(nameText, nameSize);
-      topCursor -= nameSize + 2;
-      page.drawText(nameText, {
-        x: (W - nameW) / 2,
-        y: topCursor,
-        size: nameSize,
-        font,
-        color: DARK,
-      });
     }
 
-    // --- Variant line (9pt grey) ---
+    // --- Variant line (9pt grey, up to 2 lines) ---
     if (cfg.showVariant && payload.variantName) {
       const varSize = 9 * mult('variant');
-      let varText = payload.variantName;
-      while (varText.length > 2 && font.widthOfTextAtSize(varText, varSize) > contentMaxW) {
-        varText = varText.slice(0, -1);
+      const varLines = wrapTextLines(font, payload.variantName, varSize, contentMaxW).slice(0, 2);
+      for (const line of varLines) {
+        const lineW = font.widthOfTextAtSize(line, varSize);
+        topCursor -= varSize + 2;
+        page.drawText(line, {
+          x: (W - lineW) / 2,
+          y: topCursor,
+          size: varSize,
+          font,
+          color: MID,
+        });
       }
-      if (varText !== payload.variantName) varText = varText.slice(0, -1) + '…';
-      const varW = font.widthOfTextAtSize(varText, varSize);
-      topCursor -= varSize + 2;
-      page.drawText(varText, {
-        x: (W - varW) / 2,
-        y: topCursor,
-        size: varSize,
-        font,
-        color: MID,
-      });
       topCursor -= 4;
     }
 
@@ -3674,7 +4081,7 @@
 
     // Footer
     if (cfg.showFooter) {
-      const footerText = 'กรุณาตรวจสอบจำนวนสินค้าก่อนแพ็คสินค้า';
+      const footerText = 'กรุณาตรวจสอบรายการสินค้าให้ถูกต้องก่อนแพ็ค';
       const footerSize = 8 * mult('footer');
       const footerW = font.widthOfTextAtSize(footerText, footerSize);
       page.drawText(footerText, {
@@ -3707,12 +4114,9 @@
       const availH = availableTop - availableBot;
       if (availH > 30) {
         try {
-          const imgResp = await _origFetch.call(window, payload.productImageURL, { credentials: 'omit' });
-          if (imgResp.ok) {
-            const imgBuf = await imgResp.arrayBuffer();
-            const ct = imgResp.headers.get('content-type') || '';
-            const isPng = ct.includes('png') || payload.productImageURL.toLowerCase().includes('.png');
-            const image = isPng ? await pdfDoc.embedPng(imgBuf) : await pdfDoc.embedJpg(imgBuf);
+          const grayBuf = await toGrayscaleJpeg(payload.productImageURL);
+          if (grayBuf) {
+            const image = await pdfDoc.embedJpg(grayBuf);
             const maxSide = Math.min(IMG_MAX, availH, contentMaxW);
             const ratio = image.width / image.height;
             const iw = ratio >= 1 ? maxSide : maxSide * ratio;
@@ -4104,15 +4508,6 @@
             labelsBytes = await overlayAliasOnPdf(labelsBytes, part.ids, () => {}, workerName, workerIcon);
           } catch (_oErr) { /* continue unmodified */ }
         }
-        // Apply active PDF template (user's custom header/logo/etc).
-        if (labelsBytes) {
-          try {
-            const _activeTpl = getActivePdfTemplate();
-            if (_activeTpl) {
-              labelsBytes = await applyPdfTemplate(labelsBytes, _activeTpl, buildTemplateRecordData(part.ids));
-            }
-          } catch (_tErr) { /* continue unmodified */ }
-        }
 
         if (withDivider) {
           await buildDividerPage(finalDoc, { W, H }, {
@@ -4458,6 +4853,38 @@
           assigneeName: historyMeta.assigneeName || null,
         });
         renderHistoryBadge();
+
+        // Save order-level history to IndexedDB (for claim lookup).
+        const _pad = n => String(n).padStart(2, '0');
+        const _now = Date.now();
+        const _d = new Date(_now);
+        const _date = `${_d.getFullYear()}-${_pad(_d.getMonth()+1)}-${_pad(_d.getDate())}`;
+        const _orderRecs = [];
+        for (const _chunk of chunks) {
+          for (const _id of (_chunk.ids || [])) {
+            const _rec = state.records.get(_id);
+            if (!_rec) continue;
+            const _cid = state.carrierOf.get(_id);
+            const _carrier = _cid ? ([...state.carriers.values()].find(c => c.id === _cid)?.name || null) : null;
+            for (const _oid of (_rec.orderIds || [])) {
+              if (!_oid) continue;
+              _orderRecs.push({
+                orderId: String(_oid),
+                fulfillUnitId: String(_id),
+                ts: _now,
+                date: _date,
+                carrier: _carrier,
+                assigneeKind: historyMeta.assigneeKind || null,
+                teamId: historyMeta.teamId || null,
+                teamName: historyMeta.teamName || null,
+                teamSnapshot: historyMeta.teamSnapshot || null,
+                workerId: historyMeta.workerId || null,
+                workerName: historyMeta.workerName || null,
+              });
+            }
+          }
+        }
+        saveOrderHistoryBatch(_orderRecs);
       } catch (e) {
         console.warn('[QF] failed to save history:', e);
       }
@@ -5254,6 +5681,27 @@
     return '\ufeff' + [...preamble, header, ...rows].join('\r\n');
   }
 
+  function buildOrderHistoryCsv(records) {
+    const q = (v) => '"' + String(v == null ? '' : v).replace(/[\r\n]+/g, ' ').replace(/"/g, '""') + '"';
+    const header = [
+      q('orderId'), q('fulfillUnitId'), q('date'), q('time'), q('carrier'),
+      q('assigneeKind'), q('workerName'), q('teamName'), q('teamMembers'),
+    ].join(',');
+    const pad = n => String(n).padStart(2, '0');
+    const rows = records.map(r => {
+      const d = new Date(r.ts);
+      const time = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+      const teamMembers = Array.isArray(r.teamSnapshot)
+        ? r.teamSnapshot.map(m => m.workerName || m.workerId).join(', ')
+        : '';
+      return [
+        q(r.orderId), q(r.fulfillUnitId), q(r.date), q(time), q(r.carrier || ''),
+        q(r.assigneeKind || ''), q(r.workerName || ''), q(r.teamName || ''), q(teamMembers),
+      ].join(',');
+    });
+    return '\ufeff' + [header, ...rows].join('\r\n');
+  }
+
   function downloadCsv(csv, filename) {
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -5338,6 +5786,13 @@
           <div class="qf-csv-section-label">ประเภทรายงาน:</div>
           <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-type" value="history" checked> ประวัติการพิมพ์ (per chunk audit log)</label>
           <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-type" value="daily"> แผนงานรายวัน (daily planning summary)</label>
+          <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-type" value="orders"> ประวัติออเดอร์ (order claim lookup)</label>
+          <div id="qf-csv-orders-opts" style="display:none;">
+            <div class="qf-csv-section-label" style="margin-top:10px;">ช่วงเวลา (สูงสุด 90 วัน):</div>
+            <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-orders-range" value="7d" checked> 7 วัน</label>
+            <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-orders-range" value="30d"> 30 วัน</label>
+            <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-orders-range" value="all"> ทั้งหมด (90 วัน)</label>
+          </div>
           <div id="qf-csv-history-opts">
             <div class="qf-csv-section-label" style="margin-top:10px;">ช่วงเวลา:</div>
             <label class="qf-csv-radio-label"><input type="radio" name="qf-csv-range" value="today"> วันนี้</label>
@@ -5369,12 +5824,13 @@
     const onKey = (e) => { if (e.key === 'Escape') { cleanup(); document.removeEventListener('keydown', onKey); } };
     document.addEventListener('keydown', onKey);
 
-    // Toggle history vs daily option panels
+    // Toggle option panels per CSV type
     overlay.querySelectorAll('input[name="qf-csv-type"]').forEach(radio => {
       radio.addEventListener('change', () => {
-        const isHistory = overlay.querySelector('input[name="qf-csv-type"]:checked').value === 'history';
-        overlay.querySelector('#qf-csv-history-opts').style.display = isHistory ? '' : 'none';
-        overlay.querySelector('#qf-csv-daily-opts').style.display = isHistory ? 'none' : '';
+        const val = overlay.querySelector('input[name="qf-csv-type"]:checked').value;
+        overlay.querySelector('#qf-csv-history-opts').style.display = val === 'history' ? '' : 'none';
+        overlay.querySelector('#qf-csv-daily-opts').style.display = val === 'daily' ? '' : 'none';
+        overlay.querySelector('#qf-csv-orders-opts').style.display = val === 'orders' ? '' : 'none';
       });
     });
 
@@ -5401,7 +5857,7 @@
         }
         if (entries.length === 0) { showToast('ไม่มีข้อมูลในช่วงที่เลือก', 2000); return; }
         downloadCsv(buildHistoryCsv(entries), `quickfilter-history-${todayStr}.csv`);
-      } else {
+      } else if (csvType === 'daily') {
         const range = overlay.querySelector('input[name="qf-csv-daily-range"]:checked').value;
         let cutoff = 0;
         if (range === 'today') cutoff = dayStart(now);
@@ -5409,6 +5865,27 @@
         const entries = loadHistory().filter(e => e.timestamp >= cutoff);
         if (entries.length === 0) { showToast('ไม่มีข้อมูลในช่วงที่เลือก', 2000); return; }
         downloadCsv(buildDailyCsv(entries), `quickfilter-daily-${todayStr}.csv`);
+        cleanup();
+      } else {
+        // orders — async because IndexedDB
+        const range = overlay.querySelector('input[name="qf-csv-orders-range"]:checked').value;
+        let cutoffTs = 0;
+        if (range === '7d') cutoffTs = dayStart(now) - 6 * 24 * 60 * 60 * 1000;
+        else if (range === '30d') cutoffTs = dayStart(now) - 29 * 24 * 60 * 60 * 1000;
+        openOrderHistoryDb().then(db => {
+          const tx = db.transaction(ORDER_HISTORY_STORE, 'readonly');
+          const idx = tx.objectStore(ORDER_HISTORY_STORE).index('ts');
+          const range_ = cutoffTs > 0 ? IDBKeyRange.lowerBound(cutoffTs) : null;
+          const req = range_ ? idx.getAll(range_) : idx.getAll();
+          req.onsuccess = () => {
+            const records = req.result || [];
+            if (!records.length) { showToast('ไม่มีข้อมูลออเดอร์ในช่วงที่เลือก', 2000); return; }
+            downloadCsv(buildOrderHistoryCsv(records), `quickfilter-orders-${todayStr}.csv`);
+            cleanup();
+          };
+          req.onerror = () => showToast('โหลดข้อมูลไม่สำเร็จ', 2000);
+        }).catch(() => showToast('เปิด IndexedDB ไม่สำเร็จ', 2000));
+        return;
       }
       cleanup();
     };
@@ -5432,9 +5909,7 @@
             <div id="qf-settings-menu" class="qf-settings-menu" style="display:none;">
               <button id="qf-menu-csv">ดาวน์โหลดประวัติ CSV</button>
               <button id="qf-menu-plan">🎨 วางแผน</button>
-              <button id="qf-menu-divider-preset">🗂 ใบคั่น - รูปแบบ</button>
-              <button id="qf-menu-pdf-templates">📄 เทมเพลต PDF</button>
-              <button id="qf-menu-pdf-template-new">✏️ สร้างเทมเพลต</button>
+              <button id="qf-menu-pdf-templates">🏷️ ปรับแต่งฉลาก</button>
             </div>
           </div>
           <button id="qf-toggle-btn" title="ย่อ/ขยาย">−</button>
@@ -5548,29 +6023,7 @@
       pdfTplBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         settingsMenu.style.display = 'none';
-        openPdfTemplateManager();
-      });
-    }
-    const pdfTplNewBtn = document.getElementById('qf-menu-pdf-template-new');
-    if (pdfTplNewBtn) {
-      pdfTplNewBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        settingsMenu.style.display = 'none';
-        const tpls = loadPdfTemplates();
-        if (tpls.length >= MAX_PDF_TEMPLATES) {
-          showToast(`ครบ ${MAX_PDF_TEMPLATES} เทมเพลตแล้ว — ลบก่อนจึงสร้างใหม่ได้`, 3000);
-          openPdfTemplateManager();
-          return;
-        }
-        openPdfTemplateEditor();
-      });
-    }
-    const dividerPresetBtn = document.getElementById('qf-menu-divider-preset');
-    if (dividerPresetBtn) {
-      dividerPresetBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        settingsMenu.style.display = 'none';
-        openDividerPresetModal();
+        openLabelOverlaySettings();
       });
     }
     renderHistoryBadge();
@@ -5991,6 +6444,7 @@
       }
     }
     updateSelectionBar();
+    window.__qfPlanRefresh?.();
   }
 
   function renderContent() {
@@ -6006,11 +6460,28 @@
       const type = state.currentTab === 'single' ? 'single_item' : 'single_sku';
       const labelsPg = isLabelsPage();
       const productsRaw = labelsPg
-        ? [...state.products.values()].map(p => ({...p, _count: carrierFilteredSize(p[idsKey])}))
+        ? [...state.products.values()].map(p => ({
+            ...p,
+            _count: carrierFilteredSize(p[idsKey]),
+            // _totalVisible ignores labelStatus — lets us keep cards visible as
+            // greyed-out "done" indicators under the "ยังไม่พิมพ์" filter.
+            _totalVisible: carrierFilteredSizeIgnoreLabel(p[idsKey]),
+          }))
         : [...state.products.values()].map(p => ({...p, _count: state.currentTab === 'single' ? p.orderCountSingle : p.orderCountMulti}));
       const products = productsRaw
-        .filter(p => p._count > 0)
-        .sort((a, b) => b._count - a._count);
+        .filter(p => {
+          if (p._count > 0) return true;
+          // Keep printed cards visible so user gets done visual feedback.
+          // isLabelsDone handles the "printed" filter edge case (returns false).
+          return labelsPg && p._totalVisible > 0 && isLabelsDone(p[idsKey]);
+        })
+        .sort((a, b) => {
+          // Push done cards to the bottom so pending ones stay prominent.
+          const aDone = a._count === 0;
+          const bDone = b._count === 0;
+          if (aDone !== bDone) return aDone ? 1 : -1;
+          return b._count - a._count;
+        });
       if (!products.length) {
         wrap.innerHTML = '<div class="qf-empty">ไม่พบสินค้าในประเภทนี้</div>';
         return;
@@ -6020,6 +6491,9 @@
       const labels = isLabelsPage();
       const variantCount = (v) => labels
         ? carrierFilteredSize(v[idsKey])
+        : (state.currentTab === 'single' ? v.orderCountSingle : v.orderCountMulti);
+      const variantTotalVisible = (v) => labels
+        ? carrierFilteredSizeIgnoreLabel(v[idsKey])
         : (state.currentTab === 'single' ? v.orderCountSingle : v.orderCountMulti);
       const scenario = state.currentTab === 'single' ? 'single' : 'multi';
       for (const p of products) {
@@ -6036,18 +6510,31 @@
         card.title = cardDone
           ? `${p.productName}\n\nพิมพ์แล้ว — คลิกเพื่อเลือก: พิมพ์ซ้ำ หรือ ลบเครื่องหมาย ✓`
           : p.productName;
-        const variantsRaw = [...p.variants.values()].map(v => ({v, c: variantCount(v)}));
+        const variantsRaw = [...p.variants.values()].map(v => ({
+          v,
+          c: variantCount(v),
+          _totalVisible: variantTotalVisible(v),
+        }));
         // Skip the synthetic "no-variant" entry (skuId=null) that Shopee
         // items without model_id produce — it's product-level, not a real
         // variant, and rendering a badge for it would show "null".
-        const variants = variantsRaw.filter(x => x.c > 0 && x.v.skuId != null);
+        // Keep printed variants visible (as greyed-out badges) under
+        // "ยังไม่พิมพ์" filter so user still sees what was in this product.
+        const variants = variantsRaw.filter(x => {
+          if (x.v.skuId == null) return false;
+          if (x.c > 0) return true;
+          return labels && x._totalVisible > 0 && isLabelsDone(x.v[idsKey]);
+        });
         const hasBadges = variants.length >= 1;
         const aliasVal = labels ? (getAlias(p.productId) || '') : '';
         const showVariantToggle = labels && variants.length >= 1;
+        const countLabel = (cardDone && p._count === 0)
+          ? `พิมพ์แล้ว ${p._totalVisible || ''} ออเดอร์`.replace(/\s+/g, ' ').trim()
+          : `${p._count} ออเดอร์`;
         card.innerHTML = `
           <img src="${p.productImageURL}" alt="" referrerpolicy="no-referrer"/>
           <div class="qf-product-name">${escapeHtml(p.productName)}</div>
-          <div class="qf-product-count">${p._count} ออเดอร์</div>
+          <div class="qf-product-count">${countLabel}</div>
           ${labels ? `
             <input class="qf-alias-input" type="text" placeholder="ชื่อย่อ (เช่น แดง1)" value="${escapeHtml(aliasVal)}" maxlength="20"/>
             ${variants.length > 0 ? `<button class="qf-variant-link">ปรับตัวเลือก</button>` : ''}
@@ -6074,7 +6561,7 @@
         }
         if (hasBadges) {
           const badgesEl = card.querySelector('.qf-variant-badges');
-          for (const {v, c} of variants) {
+          for (const {v, c, _totalVisible: vTotal} of variants) {
             const badgeDone = labels
               ? isLabelsDone(v[idsKey])
               : isDone(p.productId, v.skuId, type);
@@ -6088,7 +6575,10 @@
               + (aliasOverride ? ' qf-badge-aliased' : '');
             badge.dataset.skuId = v.skuId;
             if (aliasOverride) badge.title = `${originalName} → ${aliasOverride}`;
-            badge.textContent = `${displayName} (${c})`;
+            // When pending count drops to 0 but variant was printed, show
+            // the pre-print count so the badge still reads sensibly.
+            const badgeCount = (badgeDone && c === 0 && vTotal > 0) ? vTotal : c;
+            badge.textContent = `${displayName} (${badgeCount})`;
             const variantItem = {type: 'variant', productId: p.productId, skuId: v.skuId, scenario};
             if (state.selectMode && isSelected(variantItem)) badge.classList.add('qf-selected');
             badge.addEventListener('click', async (e) => {
@@ -6126,21 +6616,32 @@
         }
         // §5.2: Qty chips — in multi scenario on labels page, always show so user sees "×N (count)".
         if (labels && scenario === 'multi' && p.fulfillUnitIdsByQty.size > 0) {
+          // Build buckets with BOTH the pending list (respects labelStatus filter)
+          // and the total visible list (ignores labelStatus) — lets printed chips
+          // remain visible as greyed-out "✓ ×N" feedback under the "ยังไม่พิมพ์" view.
           const qtyBuckets = [...p.fulfillUnitIdsByQty.entries()]
-            .map(([qty, idSet]) => ({ qty, ids: applyCarrierFilter([...idSet]) }))
-            .filter(b => b.ids.length > 0)
+            .map(([qty, idSet]) => {
+              const arr = [...idSet];
+              const totalIds = arr.filter(id => passesCarrier(id) && passesPreOrder(id) && passesDate(id));
+              const ids = totalIds.filter(id => passesLabelStatus(id));
+              return { qty, ids, totalIds };
+            })
+            .filter(b => b.totalIds.length > 0)
             .sort((a, b) => a.qty - b.qty);
           if (qtyBuckets.length >= 1) {
             const chipsRow = document.createElement('div');
             chipsRow.className = 'qf-qty-chips';
             for (const b of qtyBuckets) {
-              const allDone = b.ids.every(id =>
-                state.printedUnitIds.has(id) || state.records.get(id)?.labelStatus === LABEL_STATUS_PRINTED
-              );
+              // allDone = no pending items left in this bucket (and some existed).
+              const allDone = b.ids.length === 0 && b.totalIds.length > 0 && state.labelStatusFilter !== 'printed';
+              // When chip is done, "ids" is empty — swap to totalIds so the reprint
+              // handler has something to work with.
+              if (allDone) b.ids = b.totalIds;
               const chip = document.createElement('span');
               chip.className = 'qf-qty-chip' + (allDone ? ' qf-qty-chip--done' : '');
               chip.dataset.qty = b.qty;
-              chip.textContent = (allDone ? '\u2713 ' : '') + '\u00d7' + b.qty + ' (' + b.ids.length + ')';
+              const chipCount = allDone ? b.totalIds.length : b.ids.length;
+              chip.textContent = (allDone ? '\u2713 ' : '') + '\u00d7' + b.qty + ' (' + chipCount + ')';
               const qtyItem = { type: 'qty', productId: p.productId, skuId: null, qty: b.qty };
               chip.addEventListener('click', async e => {
                 e.stopPropagation();
@@ -6270,9 +6771,23 @@
       if (labelsPage) {
         // Group by combination signature, apply carrier filter to count
         const combos = [...state.weirdCombos.values()]
-          .map(c => ({...c, _count: carrierFilteredSize(c.fulfillUnitIds)}))
-          .filter(c => c._count > 0)
-          .sort((a, b) => b._count - a._count);
+          .map(c => ({
+            ...c,
+            _count: carrierFilteredSize(c.fulfillUnitIds),
+            // _totalVisible ignores labelStatus so we can keep printed combos
+            // visible as greyed-out "done" feedback under ยังไม่พิมพ์ filter.
+            _totalVisible: carrierFilteredSizeIgnoreLabel(c.fulfillUnitIds),
+          }))
+          .filter(c => {
+            if (c._count > 0) return true;
+            return c._totalVisible > 0 && isLabelsDone(c.fulfillUnitIds);
+          })
+          .sort((a, b) => {
+            const aDone = a._count === 0;
+            const bDone = b._count === 0;
+            if (aDone !== bDone) return aDone ? 1 : -1;
+            return b._count - a._count;
+          });
         if (!combos.length) {
           const empty = document.createElement('div');
           empty.className = 'qf-empty';
@@ -6302,9 +6817,12 @@
               <input class="qf-combo-alias-input" type="text" placeholder="ชื่อย่อ" value="${escapeHtml((getAlias(s.productId) || '').trim())}" maxlength="20"/>
             </div>
           `).join('');
+          const comboCountLabel = (comboDone && combo._count === 0 && combo._totalVisible > 0)
+            ? `พิมพ์แล้ว ${combo._totalVisible} ออเดอร์`
+            : `${combo._count} ออเดอร์`;
           card.innerHTML = `
             <div class="qf-combo-row">${itemsHtml}</div>
-            <div class="qf-combo-count">${combo._count} ออเดอร์</div>
+            <div class="qf-combo-count">${comboCountLabel}</div>
           `;
           // wire alias inputs + edit buttons
           card.querySelectorAll('.qf-combo-item').forEach(itemEl => {
@@ -6501,7 +7019,12 @@
     const platform = isShopee() ? 'sp' : 'tk';
     const sessionId = 'sess_' + Math.random().toString(36).slice(2, 10);
     const now = Date.now();
-    const allIds = [...state.records.keys()];
+    // 'all' mode: both printed + not-printed in records — exclude printed to avoid accidental reprint.
+    // 'printed' mode: user deliberately wants to reprint — include everything.
+    // 'not_printed' mode: processLabelRecord already excluded printed records — include everything.
+    const allIds = state.labelStatusFilter === 'all'
+      ? [...state.records.keys()].filter(id => state.records.get(id)?.labelStatus !== LABEL_STATUS_PRINTED)
+      : [...state.records.keys()];
     return {
       version: 2,
       sessionId,
@@ -6590,16 +7113,29 @@
   function showPlanChunkPopup(workerName, totalAvailable) {
     return new Promise(resolve => {
       if (totalAvailable === 0) { resolve(0); return; }
+
+      // Quick-set buttons: 10/20/30 only when they are strictly less than the total.
+      const quickVals = [10, 20, 30].filter(v => v < totalAvailable);
+      const quickBtnsHtml = [
+        ...quickVals.map(v => `<button class="qf-plan-chunk-quick-btn" data-val="${v}">${v}</button>`),
+        `<button class="qf-plan-chunk-quick-btn" data-val="${totalAvailable}">ทั้งหมด ${totalAvailable}</button>`,
+      ].join('');
+
       const overlay = document.createElement('div');
       overlay.className = 'qf-modal-overlay';
       overlay.innerHTML = `
         <div class="qf-modal qf-plan-chunk-popup" role="dialog">
           <div class="qf-plan-chunk-body">
             <div class="qf-plan-chunk-label">กี่ใบให้ ${escapeHtml(workerName)}?</div>
-            <div class="qf-plan-chunk-row">
-              <input type="number" class="qf-plan-chunk-input" min="1" max="${totalAvailable}" value="${totalAvailable}"/>
-              <button class="qf-plan-chunk-all-btn">ทั้งหมด ${totalAvailable}</button>
+            <div class="qf-plan-chunk-val-display">
+              <div class="qf-plan-chunk-val-num">${totalAvailable}</div>
+              <div class="qf-plan-chunk-val-unit">ใบ</div>
             </div>
+            <div class="qf-plan-chunk-slider-wrap">
+              <input type="range" class="qf-plan-chunk-slider" min="1" max="${totalAvailable}" value="${totalAvailable}"/>
+              <div class="qf-plan-chunk-ticks"><span>1</span><span>${totalAvailable}</span></div>
+            </div>
+            <div class="qf-plan-chunk-quick-btns">${quickBtnsHtml}</div>
           </div>
           <div class="qf-modal-actions">
             <button class="qf-btn-cancel">ยกเลิก</button>
@@ -6608,16 +7144,36 @@
         </div>
       `;
       document.body.appendChild(overlay);
-      const inp = overlay.querySelector('.qf-plan-chunk-input');
+
+      const slider = overlay.querySelector('.qf-plan-chunk-slider');
+      const valNum = overlay.querySelector('.qf-plan-chunk-val-num');
+
+      function setVal(v) {
+        v = Math.max(1, Math.min(totalAvailable, parseInt(v) || totalAvailable));
+        slider.value = v;
+        valNum.textContent = v;
+        const pct = totalAvailable === 1 ? 100 : ((v - 1) / (totalAvailable - 1)) * 100;
+        slider.style.background = `linear-gradient(to right, #fe2c55 ${pct}%, #e5e7eb ${pct}%)`;
+        overlay.querySelectorAll('.qf-plan-chunk-quick-btn').forEach(b => {
+          b.classList.toggle('active', parseInt(b.dataset.val) === v);
+        });
+      }
+      setVal(totalAvailable);
+
+      slider.addEventListener('input', () => setVal(slider.value));
+      overlay.querySelectorAll('.qf-plan-chunk-quick-btn').forEach(b => {
+        b.addEventListener('click', () => setVal(parseInt(b.dataset.val)));
+      });
+
       const cleanup = v => { overlay.remove(); resolve(v); };
-      overlay.querySelector('.qf-plan-chunk-all-btn').onclick = () => { inp.value = totalAvailable; };
-      overlay.querySelector('.qf-btn-cancel').onclick = () => cleanup(null);
+      overlay.querySelector('.qf-btn-cancel').onclick  = () => cleanup(null);
       overlay.querySelector('.qf-btn-confirm').onclick = () => {
-        const n = Math.max(1, Math.min(totalAvailable, parseInt(inp.value) || totalAvailable));
-        cleanup(n);
+        cleanup(Math.max(1, Math.min(totalAvailable, parseInt(slider.value) || totalAvailable)));
       };
       overlay.onclick = e => { if (e.target === overlay) cleanup(null); };
-      const onKey = e => { if (e.key === 'Escape') { cleanup(null); document.removeEventListener('keydown', onKey); } };
+      const onKey = e => {
+        if (e.key === 'Escape') { cleanup(null); document.removeEventListener('keydown', onKey); }
+      };
       document.addEventListener('keydown', onKey);
     });
   }
@@ -6751,12 +7307,13 @@
       const multiSku = hasComboRecord || skuBuckets.size > 1;
 
       let plan;
-      if (!multiSku && printIds_.length <= CHUNK_PROMPT_THRESHOLD) {
+      if (opts.plan) {
+        plan = opts.plan;
+      } else if (!multiSku && printIds_.length <= CHUNK_PROMPT_THRESHOLD) {
         plan = { mode: 'single', withPickingList: loadPickingListPref(), combined: false, withDivider: false };
       } else {
         plan = await showChunkPlanModal({ total: printIds_.length, multiSku, defaultPickingList: loadPickingListPref() });
         if (!plan) {
-          // User cancelled — restore column to pending.
           renderFn({ ...newSession, columns: { ...newSession.columns, [workerId]: { ...col, status: 'pending' } } });
           return;
         }
@@ -6766,9 +7323,10 @@
       const assigneeName = col.teamName || col.workerName || null;
       const assigneeKind = col.kind === 'team' ? 'team' : (assigneeName ? 'worker' : null);
 
-      // §4.8: If multi-SKU and combined mode, build combined PDF per chunk.
       let ok;
-      if (multiSku && plan.combined) {
+      if (plan.mode === 'by-sku') {
+        ok = await printPlanColumnBySku(printIds_, plan, col, assigneeName, assigneeKind, newSession, newCol, workerId, renderFn);
+      } else if (multiSku && plan.combined) {
         ok = await printPlanColumnCombined(printIds_, plan, col, assigneeName, assigneeKind, newSession, newCol, workerId, renderFn);
       } else {
         ok = await printPlanColumnChunked(printIds_, plan, col, assigneeName, assigneeKind, newSession, newCol, workerId, renderFn);
@@ -6805,6 +7363,68 @@
       debouncedSavePlan(errSession);
       renderFn(errSession);
     }
+  }
+
+  // Build team snapshot from col at print time (memberWorkerIds → [{workerId, workerName, icon}]).
+  function buildTeamSnapshot(col) {
+    if (col.kind !== 'team' || !col.memberWorkerIds?.length) return null;
+    return col.memberWorkerIds.map(wid => {
+      const w = state.workers.find(x => x.id === wid);
+      return { workerId: wid, workerName: w?.name || wid, icon: w?.icon || '' };
+    });
+  }
+
+  // Helper: plan-column print — 1 PDF chunk per unique SKU group.
+  // Returns true on success, false on failure.
+  async function printPlanColumnBySku(printIds_, plan, col, assigneeName, assigneeKind, newSession, newCol, workerId, renderFn) {
+    const groupMap = new Map();
+    for (const id of printIds_) {
+      const rec = state.records.get(id);
+      if (!rec?.skuList?.length) continue;
+      const s = rec.skuList[0];
+      const key = `${s.productId}:${s.skuId}`;
+      if (!groupMap.has(key)) {
+        const alias = (getAlias(s.productId) || '').trim();
+        const variantInfo = getVariantInfo(s.productId, s.skuId);
+        groupMap.set(key, {
+          alias: alias || shortName(s.productName),
+          variantName: (variantInfo?.alias || '').trim() || (s.skuName || s.sellerSkuName || ''),
+          ids: [],
+        });
+      }
+      groupMap.get(key).ids.push(id);
+    }
+    const groups = [...groupMap.values()].sort((a, b) => a.alias.localeCompare(b.alias));
+
+    const baseHint = col.teamName || col.workerName || 'plan';
+    const baseFilename = assigneeName
+      ? makeBaseFilename(`[${baseHint}] [${assigneeName}]`)
+      : makeBaseFilename(baseHint);
+    const displayTitle = `พิมพ์แยก SKU: ${col.teamName || col.workerName || 'แผน'}`;
+
+    const chunks = groups.map((grp, i) => {
+      const skuLabel = grp.variantName ? `${grp.alias} - ${grp.variantName}` : grp.alias;
+      return {
+        ids: grp.ids,
+        label: skuLabel || `SKU ${i + 1}`,
+        filename: makeBaseFilename(`[${baseHint}] [${skuLabel || `SKU ${i + 1}`}]`) + '.pdf',
+      };
+    });
+
+    return runChunkedExport(chunks, displayTitle, {
+      baseFilename,
+      totalLabels: printIds_.length,
+      workerId: col.workerId,
+      workerName: col.teamName || col.workerName || null,
+      workerIcon: col.workerIcon || null,
+      assigneeKind,
+      assigneeName,
+      teamId: col.kind === 'team' ? (col.teamId || null) : null,
+      teamName: col.kind === 'team' ? (col.teamName || null) : null,
+      teamSnapshot: buildTeamSnapshot(col),
+      withPickingList: plan.withPickingList || false,
+      withDivider: false,
+    });
   }
 
   // Helper: plan-column print using per-group combined PDF.
@@ -6910,6 +7530,9 @@
       workerIcon: workerIconForPdf,
       assigneeKind,
       assigneeName,
+      teamId: col.kind === 'team' ? (col.teamId || null) : null,
+      teamName: col.kind === 'team' ? (col.teamName || null) : null,
+      teamSnapshot: buildTeamSnapshot(col),
     });
   }
 
@@ -6941,9 +7564,186 @@
       workerIcon: col.workerIcon || null,
       assigneeKind,
       assigneeName,
+      teamId: col.kind === 'team' ? (col.teamId || null) : null,
+      teamName: col.kind === 'team' ? (col.teamName || null) : null,
+      teamSnapshot: buildTeamSnapshot(col),
       withPickingList: plan.withPickingList || false,
       withDivider: plan.withDivider || false,
     });
+  }
+
+  // Print all pending columns — ONE runChunkedExport call (single result modal).
+  // plan.mode: 'by-person' | 'by-person-sku' | 'combined-per-person' | 'single'
+  async function printAllPlanColumns(session, nonDone, plan, renderFn) {
+    let updatedSession = nonDone.reduce((s, [cid, col]) => ({
+      ...s, columns: { ...s.columns, [cid]: { ...col, status: 'printing' } },
+    }), session);
+    renderFn(updatedSession);
+
+    const allPrintIds = nonDone.flatMap(([, col]) =>
+      col.fulfillUnitIds.filter(id => !col.printedIds.includes(id))
+    );
+
+    const names = nonDone.map(([, c]) => c.teamName || c.workerName || '?');
+    const baseFilename = makeBaseFilename(`พิมพ์ทุกคน-${names.slice(0, 3).join('-')}${names.length > 3 ? '+' : ''}`);
+    let ok = false;
+    try {
+      const mode = plan.mode || 'by-person';
+
+      if (mode === 'by-person' || mode === 'single') {
+        // Each worker gets their own flat PDF (optionally chunked if chunkAt set)
+        const runChunks = [];
+        for (const [, col] of nonDone) {
+          const colIds = col.fulfillUnitIds.filter(id => !col.printedIds.includes(id));
+          const workerName = col.teamName || col.workerName || null;
+          const hint = workerName || 'plan';
+          if (plan.chunkAt && colIds.length > plan.chunkAt) {
+            const sz = plan.chunkAt;
+            let ci = 0;
+            for (let i = 0; i < colIds.length; i += sz) {
+              ci++;
+              runChunks.push({
+                ids: colIds.slice(i, i + sz),
+                label: `${hint} ชุด ${ci}`,
+                filename: makeBaseFilename(`[${hint}]-ชุด${ci}`) + '.pdf',
+              });
+            }
+          } else {
+            runChunks.push({
+              ids: colIds,
+              label: hint,
+              filename: makeBaseFilename(`[${hint}]`) + '.pdf',
+            });
+          }
+        }
+        ok = await runChunkedExport(runChunks, `พิมพ์ทุกคน ${runChunks.length} ไฟล์`, {
+          baseFilename, totalLabels: allPrintIds.length,
+          withPickingList: plan.withPickingList || false, withDivider: plan.withDivider || false,
+        });
+
+      } else if (mode === 'by-person-sku') {
+        // Each worker × SKU = 1 chunk
+        const runChunks = [];
+        for (const [, col] of nonDone) {
+          const colIds = col.fulfillUnitIds.filter(id => !col.printedIds.includes(id));
+          const workerName = col.teamName || col.workerName || null;
+          const hint = workerName || 'plan';
+          const skuMap = new Map();
+          for (const id of colIds) {
+            const rec = state.records.get(id);
+            if (!rec?.skuList?.length) continue;
+            const s = rec.skuList[0];
+            const key = `${s.productId}:${s.skuId}`;
+            if (!skuMap.has(key)) {
+              const alias = (getAlias(s.productId) || '').trim();
+              const variantInfo = getVariantInfo(s.productId, s.skuId);
+              skuMap.set(key, {
+                alias: alias || shortName(s.productName),
+                variantName: (variantInfo?.alias || '').trim() || (s.skuName || s.sellerSkuName || ''),
+                ids: [],
+              });
+            }
+            skuMap.get(key).ids.push(id);
+          }
+          for (const grp of [...skuMap.values()].sort((a, b) => a.alias.localeCompare(b.alias))) {
+            const skuLabel = grp.variantName ? `${grp.alias} - ${grp.variantName}` : grp.alias;
+            runChunks.push({
+              ids: grp.ids,
+              label: workerName ? `${workerName} · ${skuLabel}` : skuLabel,
+              filename: makeBaseFilename(`[${hint}] [${skuLabel || 'SKU'}]`) + '.pdf',
+            });
+          }
+        }
+        ok = await runChunkedExport(runChunks, `พิมพ์แยก SKU ${runChunks.length} ไฟล์`, {
+          baseFilename, totalLabels: allPrintIds.length,
+          withPickingList: plan.withPickingList || false, withDivider: false,
+        });
+
+      } else if (mode === 'combined-per-person') {
+        // Each worker gets a prebuilt combined-SKU PDF
+        const exportChunks = [];
+        const prepProgress = showProgress(`กำลังเตรียม PDF รวม (${nonDone.length} คน · ${allPrintIds.length} ฉลาก)`);
+        try {
+          for (let wi = 0; wi < nonDone.length; wi++) {
+            const [, col] = nonDone[wi];
+            const colIds = col.fulfillUnitIds.filter(id => !col.printedIds.includes(id));
+            const workerName = col.teamName || col.workerName || null;
+            const hint = workerName || 'plan';
+            const basePct = (wi / nonDone.length) * 100;
+            prepProgress.update(basePct, `กำลังสร้าง ${hint} (${wi + 1}/${nonDone.length})`);
+            const groupMap = new Map();
+            for (const id of colIds) {
+              const rec = state.records.get(id);
+              if (!rec?.skuList?.length) continue;
+              const s = rec.skuList[0];
+              const key = `${s.productId}:${s.skuId}`;
+              if (!groupMap.has(key)) {
+                const alias = (getAlias(s.productId) || '').trim();
+                const variantInfo = getVariantInfo(s.productId, s.skuId);
+                groupMap.set(key, {
+                  productId: s.productId, skuId: s.skuId,
+                  alias: alias || shortName(s.productName),
+                  officialName: s.productName || '',
+                  variantName: (variantInfo?.alias || '').trim() || (s.skuName || s.sellerSkuName || ''),
+                  productImageURL: s.productImageURL || null,
+                  ids: [],
+                });
+              }
+              groupMap.get(key).ids.push(id);
+            }
+            const groups = [...groupMap.values()].sort((a, b) => a.alias.localeCompare(b.alias));
+            try {
+              const { bytes } = await buildMultiSkuCombinedPdf(
+                groups, workerName, col.workerIcon || null, plan.withPickingList,
+                (pct) => prepProgress.update(basePct + (pct / nonDone.length), `${hint} · ${pct.toFixed(0)}%`),
+                plan.withDivider
+              );
+              exportChunks.push({ ids: colIds, label: hint, filename: makeBaseFilename(`[${hint}]`) + '.pdf', prebuiltBytes: bytes });
+            } catch (_) {
+              exportChunks.push({ ids: colIds, label: hint, filename: makeBaseFilename(`[${hint}]`) + '.pdf' });
+            }
+          }
+          prepProgress.update(100, 'พร้อมแล้ว');
+        } finally {
+          document.querySelectorAll('.qf-progress-overlay').forEach(e => e.remove());
+        }
+        ok = await runChunkedExport(
+          exportChunks.map(c => ({ ids: c.ids, label: c.label, filename: c.filename, prebuiltBytes: c.prebuiltBytes })),
+          `พิมพ์รวม ${nonDone.length} คน`,
+          { baseFilename, totalLabels: allPrintIds.length, withPickingList: plan.withPickingList || false, withDivider: plan.withDivider || false }
+        );
+      }
+    } catch (_) {
+      ok = false;
+    }
+
+    if (ok) {
+      for (const id of allPrintIds) {
+        state.printedUnitIds.add(id);
+        const rec = state.records.get(id);
+        if (rec) rec.labelStatus = LABEL_STATUS_PRINTED;
+      }
+      for (const combo of state.weirdCombos.values()) {
+        if ([...combo.fulfillUnitIds].every(id => state.printedUnitIds.has(id))) markComboDone(combo.sigKey);
+      }
+      try { if (typeof renderAll === 'function') renderAll(); } catch (_) {}
+    }
+
+    for (const [cid, col] of nonDone) {
+      const colPrintIds = allPrintIds.filter(id => col.fulfillUnitIds.includes(id));
+      const updatedCol = {
+        ...col,
+        status: ok ? 'done' : 'error',
+        printedIds: ok ? [...col.printedIds, ...colPrintIds] : col.printedIds,
+        failedIds: ok ? [] : colPrintIds,
+        lastPrintAt: Date.now(),
+        errorMsg: ok ? null : 'พิมพ์ไม่สำเร็จ ลองใหม่',
+        retryCount: ok ? col.retryCount : col.retryCount + 1,
+      };
+      updatedSession = { ...updatedSession, columns: { ...updatedSession.columns, [cid]: updatedCol } };
+    }
+    debouncedSavePlan(updatedSession);
+    renderFn(updatedSession);
   }
 
   // Utility: slice a flat array of ids per ChunkPlan into sub-arrays.
@@ -6966,6 +7766,28 @@
       default:
         return [ids];
     }
+  }
+
+  // ── Order-type helpers for planning panel ─────────────────────────────────
+  // Returns 'single' | 'multi' | 'weird' for a single fulfillUnitId.
+  function getOrderType(id) {
+    if (state.weirdFulfillUnitIds.has(id)) return 'weird';
+    const rec = state.records.get(id);
+    if (!rec?.skuList?.length) return 'single';
+    if (rec.skuList.length > 1) return 'weird';
+    return rec.skuList[0].quantity === 1 ? 'single' : 'multi';
+  }
+
+  // Dominant type for a card (may contain many IDs). weird > multi > single.
+  function getCardOrderType(card) {
+    if (card.isCombo) return 'weird';
+    let hasMult = false;
+    for (const id of (card.ids || [])) {
+      const t = getOrderType(id);
+      if (t === 'weird') return 'weird';
+      if (t === 'multi') hasMult = true;
+    }
+    return hasMult ? 'multi' : 'single';
   }
 
   function openPlanningPanel(initialSession) {
@@ -7007,6 +7829,9 @@
     debouncedSavePlan(session);
     window.__qfPlanningSession = () => session;
 
+    // ---- Order-type tab state (persists across render() calls) ----
+    let activeOrderTab = 'all';   // 'all' | 'single' | 'multi' | 'weird'
+
     // ---- Floating window DOM ----
     const win = document.createElement('div');
     win.className = 'qf-plan-window';
@@ -7024,6 +7849,23 @@
 
     let _dragCardKey = null;
     let _dragSourceZone = null;
+
+    // Re-usable: wire dragstart/dragend on every .qf-plan-card[draggable] inside container.
+    // Called both by attachPlanEvents (full re-render) and applyUnassignedTab (tab switch).
+    const wireDragListeners = (container) => {
+      container.querySelectorAll('.qf-plan-card[draggable]').forEach(card => {
+        card.addEventListener('dragstart', e => {
+          _dragCardKey = card.dataset.cardKey;
+          _dragSourceZone = card.closest('[data-zone]')?.dataset.zone;
+          card.classList.add('qf-dragging');
+          e.dataTransfer.effectAllowed = 'move';
+        });
+        card.addEventListener('dragend', () => {
+          card.classList.remove('qf-dragging');
+          win.querySelectorAll('.qf-plan-cards').forEach(el => el.classList.remove('qf-drag-over'));
+        });
+      });
+    };
 
     // ---- buildPlanCardNode: returns a DOM element ----
     const buildPlanCardNode = (c, allCards) => {
@@ -7125,6 +7967,14 @@
       badge.textContent = isSplit ? `${c.count}/${totalAcross}` : String(c.count);
       card.appendChild(badge);
 
+      // Order-type tag pill (top-right corner)
+      const orderType = getCardOrderType(c);
+      const typeLabels = { single: '1 ชิ้น', multi: 'หลายชิ้น', weird: 'แปลก' };
+      const typeTag = document.createElement('span');
+      typeTag.className = `qf-plan-card-type-tag qf-type-${orderType}`;
+      typeTag.textContent = typeLabels[orderType];
+      card.appendChild(typeTag);
+
       return card;
     };
 
@@ -7178,10 +8028,6 @@
       const headerRow = document.createElement('div');
       headerRow.className = 'qf-plan-zone-header-row';
 
-      const badge = document.createElement('span');
-      badge.className = 'qf-plan-zone-badge';
-      badge.textContent = isTeam ? '👥' : (col.workerIcon || '●');
-      headerRow.appendChild(badge);
 
       const titleWrap = document.createElement('div');
       titleWrap.style.flex = '1';
@@ -7339,7 +8185,7 @@
           dBtn.style.padding = '2px 6px';
           dBtn.textContent = '🗑';
           dBtn.onclick = async () => {
-            const ok = await confirmInline(`ลบทีม "${tm.name}"?`, 'ลบ');
+            const ok = await confirmInline(`ลบทีม "${tm.name}"?`, 'ลบ', true);
             if (!ok) return;
             // Return team column ids to unassigned
             let next = s;
@@ -7373,22 +8219,8 @@
       if (editingTeam) nameInput.value = editingTeam.name;
       form.appendChild(nameInput);
 
-      // Icon picker (worker only)
-      const iconPicker = document.createElement('div');
-      iconPicker.className = 'qf-zone-add-icons';
-      let selectedIcon = editingWorker ? editingWorker.icon : WORKER_ICONS[0];
-      for (const ic of WORKER_ICONS) {
-        const btn = document.createElement('button');
-        btn.className = 'qf-workers-icon-btn' + (ic === selectedIcon ? ' active' : '');
-        btn.dataset.icon = ic;
-        btn.textContent = ic;
-        btn.type = 'button';
-        btn.onclick = () => {
-          selectedIcon = ic;
-          iconPicker.querySelectorAll('.qf-workers-icon-btn').forEach(b => b.classList.toggle('active', b.dataset.icon === ic));
-        };
-        iconPicker.appendChild(btn);
-      }
+      const selectedIcon = editingWorker ? editingWorker.icon : WORKER_ICONS[0];
+      const iconPicker = document.createElement('div'); // kept for switchTab compat, not appended
 
       // Team members checklist
       const memberList = document.createElement('div');
@@ -7402,7 +8234,7 @@
         chk.value = w.id;
         chk.checked = existingMemberIds.includes(w.id);
         lbl.appendChild(chk);
-        lbl.appendChild(document.createTextNode(`${w.icon} ${w.name}`));
+        lbl.appendChild(document.createTextNode(w.name));
         memberList.appendChild(lbl);
       }
 
@@ -7547,9 +8379,15 @@
       if (!body) return;
       body.innerHTML = '';
 
-      // Unassigned zone
+      // ── Unassigned zone with order-type tabs ──────────────────────────────
       const unassignedZone = document.createElement('div');
       unassignedZone.className = 'qf-plan-zone qf-zone-unassigned';
+
+      // Count per type
+      const typeCounts = { single: 0, multi: 0, weird: 0 };
+      for (const id of session.unassignedIds) typeCounts[getOrderType(id)]++;
+
+      // Header title
       const unassignedHeader = document.createElement('div');
       unassignedHeader.className = 'qf-plan-zone-header';
       const unassignedTitle = document.createElement('span');
@@ -7557,6 +8395,29 @@
       unassignedTitle.textContent = `📦 ยังไม่มอบหมาย (${session.unassignedIds.length} ใบ)`;
       unassignedHeader.appendChild(unassignedTitle);
       unassignedZone.appendChild(unassignedHeader);
+
+      // Order-type tab bar
+      const tabDefs = [
+        { key: 'all',    label: 'ทั้งหมด',    count: session.unassignedIds.length, typeClass: '' },
+        { key: 'single', label: '1 ชิ้น',     count: typeCounts.single, typeClass: 'qf-type-single' },
+        { key: 'multi',  label: 'หลายชิ้น',   count: typeCounts.multi,  typeClass: 'qf-type-multi'  },
+        { key: 'weird',  label: 'ออเดอร์แปลก', count: typeCounts.weird,  typeClass: 'qf-type-weird'  },
+      ];
+      const tabBar = document.createElement('div');
+      tabBar.className = 'qf-plan-order-tabs';
+      const tabBtns = [];
+      for (const td of tabDefs) {
+        const btn = document.createElement('button');
+        btn.className = `qf-plan-order-tab${td.typeClass ? ' ' + td.typeClass : ''}${activeOrderTab === td.key ? ' active' : ''}`;
+        btn.dataset.tabKey = td.key;
+        btn.disabled = td.count === 0 && td.key !== 'all';
+        btn.innerHTML = `${escapeHtml(td.label)}<span class="qf-plan-order-tab-count">${td.count}</span>`;
+        tabBtns.push(btn);
+        tabBar.appendChild(btn);
+      }
+      unassignedZone.appendChild(tabBar);
+
+      // Cards scroll area
       const unassignedScroll = document.createElement('div');
       unassignedScroll.className = 'qf-plan-zone-scroll qf-plan-cards';
       unassignedScroll.id = 'qf-plan-cards-unassigned';
@@ -7564,7 +8425,21 @@
       unassignedScroll.dataset.locked = '0';
       unassignedZone.appendChild(unassignedScroll);
       body.appendChild(unassignedZone);
-      renderPlanCardsInto(unassignedScroll, session.unassignedIds, allSessionCards);
+
+      // Helper: filter unassigned IDs by active tab and re-render scroll
+      const applyUnassignedTab = (tabKey) => {
+        activeOrderTab = tabKey;
+        tabBtns.forEach(b => b.classList.toggle('active', b.dataset.tabKey === tabKey));
+        const filtered = tabKey === 'all'
+          ? session.unassignedIds
+          : session.unassignedIds.filter(id => getOrderType(id) === tabKey);
+        renderPlanCardsInto(unassignedScroll, filtered, allSessionCards);
+        wireDragListeners(unassignedScroll);
+      };
+      tabBtns.forEach(btn => {
+        btn.addEventListener('click', () => applyUnassignedTab(btn.dataset.tabKey));
+      });
+      applyUnassignedTab(activeOrderTab);
 
       // Worker/Team columns
       for (const [cid, col] of Object.entries(session.columns)) {
@@ -7699,15 +8574,32 @@
       const s = session;
       const nonDone = Object.entries(s.columns).filter(([, c]) => c.status !== 'done' && c.status !== 'printing' && c.fulfillUnitIds.length > 0);
       if (!nonDone.length) { showToast('ทุกคอลัมน์พิมพ์แล้วหรือว่างอยู่', 2000); return; }
-      const breakdown = nonDone.map(([, c]) => `${c.teamName || c.workerName || c.columnId}: ${c.fulfillUnitIds.length} ใบ`).join(', ');
-      const ok = await confirmInline(`พิมพ์ทั้งหมด? ${breakdown}`, 'พิมพ์');
-      if (!ok) return;
-      let cur = s;
-      for (const [cid] of nonDone) {
-        const col = cur.columns[cid];
-        if (!col) continue;
-        printPlanColumn(cur, cid, col.fulfillUnitIds, ns => { render(ns); cur = ns; });
+
+      // Gather all pending IDs across columns + detect multi-SKU
+      const allPrintIds = nonDone.flatMap(([, c]) => c.fulfillUnitIds.filter(id => !c.printedIds.includes(id)));
+      if (!allPrintIds.length) { showToast('ไม่มีฉลากที่ยังไม่ได้พิมพ์', 2000); return; }
+
+      const skuBuckets = new Set();
+      let hasComboRecord = false;
+      for (const id of allPrintIds) {
+        const rec = state.records.get(id);
+        if (!rec?.skuList?.length) continue;
+        if (rec.skuList.length > 1) hasComboRecord = true;
+        for (const sk of rec.skuList) skuBuckets.add(`${sk.productId}:${sk.skuId}`);
       }
+      const multiSku = hasComboRecord || skuBuckets.size > 1;
+
+      let plan;
+      if (!multiSku && allPrintIds.length <= CHUNK_PROMPT_THRESHOLD) {
+        const ok = await confirmInline(`พิมพ์ ${nonDone.length} คน (${allPrintIds.length} ใบ)?`, 'พิมพ์');
+        if (!ok) return;
+        plan = { mode: 'by-person', chunkAt: null, withPickingList: loadPickingListPref(), withDivider: false };
+      } else {
+        plan = await showPrintAllPlanModal({ total: allPrintIds.length, nonDone, hasMultiSku: multiSku, defaultPickingList: loadPickingListPref() });
+        if (!plan) return;
+      }
+
+      await printAllPlanColumns(s, nonDone, plan, render);
     });
 
     // ---- attachPlanEvents: column actions + drag-drop ----
@@ -7748,7 +8640,7 @@
             rerender(next);
           } else if (action === 'removecol') {
             if (!col) return;
-            const ok = await confirmInline(`ลบ ${colDisplayName}? (ids จะคืนยังไม่มอบหมาย)`, 'ลบ');
+            const ok = await confirmInline(`ลบ ${colDisplayName}? (ids จะคืนยังไม่มอบหมาย)`, 'ลบ', true);
             if (!ok) return;
             const returnIds = col.fulfillUnitIds;
             const { [cid]: _dropped, ...restCols } = s.columns;
@@ -7778,18 +8670,7 @@
       });
 
       // Drag-drop on plan cards
-      root.querySelectorAll('.qf-plan-card[draggable]').forEach(card => {
-        card.addEventListener('dragstart', e => {
-          _dragCardKey = card.dataset.cardKey;
-          _dragSourceZone = card.closest('[data-zone]')?.dataset.zone;
-          card.classList.add('qf-dragging');
-          e.dataTransfer.effectAllowed = 'move';
-        });
-        card.addEventListener('dragend', () => {
-          card.classList.remove('qf-dragging');
-          root.querySelectorAll('.qf-plan-cards').forEach(el => el.classList.remove('qf-drag-over'));
-        });
-      });
+      wireDragListeners(root);
 
       root.querySelectorAll('.qf-plan-cards').forEach(dropZone => {
         dropZone.addEventListener('dragover', e => {
@@ -7853,6 +8734,32 @@
       if (anyPrinting) { e.preventDefault(); e.returnValue = 'กำลังพิมพ์อยู่ — แน่ใจหรือว่าจะออก?'; return e.returnValue; }
     };
     window.addEventListener('beforeunload', beforeUnloadHandler);
+
+    // Refresh hook: called by renderAll() after each scan so the plan panel stays in sync.
+    window.__qfPlanRefresh = () => {
+      if (!document.body.contains(win)) { window.__qfPlanRefresh = null; return; }
+      const allTracked = new Set([
+        ...session.unassignedIds,
+        ...Object.values(session.columns).flatMap(c => c.fulfillUnitIds),
+      ]);
+      const filterPrinted = state.labelStatusFilter === 'all';
+      const newIds = [...state.records.keys()].filter(id => {
+        if (allTracked.has(id)) return false;
+        if (filterPrinted && state.records.get(id)?.labelStatus === LABEL_STATUS_PRINTED) return false;
+        return true;
+      });
+      const validId = id => state.records.has(id);
+      const merged = {
+        ...session,
+        unassignedIds: [...session.unassignedIds.filter(validId), ...newIds],
+        columns: Object.fromEntries(
+          Object.entries(session.columns).map(([cid, col]) => [
+            cid, { ...col, fulfillUnitIds: col.fulfillUnitIds.filter(validId) },
+          ])
+        ),
+      };
+      render(merged);
+    };
 
     render(session);
   }
@@ -7935,6 +8842,7 @@
 
   const PDF_TEMPLATES_KEY = 'qf_pdf_templates_v1';
   const PDF_ACTIVE_TEMPLATE_KEY = 'qf_pdf_active_template_v1';
+  const PDF_TEMPLATES_SEEDED_KEY = 'qf_pdf_templates_seeded_v1';
   const MAX_PDF_TEMPLATES = 3;
   const PDF_TEMPLATE_GRID_PT = 4; // snap grid in PDF points
   const PDF_TEMPLATE_SCALE = 2;   // editor canvas: 2x page points
@@ -7965,9 +8873,437 @@
     // Header zone (above LOCKED area) is where users typically drop their
     // logo + shop branding. y values are for guidance; editor enforces LOCKED.
     headerZone: { x: 0, y: 0, w: 298, h: 40 }, // top strip (in top-left editor coords)
+    // PHASE 3 — System elements exposed as user-overridable overrides.
+    // Coordinates below are the CARRIER-ORIGINAL rects (PDF points,
+    // bottom-left origin) that the template renderer can MASK + REDRAW at
+    // user-chosen coords. Barcode + QR are deliberately absent — they are
+    // never exposed to the editor. Fields mirror the keys permitted in
+    // template.overrides.
+    //
+    // kind: 'image' | 'text' | 'block'
+    //   image → two-logo header marks (drawImage)
+    //   text  → single-line system text (drawText)
+    //   block → multi-line / tabular region (skuTable, addressBlock)
+    systemElements: {
+      tiktokLogo: {
+        kind: 'image', label: 'TikTok Shop logo', maskable: true,
+        // Left half of the top header band (above barcode frame).
+        x: 0, y: 395, w: 92, h: 24,
+        default: { x: 2, y: 395, w: 60, h: 18 },
+      },
+      jntLogo: {
+        kind: 'image', label: 'J&T Express logo', maskable: true,
+        x: 92, y: 395, w: 96, h: 24,
+        default: { x: 94, y: 395, w: 80, h: 18 },
+      },
+      sortCode: {
+        kind: 'text', label: 'Sort code (EZ)', maskable: true,
+        x: 188.18, y: 402, w: 90, h: 28, size: 28,
+        default: { x: 188.18, y: 402, w: 90, h: 28, size: 28 },
+      },
+      orderId: {
+        kind: 'text', label: 'Order ID', maskable: true,
+        x: 42.86, y: 162.83, w: 150, h: 22, size: 10,
+        default: { x: 42.86, y: 162.83, w: 150, h: 22, size: 10 },
+      },
+      trackingNumber: {
+        kind: 'text', label: 'Tracking #', maskable: true,
+        x: 105.86, y: 341.5, w: 160, h: 24, size: 14,
+        default: { x: 105.86, y: 341.5, w: 160, h: 24, size: 14 },
+      },
+      serviceType: {
+        kind: 'text', label: 'Service type (DROP-OFF/EZ)', maskable: true,
+        x: 215.62, y: 178, w: 75, h: 20, size: 12,
+        default: { x: 215.62, y: 178, w: 75, h: 20, size: 12 },
+      },
+      subZone: {
+        kind: 'text', label: 'Sub-zone (004A)', maskable: true,
+        x: 204.54, y: 282, w: 80, h: 22, size: 12,
+        default: { x: 204.54, y: 282, w: 80, h: 22, size: 12 },
+      },
+      codLabel: {
+        kind: 'text', label: 'COD label', maskable: true,
+        x: 53.28, y: 174, w: 130, h: 26, size: 14,
+        default: { x: 53.28, y: 174, w: 130, h: 26, size: 14 },
+      },
+      skuTable: {
+        kind: 'block', label: 'SKU table', maskable: true,
+        x: 0, y: 78.94, w: 298, h: 51.57,
+        default: { x: 4, y: 78.94, w: 290, h: 52, fontSize: 7,
+          columns: ['name', 'sku', 'seller', 'qty'] },
+      },
+      addressBlock: {
+        kind: 'block', label: 'Address block', maskable: true,
+        x: 0, y: 147, w: 298, h: 126,
+        default: { x: 4, y: 150, w: 290, h: 120, fontSize: 8 },
+      },
+    },
   };
 
+  // PHASE 3 SAFETY — keys that are NEVER user-overridable (barcode + QR).
+  // Any attempt to mask or redraw these is rejected by renderSystemOverride().
+  const NEVER_OVERRIDE_KEYS = new Set([
+    'barcodeMain', 'barcodeLeft', 'barcodeRight', 'qrCode', 'qr',
+  ]);
+
+  // ---- Default (seeded) templates ----
+  //
+  // Positions are chosen to sit in free bands of the J&T layout (not overlapping
+  // any LOCKED zone). Safe bands:
+  //   * Band A — y: 8-45,  x: 40-180   (above tracking/sortCode)
+  //   * Band C — y: 355-400, x: 30-260 (below all barcodes & SKU table)
+  // All elements are validated against intersectsLocked() at seed time; if any
+  // conflict, seeding aborts gracefully and logs a warning.
+  const DEFAULT_PDF_TEMPLATES = [
+    {
+      id: 'default_minimal',
+      name: 'ขั้นต่ำ (Minimal)',
+      isDefault: true,
+      presetId: 'original',
+      brand: { logoDataUrl: null, shopName: '', tagline: '' },
+      elements: [
+        { id: 'def_min_alias',   type: 'variable', variable: 'alias',
+          x: 60, y: 372, w: 180, h: 22, size: 18, align: 'center', bold: true, text: '' },
+        { id: 'def_min_orderid', type: 'variable', variable: 'orderId',
+          x: 40, y: 10, w: 140, h: 12, size: 8, align: 'left', bold: false, text: '' },
+      ],
+      zones: { shrinkHeaderLogos: false, hideSkuTable: false, maskPhone: false, maskAddress: false },
+      overrides: {},
+    },
+    {
+      id: 'default_branded',
+      name: 'แบรนด์ร้าน (Branded)',
+      isDefault: true,
+      presetId: 'branded',
+      brand: { logoDataUrl: null, shopName: 'ชื่อร้านของคุณ', tagline: 'ขอบคุณที่อุดหนุน' },
+      elements: [
+        { id: 'def_br_logo', type: 'image', variable: '', text: '',
+          x: 40, y: 10, w: 32, h: 32, size: 10, align: 'left', bold: false, dataUrl: '' },
+        { id: 'def_br_shopname', type: 'variable', variable: 'shopName',
+          x: 78, y: 10, w: 110, h: 16, size: 12, align: 'left', bold: true, text: '' },
+        { id: 'def_br_tag', type: 'text', variable: '',
+          x: 78, y: 28, w: 110, h: 12, size: 7, align: 'left', bold: false,
+          text: 'ขอบคุณที่อุดหนุน' },
+        { id: 'def_br_alias', type: 'variable', variable: 'alias',
+          x: 60, y: 372, w: 180, h: 22, size: 18, align: 'center', bold: true, text: '' },
+      ],
+      zones: { shrinkHeaderLogos: false, hideSkuTable: false, maskPhone: false, maskAddress: false },
+      overrides: {},
+    },
+    {
+      id: 'default_review',
+      name: 'โปรโมทรีวิว (Review Promo)',
+      isDefault: true,
+      presetId: 'review-promo',
+      brand: { logoDataUrl: null, shopName: 'ชื่อร้านของคุณ', tagline: '' },
+      elements: [
+        { id: 'def_rv_shopname', type: 'variable', variable: 'shopName',
+          x: 50, y: 10, w: 130, h: 16, size: 12, align: 'center', bold: true, text: '' },
+        { id: 'def_rv_thanks', type: 'text', variable: '',
+          x: 30, y: 355, w: 170, h: 12, size: 7, align: 'left', bold: false,
+          text: 'ขอบคุณที่อุดหนุน รีวิว 5 ดาว รับคูปอง 10%' },
+        { id: 'def_rv_qr', type: 'qrPlaceholder', variable: '', text: '',
+          x: 220, y: 358, w: 40, h: 40, size: 10, align: 'left', bold: false, dataUrl: '' },
+        { id: 'def_rv_alias', type: 'variable', variable: 'alias',
+          x: 60, y: 376, w: 150, h: 22, size: 18, align: 'center', bold: true, text: '' },
+      ],
+      zones: { shrinkHeaderLogos: false, hideSkuTable: false, maskPhone: false, maskAddress: false },
+      overrides: {},
+    },
+  ];
+
+  // ---- Phase 4a — Layout presets ----
+  //
+  // Pre-designed coherent layouts so non-tech users pick ONE option and get
+  // a usable template. All coordinates below are in TOP-LEFT editor space
+  // (same coords saved in template.elements / template.overrides). They were
+  // validated against J_AND_T_LAYOUT.locked rects — see verifyPresets().
+  //
+  // LOCKED reference (top-left editor coords, pageH=420):
+  //   barcodeLeft    x:[4,28]    y:[20,240]
+  //   barcodeRight   x:[270,294] y:[20,342]
+  //   trackingNumber x:[105.9,265.9] y:[54.5,78.5]
+  //   routeCode      x:[164.4,289.4] y:[80,120]
+  //   subZoneCode    x:[204.5,284.5] y:[116,138]
+  //   orderId        x:[42.9,192.9]  y:[235.2,257.2]
+  //   serviceType    x:[215.6,290.6] y:[222,242]
+  //   codLabel       x:[53.3,183.3]  y:[220,246]
+  //   sortCode       x:[188.2,278.2] y:[0,18]
+  //
+  // Safe bands chosen:
+  //   - Bottom strip  y:[345, 418], x:[30, 268]  — alias watermark
+  //   - Top strip     y:[0, 18],    x:[0, 180]   — shop branding / logos
+  //   - SKU band      y:[290, 340], x:[10, 268]  — promo text / QR
+  const LAYOUT_PRESETS = [
+    {
+      id: 'original',
+      name: 'ปกติ J&T',
+      description: 'เหมือนของจริง ไม่แก้อะไร + alias ด้านล่าง',
+      thumbnail: '📄',
+      overrides: {},
+      zones: { shrinkHeaderLogos: false, hideSkuTable: false, maskPhone: false, maskAddress: false },
+      brand: { logoDataUrl: null, shopName: '', tagline: '' },
+      elements: [
+        { id: 'alias-1', type: 'variable', variable: 'alias',
+          x: 30, y: 380, w: 235, h: 28,
+          size: 22, align: 'center', bold: true, text: '' },
+      ],
+    },
+    {
+      id: 'slim-header',
+      name: 'ประหยัดหัว',
+      description: 'โลโก้ขนส่งเล็กลง ย้ายไปมุมขวา — ใช้พื้นที่ซ้ายใส่แบรนด์',
+      thumbnail: '📦',
+      // TikTok+JNT logos relocated to the very top strip (y:0-14, above
+      // sortCode at y:0-18). Keep them left of sortCode (x<188).
+      // Note: the editor space y:0-14 region is fine — sortCode starts at x≥188.
+      overrides: {
+        tiktokLogo: { enabled: true, x: 40,  y: 2, w: 60, h: 10 },
+        jntLogo:    { enabled: true, x: 110, y: 2, w: 70, h: 10 },
+      },
+      zones: { shrinkHeaderLogos: false, hideSkuTable: false, maskPhone: false, maskAddress: false },
+      brand: { logoDataUrl: null, shopName: 'ชื่อร้านของคุณ', tagline: 'ขอบคุณที่อุดหนุน' },
+      elements: [
+        { id: 'shop-1', type: 'variable', variable: 'shopName',
+          x: 30, y: 345, w: 160, h: 14,
+          size: 10, align: 'left', bold: true, text: '' },
+        { id: 'tag-1', type: 'variable', variable: 'tagline',
+          x: 30, y: 360, w: 160, h: 12,
+          size: 8, align: 'left', bold: false, text: '' },
+        { id: 'alias-1', type: 'variable', variable: 'alias',
+          x: 30, y: 380, w: 235, h: 28,
+          size: 22, align: 'center', bold: true, text: '' },
+      ],
+    },
+    {
+      id: 'review-promo',
+      name: 'รีวิว + QR',
+      description: 'ซ่อน SKU + address → ใส่ข้อความโปรโมท + ช่อง QR LINE',
+      thumbnail: '⭐',
+      // skuTable override compresses the table, address hidden entirely.
+      // Promo text + QR sit in the freed band y:290-345, left+right split
+      // around barcodeRight which is x:270+.
+      overrides: {
+        skuTable: { enabled: true, x: 10, y: 290, w: 180, h: 50,
+                    fontSize: 6, columns: ['name', 'qty'] },
+        addressBlock: { enabled: false, x: 4, y: 150, w: 290, h: 120, fontSize: 8 },
+      },
+      zones: { shrinkHeaderLogos: false, hideSkuTable: false, maskPhone: false, maskAddress: true },
+      brand: { logoDataUrl: null, shopName: 'ชื่อร้านของคุณ', tagline: '' },
+      elements: [
+        { id: 'promo-1', type: 'text',
+          text: '✨ ขอบคุณที่อุดหนุนค่ะ',
+          x: 195, y: 295, w: 70, h: 14,
+          size: 9, align: 'center', bold: true, variable: '' },
+        { id: 'promo-2', type: 'text',
+          text: 'รีวิว 5 ดาว รับคูปอง 10%',
+          x: 195, y: 312, w: 70, h: 12,
+          size: 7, align: 'center', bold: false, variable: '' },
+        { id: 'qr-1', type: 'qrPlaceholder',
+          x: 210, y: 345, w: 55, h: 55,
+          size: 10, align: 'left', bold: false, variable: '', text: '' },
+        { id: 'alias-1', type: 'variable', variable: 'alias',
+          x: 30, y: 380, w: 170, h: 28,
+          size: 20, align: 'center', bold: true, text: '' },
+      ],
+    },
+    {
+      id: 'compact',
+      name: 'ขนาดย่อ',
+      description: 'ทุกอย่างเล็กลง — เผื่อพื้นที่ใส่ข้อความเพิ่ม',
+      thumbnail: '🔽',
+      // Shrink logos + sku table + address. Alias stays large at bottom.
+      overrides: {
+        tiktokLogo:  { enabled: true, x: 40,  y: 2, w: 60, h: 10 },
+        jntLogo:     { enabled: true, x: 110, y: 2, w: 70, h: 10 },
+        skuTable:    { enabled: true, x: 30, y: 290, w: 235, h: 40,
+                        fontSize: 6, columns: ['name', 'sku', 'qty'] },
+        addressBlock:{ enabled: true, x: 30, y: 150, w: 235, h: 65,
+                        fontSize: 7 },
+      },
+      zones: { shrinkHeaderLogos: false, hideSkuTable: false, maskPhone: false, maskAddress: false },
+      brand: { logoDataUrl: null, shopName: 'ร้านของฉัน', tagline: '' },
+      elements: [
+        { id: 'alias-1', type: 'variable', variable: 'alias',
+          x: 30, y: 375, w: 235, h: 26,
+          size: 22, align: 'center', bold: true, text: '' },
+        { id: 'date-1', type: 'variable', variable: 'date',
+          x: 30, y: 405, w: 235, h: 10,
+          size: 7, align: 'center', bold: false, text: '' },
+      ],
+    },
+    {
+      id: 'branded',
+      name: 'แบรนด์ใหญ่',
+      description: 'โลโก้ร้านขนาดใหญ่ตรงกลาง + tagline ชัดเจน',
+      thumbnail: '🏪',
+      // Carrier logos shrink to top-center band (must stay left of
+      // sortCode x:188 since sortCode LOCKED spans y:0-18).
+      overrides: {
+        tiktokLogo: { enabled: true, x: 60,  y: 2, w: 60, h: 10 },
+        jntLogo:    { enabled: true, x: 125, y: 2, w: 60, h: 10 },
+      },
+      zones: { shrinkHeaderLogos: false, hideSkuTable: false, maskPhone: false, maskAddress: false },
+      brand: { logoDataUrl: null, shopName: 'ชื่อร้านของคุณ', tagline: 'คุณภาพส่งตรงถึงบ้าน' },
+      elements: [
+        { id: 'shop-big', type: 'variable', variable: 'shopName',
+          x: 30, y: 345, w: 180, h: 18,
+          size: 14, align: 'left', bold: true, text: '' },
+        { id: 'tagline', type: 'variable', variable: 'tagline',
+          x: 30, y: 363, w: 180, h: 12,
+          size: 8, align: 'left', bold: false, text: '' },
+        { id: 'alias-1', type: 'variable', variable: 'alias',
+          x: 30, y: 380, w: 235, h: 28,
+          size: 22, align: 'center', bold: true, text: '' },
+      ],
+    },
+  ];
+
+  // Runtime LOCKED overlap check — walks every preset and every element +
+  // enabled override rect, and reports any that intersect a LOCKED zone.
+  // Called once at init (after intersectsLocked is defined). If a preset
+  // fails, we DON'T throw — we filter it out of the visible list so the
+  // editor still works and the test plan's "no console.error" check catches
+  // the regression loudly.
+  let _verifiedPresets = null;
+  function verifyPresets() {
+    if (_verifiedPresets) return _verifiedPresets;
+    if (typeof intersectsLocked !== 'function') return LAYOUT_PRESETS;
+    const ok = [];
+    for (const preset of LAYOUT_PRESETS) {
+      const issues = [];
+      for (const el of preset.elements || []) {
+        const hit = intersectsLocked({ x: el.x, y: el.y, w: el.w, h: el.h });
+        if (hit) issues.push(`element ${el.id} overlaps LOCKED ${hit.id}`);
+      }
+      for (const [key, ov] of Object.entries(preset.overrides || {})) {
+        if (!ov || !ov.enabled) continue;
+        if (typeof ov.x !== 'number' || typeof ov.y !== 'number') continue;
+        const hit = intersectsLocked({ x: ov.x, y: ov.y, w: ov.w, h: ov.h });
+        if (hit) issues.push(`override ${key} overlaps LOCKED ${hit.id}`);
+      }
+      if (issues.length) {
+        console.error('[verifyPresets] overlap with LOCKED —', preset.id, issues);
+      } else {
+        ok.push(preset);
+      }
+    }
+    _verifiedPresets = ok;
+    return ok;
+  }
+
+  function getVerifiedPresets() {
+    return _verifiedPresets || verifyPresets();
+  }
+
+  function getPresetById(id) {
+    return LAYOUT_PRESETS.find(p => p.id === id) || null;
+  }
+
+  // Clone preset into a fresh draft (safe to mutate).
+  function clonePresetAsDraft(preset) {
+    if (!preset) return null;
+    return {
+      presetId: preset.id,
+      elements: JSON.parse(JSON.stringify(preset.elements || [])),
+      overrides: JSON.parse(JSON.stringify(preset.overrides || {})),
+      zones: { ...(preset.zones || {}) },
+      brand: { ...(preset.brand || { logoDataUrl: null, shopName: '', tagline: '' }) },
+    };
+  }
+
+  // Build a mini SVG thumbnail (96×120) for a preset card.
+  // Colors: LOCKED=#e5e7eb gray, text=#2563eb, image=#16a34a,
+  //         variable=#7c3aed, override=#f59e0b.
+  function renderPresetThumbnail(preset) {
+    const W = 96, H = 120;
+    const pageW = J_AND_T_LAYOUT.pageSize.w;
+    const pageH = J_AND_T_LAYOUT.pageSize.h;
+    const sx = W / pageW;
+    const sy = H / pageH;
+    const rects = [];
+
+    // LOCKED rects (grey faded)
+    for (const loc of J_AND_T_LAYOUT.locked) {
+      const ty = pageH - loc.y - loc.h;
+      rects.push(`<rect x="${(loc.x * sx).toFixed(2)}" y="${(ty * sy).toFixed(2)}" width="${Math.max(1, loc.w * sx).toFixed(2)}" height="${Math.max(1, loc.h * sy).toFixed(2)}" fill="#e5e7eb" />`);
+    }
+
+    // Override rects (orange)
+    for (const [, ov] of Object.entries(preset.overrides || {})) {
+      if (!ov?.enabled) continue;
+      rects.push(`<rect x="${(ov.x * sx).toFixed(2)}" y="${(ov.y * sy).toFixed(2)}" width="${Math.max(1, ov.w * sx).toFixed(2)}" height="${Math.max(1, ov.h * sy).toFixed(2)}" fill="#f59e0b" fill-opacity="0.55" stroke="#b45309" stroke-width="0.5" />`);
+    }
+
+    // Element rects
+    for (const el of preset.elements || []) {
+      let color = '#2563eb'; // text
+      if (el.type === 'image') color = '#16a34a';
+      else if (el.type === 'qrPlaceholder') color = '#374151';
+      else if (el.type === 'variable') color = '#7c3aed';
+      rects.push(`<rect x="${(el.x * sx).toFixed(2)}" y="${(el.y * sy).toFixed(2)}" width="${Math.max(1, el.w * sx).toFixed(2)}" height="${Math.max(1, el.h * sy).toFixed(2)}" fill="${color}" fill-opacity="0.7" />`);
+    }
+
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${escapeHtml(preset.name)} preview"><rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />${rects.join('')}</svg>`;
+  }
+
+  // Verify default templates programmatically — catches any position that
+  // overlaps a LOCKED zone before shipping. Logs warnings once on load.
+  // NOTE: intersectsLocked is defined later in this module; Node/test
+  // callers should invoke verifyDefaultTemplates() after module init.
+  function verifyDefaultTemplates() {
+    const issues = [];
+    for (const tpl of DEFAULT_PDF_TEMPLATES) {
+      for (const el of tpl.elements) {
+        if (typeof intersectsLocked !== 'function') break;
+        const hit = intersectsLocked({ x: el.x, y: el.y, w: el.w, h: el.h });
+        if (hit) {
+          issues.push(`${tpl.name} / ${el.id} overlaps LOCKED ${hit.id}`);
+        }
+      }
+    }
+    if (issues.length) {
+      console.warn('[qf] default PDF templates have LOCKED overlaps:', issues);
+    }
+    return issues;
+  }
+
+  function seedDefaultPdfTemplatesIfNeeded() {
+    try {
+      if (localStorage.getItem(PDF_TEMPLATES_SEEDED_KEY) === '1') return;
+      const existing = loadPdfTemplatesRaw();
+      // Additive: if any templates exist already, mark as seeded without adding.
+      if (!Array.isArray(existing) || existing.length === 0) {
+        const nowTs = Date.now();
+        const seeded = DEFAULT_PDF_TEMPLATES.slice(0, MAX_PDF_TEMPLATES).map((tpl, i) => ({
+          ...tpl,
+          id: `tpl_default_${tpl.id}_${nowTs}_${i}`,
+          createdAt: nowTs,
+          updatedAt: nowTs,
+        }));
+        localStorage.setItem(PDF_TEMPLATES_KEY, JSON.stringify(seeded));
+      }
+      localStorage.setItem(PDF_TEMPLATES_SEEDED_KEY, '1');
+    } catch (e) {
+      console.warn('[qf] seedDefaultPdfTemplatesIfNeeded failed:', e);
+    }
+  }
+
+  // Raw load (no validation) — used during seeding to check emptiness without
+  // side effects from validatePdfTemplate normalization.
+  function loadPdfTemplatesRaw() {
+    try {
+      const raw = localStorage.getItem(PDF_TEMPLATES_KEY);
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : [];
+    } catch (_e) {
+      return [];
+    }
+  }
+
   function loadPdfTemplates() {
+    seedDefaultPdfTemplatesIfNeeded();
     try {
       const raw = localStorage.getItem(PDF_TEMPLATES_KEY);
       if (!raw) return [];
@@ -8021,6 +9357,8 @@
     return {
       id: String(tpl.id || `tpl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`),
       name: String(tpl.name || 'เทมเพลตใหม่').slice(0, 60),
+      isDefault: !!tpl.isDefault,
+      presetId: typeof tpl.presetId === 'string' ? tpl.presetId.slice(0, 40) : null,
       createdAt: Number(tpl.createdAt) || Date.now(),
       updatedAt: Number(tpl.updatedAt) || Date.now(),
       brand: {
@@ -8035,7 +9373,54 @@
         maskPhone: !!tpl.zones?.maskPhone,
         maskAddress: !!tpl.zones?.maskAddress,
       },
+      overrides: validateOverrides(tpl.overrides),
     };
+  }
+
+  // PHASE 3 — Validate user-defined system element overrides.
+  // Silently drops unknown keys and NEVER_OVERRIDE_KEYS. Clamps numeric
+  // values to sane ranges so a malformed localStorage entry can't crash
+  // the render pipeline.
+  function validateOverrides(raw) {
+    if (!raw || typeof raw !== 'object') return {};
+    const pageW = J_AND_T_LAYOUT.pageSize.w;
+    const pageH = J_AND_T_LAYOUT.pageSize.h;
+    const clamp = (v, lo, hi, fallback) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return fallback;
+      return Math.max(lo, Math.min(hi, n));
+    };
+    const out = {};
+    const sys = J_AND_T_LAYOUT.systemElements || {};
+    for (const key of Object.keys(raw)) {
+      if (NEVER_OVERRIDE_KEYS.has(key)) continue;
+      if (!sys[key]) continue; // unknown key
+      const ov = raw[key];
+      if (!ov || typeof ov !== 'object') continue;
+      const meta = sys[key];
+      const def = meta.default || meta;
+      const normalized = {
+        enabled: !!ov.enabled,
+        x: clamp(ov.x ?? def.x, 0, pageW, def.x),
+        y: clamp(ov.y ?? def.y, 0, pageH, def.y),
+        w: clamp(ov.w ?? def.w, 4, pageW, def.w),
+        h: clamp(ov.h ?? def.h, 4, pageH, def.h),
+      };
+      if (meta.kind === 'text') {
+        normalized.size = clamp(ov.size ?? def.size ?? 10, 4, 72, def.size ?? 10);
+      }
+      if (meta.kind === 'block') {
+        normalized.fontSize = clamp(ov.fontSize ?? def.fontSize ?? 7, 4, 24, def.fontSize ?? 7);
+        if (key === 'skuTable') {
+          const cols = Array.isArray(ov.columns) ? ov.columns : def.columns;
+          normalized.columns = (cols || ['name', 'sku', 'seller', 'qty'])
+            .filter(c => ['name', 'sku', 'seller', 'qty'].includes(c));
+          if (normalized.columns.length === 0) normalized.columns = ['name', 'qty'];
+        }
+      }
+      out[key] = normalized;
+    }
+    return out;
   }
 
   function getActivePdfTemplate() {
@@ -8110,6 +9495,13 @@
       shopName: '',
       customerName: '',
       trackingNumber: '',
+      // PHASE 3 — system element overrides need richer record data.
+      sortCode: '',
+      serviceType: '',
+      subZone: '',
+      codLabel: '',
+      skuList: [],          // [{ name, sku, sellerSku, qty }]
+      addressBlock: '',     // multi-line (\n separated) — user sees placeholder in preview
     };
     try {
       if (Array.isArray(batchIds) && batchIds.length) {
@@ -8123,6 +9515,21 @@
           if (firstSku && typeof getAlias === 'function') {
             try { data.alias = getAlias(firstSku.productId) || ''; } catch (_e) {}
           }
+          // System element field mapping — all fields are best-effort; render
+          // pipeline skips the override if the value is empty.
+          data.sortCode = String(rec.sortCode || rec.routeCode || '');
+          data.serviceType = String(rec.serviceType || rec.serviceName || '');
+          data.subZone = String(rec.subZoneCode || rec.subZone || '');
+          data.codLabel = rec.isCod ? 'COD' : '';
+          data.skuList = (rec.skuList || []).map(s => ({
+            name: String(s.productName || s.name || ''),
+            sku: String(s.skuId || s.sku || ''),
+            sellerSku: String(s.sellerSku || s.sellerSkuId || ''),
+            qty: Number(s.quantity || s.qty || 1),
+          }));
+          const addr = rec.recipient?.address || rec.address || '';
+          data.addressBlock = typeof addr === 'string' ? addr
+            : Array.isArray(addr) ? addr.join('\n') : '';
         }
       }
     } catch (_e) {}
@@ -8137,7 +9544,38 @@
       shopName: tpl?.brand?.shopName || 'ร้านตัวอย่าง',
       customerName: 'คุณลูกค้า ตัวอย่าง',
       trackingNumber: '795500112243',
+      sortCode: 'EZ',
+      serviceType: 'DROP-OFF',
+      subZone: '004A',
+      codLabel: 'COD',
+      skuList: [
+        { name: 'สินค้าตัวอย่าง A', sku: 'SKU-001', sellerSku: 'U C-BR-501', qty: 1 },
+      ],
+      addressBlock: '[ตัวอย่างที่อยู่ผู้รับ]',
     };
+  }
+
+  // PHASE 3 — Fetch + cache carrier logo PNG bytes. Returns Uint8Array or null.
+  // Asset-bridge posts the URL; we fetch once and keep the bytes in state.
+  async function ensureCarrierLogoBytes(key) {
+    if (!['tiktok', 'jnt'].includes(key)) return null;
+    if (state.carrierLogoBytes?.[key]) return state.carrierLogoBytes[key];
+    if (!state.carrierLogoUrls?.[key]) {
+      try { window.postMessage({ __qfAsset: 'request_carrier_logos' }, '*'); } catch (_e) {}
+      const deadline = Date.now() + 2000;
+      while (!state.carrierLogoUrls?.[key] && Date.now() < deadline) await sleep(50);
+    }
+    const url = state.carrierLogoUrls?.[key];
+    if (!url) return null;
+    try {
+      const r = await fetch(url);
+      if (!r.ok) return null;
+      const buf = new Uint8Array(await r.arrayBuffer());
+      state.carrierLogoBytes = { ...state.carrierLogoBytes, [key]: buf };
+      return buf;
+    } catch (_e) {
+      return null;
+    }
   }
 
   function formatThaiDate(d) {
@@ -8226,6 +9664,25 @@
         }
       }
 
+      // PHASE 3 — Embed carrier logos used by active overrides.
+      // Only fetched if an override enables them (saves a network round-trip).
+      const carrierLogoEmbeds = {};
+      const overrides = template.overrides || {};
+      if (overrides.tiktokLogo?.enabled) {
+        const bytes = await ensureCarrierLogoBytes('tiktok');
+        if (bytes) {
+          try { carrierLogoEmbeds.tiktok = await pdfDoc.embedPng(bytes); }
+          catch (_e) {}
+        }
+      }
+      if (overrides.jntLogo?.enabled) {
+        const bytes = await ensureCarrierLogoBytes('jnt');
+        if (bytes) {
+          try { carrierLogoEmbeds.jnt = await pdfDoc.embedPng(bytes); }
+          catch (_e) {}
+        }
+      }
+
       for (const page of pages) {
         const { width: pw, height: ph } = page.getSize();
 
@@ -8273,6 +9730,108 @@
             color: rgb(0.2, 0.2, 0.2),
           });
         }
+
+        // ========== PHASE 3 — SYSTEM ELEMENT OVERRIDES ==========
+        // For each enabled override: (1) mask the original carrier rect with
+        // a white rectangle, (2) redraw at user-chosen coords. NEVER mask
+        // barcode/QR — those keys are not present in J_AND_T_LAYOUT.systemElements
+        // and are additionally hard-guarded by NEVER_OVERRIDE_KEYS.
+        const sysElements = J_AND_T_LAYOUT.systemElements || {};
+        for (const [key, ov] of Object.entries(overrides)) {
+          if (!ov?.enabled) continue;
+          if (NEVER_OVERRIDE_KEYS.has(key)) continue; // safety guard
+          const meta = sysElements[key];
+          if (!meta || meta.maskable !== true) continue;
+
+          // 1) Mask original carrier rect (bottom-left PDF coords in meta).
+          try {
+            page.drawRectangle({
+              x: meta.x, y: meta.y, width: meta.w, height: meta.h,
+              color: rgb(1, 1, 1),
+            });
+          } catch (_e) {}
+
+          // 2) Redraw at new coords. Override coords stored in TOP-LEFT
+          //    editor space → convert to bottom-left for pdf-lib.
+          const newX = Number(ov.x) || 0;
+          const newY_tl = Number(ov.y) || 0;
+          const newW = Math.max(4, Number(ov.w) || 0);
+          const newH = Math.max(4, Number(ov.h) || 0);
+          const pdfY = ph - newY_tl - newH;
+
+          try {
+            if (meta.kind === 'image') {
+              const embed = key === 'tiktokLogo' ? carrierLogoEmbeds.tiktok
+                          : key === 'jntLogo'    ? carrierLogoEmbeds.jnt
+                          : null;
+              if (embed) {
+                page.drawImage(embed, { x: newX, y: pdfY, width: newW, height: newH });
+              }
+            } else if (meta.kind === 'text') {
+              const val = String(recordData?.[key] ?? '');
+              if (!val) continue;
+              const size = Math.max(4, Math.min(ov.size || meta.default?.size || 10, 48));
+              page.drawText(val, {
+                x: newX,
+                y: pdfY + Math.max(2, newH - size - 2),
+                size, font, color: rgb(0, 0, 0),
+              });
+            } else if (meta.kind === 'block' && key === 'skuTable') {
+              const fs2 = Math.max(4, Math.min(ov.fontSize || 7, 20));
+              const columns = Array.isArray(ov.columns) && ov.columns.length
+                ? ov.columns : (meta.default?.columns || ['name', 'qty']);
+              const rows = Array.isArray(recordData?.skuList) ? recordData.skuList : [];
+              // Header row
+              let cursorY = pdfY + newH - fs2 - 2;
+              const colWidth = newW / columns.length;
+              const headerMap = { name: 'Product', sku: 'SKU', seller: 'SellerSKU', qty: 'Qty' };
+              for (let ci = 0; ci < columns.length; ci++) {
+                page.drawText(headerMap[columns[ci]] || columns[ci], {
+                  x: newX + ci * colWidth, y: cursorY, size: fs2, font, color: rgb(0, 0, 0),
+                });
+              }
+              cursorY -= (fs2 + 2);
+              // Data rows — clipped to block height
+              const minY = pdfY + 2;
+              for (const row of rows) {
+                if (cursorY < minY) break;
+                for (let ci = 0; ci < columns.length; ci++) {
+                  const col = columns[ci];
+                  const cellVal = col === 'name' ? row.name
+                               : col === 'sku' ? row.sku
+                               : col === 'seller' ? row.sellerSku
+                               : col === 'qty' ? String(row.qty ?? '')
+                               : '';
+                  // Truncate to column width (approximate: 0.55 × fontSize per glyph)
+                  const maxChars = Math.max(2, Math.floor(colWidth / (fs2 * 0.55)));
+                  const text = (cellVal || '').slice(0, maxChars);
+                  page.drawText(text, {
+                    x: newX + ci * colWidth, y: cursorY, size: fs2, font, color: rgb(0, 0, 0),
+                  });
+                }
+                cursorY -= (fs2 + 2);
+              }
+            } else if (meta.kind === 'block' && key === 'addressBlock') {
+              const fs2 = Math.max(4, Math.min(ov.fontSize || 8, 20));
+              const val = String(recordData?.addressBlock ?? '');
+              if (!val) continue;
+              const lines = val.split('\n');
+              const lineH = fs2 + 2;
+              let cursorY = pdfY + newH - fs2 - 2;
+              const minY = pdfY + 2;
+              for (const line of lines) {
+                if (cursorY < minY) break;
+                page.drawText(line, {
+                  x: newX, y: cursorY, size: fs2, font, color: rgb(0, 0, 0),
+                });
+                cursorY -= lineH;
+              }
+            }
+          } catch (e) {
+            console.warn('[QF] override render failed for', key, e);
+          }
+        }
+        // ========== END PHASE 3 OVERRIDES ==========
 
         // Custom elements. Coordinates stored in TOP-LEFT editor space —
         // convert to PDF bottom-left.
@@ -8331,6 +9890,268 @@
     }
   }
 
+  // ==================== LABEL OVERLAY SETTINGS ====================
+
+  function openLabelOverlaySettings() {
+    document.querySelectorAll('.qf-lo-overlay').forEach(e => e.remove());
+    const cfg = loadLabelOverlay();
+    const overlay = document.createElement('div');
+    overlay.className = 'qf-modal-overlay qf-lo-overlay';
+    const opPct = Math.round((cfg.opacity ?? 0.85) * 100);
+    overlay.innerHTML = `
+      <div class="qf-modal qf-lo-modal" role="dialog" aria-label="ปรับแต่งฉลาก">
+        <div class="qf-modal-header">
+          <span>🏷️ ปรับแต่งฉลาก (J&amp;T)</span>
+          <button class="qf-modal-close">✕</button>
+        </div>
+        <div class="qf-lo-body">
+          <div class="qf-lo-pv-col">
+            <canvas class="qf-lo-canvas" width="496" height="698"></canvas>
+            <div class="qf-lo-pv-caption">ตัวอย่าง J&amp;T A6</div>
+          </div>
+          <div class="qf-lo-fields">
+            <label class="qf-lo-switch-row">
+              <div class="qf-lo-switch-label">
+                <span class="qf-lo-switch-title">เปิดใช้งาน overlay</span>
+                <span class="qf-lo-switch-desc">แปะข้อความ/รูปบนฉลาก J&amp;T A6</span>
+              </div>
+              <div class="qf-lo-switch">
+                <input type="checkbox" id="qf-lo-enabled" ${cfg.enabled ? 'checked' : ''} />
+                <span class="qf-lo-switch-track"></span>
+              </div>
+            </label>
+            <div class="qf-lo-divider"></div>
+            <div class="qf-lo-fields-wrap ${cfg.enabled ? '' : 'qf-lo-disabled'}" id="qf-lo-fields-wrap">
+
+              <div class="qf-lo-section">
+                <div class="qf-lo-section-title">ข้อความแถบข้าง <span class="qf-lo-counter" id="qf-lo-mkt-cnt">${(cfg.marketingText||'').length}/50</span></div>
+                <div class="qf-lo-hint">วิ่งในแถบสีขาวซ้าย–ขวาของฉลาก</div>
+                <input type="text" id="qf-lo-mkt" class="qf-lo-input" maxlength="50" value="${escapeHtml(cfg.marketingText || '')}" placeholder="กรุณาถ่ายรูปก่อนเปิดกล่องพัสดุ" style="margin-top:4px;" />
+              </div>
+
+              <div class="qf-lo-section">
+                <div class="qf-lo-section-title">รูปภาพร้าน</div>
+                <div class="qf-lo-hint" style="margin-bottom:6px;">ออเดอร์ SKU เดียวเท่านั้น · บีบอัดอัตโนมัติ</div>
+                <div class="qf-lo-img-area">
+                  <div class="qf-lo-thumb-box" id="qf-lo-thumb-box">
+                    ${cfg.shopImageDataUrl ? `<img src="${cfg.shopImageDataUrl}" class="qf-lo-thumb" />` : `<div class="qf-lo-thumb-empty"><span>ไม่มีรูป</span></div>`}
+                  </div>
+                  <div class="qf-lo-img-actions">
+                    <button class="qf-btn-sm" id="qf-lo-upload-btn">อัปโหลด</button>
+                    <button class="qf-btn-sm qf-btn-sm-danger" id="qf-lo-img-clear" ${cfg.shopImageDataUrl ? '' : 'disabled'}>ลบ</button>
+                  </div>
+                </div>
+                <input type="file" id="qf-lo-file" accept="image/*" style="display:none" />
+              </div>
+
+              <div class="qf-lo-section">
+                <div class="qf-lo-section-title">ข้อความข้างรูป</div>
+                <div class="qf-lo-row-between"><span class="qf-lo-hint">บรรทัดที่ 1</span><span class="qf-lo-counter" id="qf-lo-h1-cnt">${(cfg.headerMain||'').length}/50</span></div>
+                <input type="text" id="qf-lo-h1" class="qf-lo-input" maxlength="50" value="${escapeHtml(cfg.headerMain || '')}" placeholder="เพิ่มเพื่อนในไลน์ รับส่วนลดพิเศษ" />
+                <div class="qf-lo-row-between" style="margin-top:2px;"><span class="qf-lo-hint">บรรทัดที่ 2</span><span class="qf-lo-counter" id="qf-lo-h2-cnt">${(cfg.headerSub||'').length}/50</span></div>
+                <input type="text" id="qf-lo-h2" class="qf-lo-input" maxlength="50" value="${escapeHtml(cfg.headerSub || '')}" placeholder="วันนี้เท่านั้น" style="margin-top:2px;" />
+              </div>
+
+              <div class="qf-lo-section">
+                <div class="qf-lo-section-title">ความทึบ <span class="qf-lo-opacity-val" id="qf-lo-op-val">${opPct}%</span></div>
+                <input type="range" id="qf-lo-opacity" class="qf-lo-range" min="75" max="90" step="1" value="${opPct}" />
+                <div class="qf-lo-hint">ค่าเริ่มต้น 85% · สูงสุด 90% เพื่อไม่กลืนสีดำฉลาก</div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+        <div class="qf-modal-footer">
+          <button id="qf-lo-cancel" class="qf-btn-cancel">ปิด</button>
+          <button id="qf-lo-save" class="qf-btn-confirm">บันทึก</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const $  = sel => overlay.querySelector(sel);
+    const close = () => overlay.remove();
+
+    // ── Canvas live preview ───────────────────────────────────────────────
+    const canvas = $('.qf-lo-canvas');
+    const ctx = canvas.getContext('2d');
+    const PV_W = canvas.width, PV_H = canvas.height;
+    const SCALE = PV_W / 298, PDF_H = 420;
+    const cx = x => x * SCALE;
+    const cy = (y, h) => (PDF_H - y - h) * SCALE;
+    const cw = w => w * SCALE;
+    const ch = h => h * SCALE;
+    const PV_MASKS = [
+      {x:0,   y:38,   w:17,  h:244},
+      {x:283, y:38,   w:15,  h:244},
+      {x:0,   y:41.5, w:95,  h:20 },
+      {x:0,   y:75,   w:298, h:3  },
+      {x:0,   y:62,   w:298, h:2  },
+      {x:0,   y:39.5, w:298, h:2  },
+    ];
+    let bgImg = null, shopPvImg = null;
+
+    function renderPreview() {
+      ctx.clearRect(0, 0, PV_W, PV_H);
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, PV_W, PV_H);
+      if (bgImg && bgImg.complete && bgImg.naturalWidth) {
+        ctx.globalAlpha = 0.55;
+        ctx.filter = 'grayscale(1)';
+        ctx.drawImage(bgImg, 0, 0, PV_W, PV_H);
+        ctx.globalAlpha = 1;
+        ctx.filter = 'none';
+      } else {
+        ctx.fillStyle = '#f0f0f0';
+        ctx.fillRect(0, 0, PV_W, PV_H);
+        ctx.fillStyle = '#bbb';
+        ctx.font = `${cx(9.6)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.fillText('J&T label', PV_W / 2, PV_H / 2);
+        ctx.textAlign = 'left';
+      }
+      if (!$('#qf-lo-enabled').checked) return;
+
+      // White masks
+      ctx.fillStyle = '#fff';
+      for (const r of PV_MASKS) ctx.fillRect(cx(r.x), cy(r.y, r.h), cw(r.w), ch(r.h));
+
+      // Vertical marketing text centered in mask zone
+      const mktText = ($('#qf-lo-mkt').value || '').slice(0, 50);
+      if (mktText) {
+        ctx.save();
+        const mktFontPx = cx(Math.max(3.0, Math.min(6.6, 120 / Math.max(mktText.length, 13))));
+        ctx.font = `bold ${mktFontPx}px sans-serif`;
+        ctx.fillStyle = '#222';
+        ctx.globalAlpha = 0.9;
+        const tw = ctx.measureText(mktText).width;
+        // Match PDF: aim center at PDF y=200 → canvas y = (420-200)*SCALE
+        const canvasCenterY = (PDF_H - 200) * SCALE;
+        const startY = canvasCenterY + tw / 2;
+        for (const xPdf of [9, 291]) {
+          ctx.save();
+          ctx.translate(cx(xPdf), startY);
+          ctx.rotate(-Math.PI / 2);
+          ctx.fillText(mktText, 0, 0);
+          ctx.restore();
+        }
+        ctx.restore();
+      }
+
+      // Shop image in footer zone
+      if (shopPvImg && shopPvImg.complete && shopPvImg.naturalWidth) {
+        ctx.drawImage(shopPvImg, cx(2), cy(42, 22), cw(22), ch(22));
+      }
+
+      // Header texts
+      const h1 = ($('#qf-lo-h1').value || '').slice(0, 50);
+      const h2 = ($('#qf-lo-h2').value || '').slice(0, 50);
+      if (h1 || h2) {
+        const hx = (shopPvImg && shopPvImg.complete) ? cx(26) : cx(2);
+        ctx.fillStyle = '#000';
+        ctx.globalAlpha = 0.85;
+        if (h1) { ctx.font = `bold ${cx(3.84)}px sans-serif`; ctx.fillText(h1, hx, cy(55, 7) + cx(4.2), cx(163)); }
+        if (h2) { ctx.font = `${cx(3.36)}px sans-serif`; ctx.fillText(h2, hx, cy(44, 5) + cx(3.6), cx(163)); }
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    const sampleUrl = state.samplePreviewUrl || '';
+    if (sampleUrl) {
+      bgImg = new Image();
+      bgImg.crossOrigin = 'anonymous';
+      bgImg.onload = bgImg.onerror = renderPreview;
+      bgImg.src = sampleUrl;
+    }
+    if (cfg.shopImageDataUrl) {
+      shopPvImg = new Image();
+      shopPvImg.onload = renderPreview;
+      shopPvImg.src = cfg.shopImageDataUrl;
+    }
+    renderPreview();
+
+    // ── Close ─────────────────────────────────────────────────────────────
+    $('.qf-modal-close').addEventListener('click', close);
+    $('#qf-lo-cancel').addEventListener('click', close);
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+
+    // ── Toggle ────────────────────────────────────────────────────────────
+    const enabledChk = $('#qf-lo-enabled');
+    const fieldsWrap = $('#qf-lo-fields-wrap');
+    enabledChk.addEventListener('change', () => {
+      fieldsWrap.classList.toggle('qf-lo-disabled', !enabledChk.checked);
+      renderPreview();
+    });
+
+    // ── Text inputs ────────────────────────────────────────────────────────
+    const bindInput = (sel, cntSel) => {
+      $(sel).addEventListener('input', e => { $(cntSel).textContent = `${e.target.value.length}/50`; renderPreview(); });
+    };
+    bindInput('#qf-lo-mkt', '#qf-lo-mkt-cnt');
+    bindInput('#qf-lo-h1', '#qf-lo-h1-cnt');
+    bindInput('#qf-lo-h2', '#qf-lo-h2-cnt');
+    $('#qf-lo-opacity').addEventListener('input', e => { $('#qf-lo-op-val').textContent = `${e.target.value}%`; });
+
+    // ── Image upload ──────────────────────────────────────────────────────
+    const fileInput = $('#qf-lo-file');
+    $('#qf-lo-upload-btn').addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      updateThumb(await compressImageToDataUrl(file, 300, 0.8));
+    });
+
+    // ── Clear image ───────────────────────────────────────────────────────
+    $('#qf-lo-img-clear').addEventListener('click', () => updateThumb(''));
+
+    function updateThumb(dataUrl) {
+      overlay._shopImageDataUrl = dataUrl;
+      const box = $('#qf-lo-thumb-box');
+      if (dataUrl) {
+        box.innerHTML = `<img src="${dataUrl}" class="qf-lo-thumb" />`;
+        shopPvImg = new Image();
+        shopPvImg.onload = renderPreview;
+        shopPvImg.src = dataUrl;
+      } else {
+        box.innerHTML = `<div class="qf-lo-thumb-empty"><span>ไม่มีรูป</span></div>`;
+        shopPvImg = null;
+        renderPreview();
+      }
+      $('#qf-lo-img-clear').disabled = !dataUrl;
+    }
+    overlay._shopImageDataUrl = cfg.shopImageDataUrl || '';
+
+    // ── Save ──────────────────────────────────────────────────────────────
+    $('#qf-lo-save').addEventListener('click', () => {
+      saveLabelOverlay({
+        enabled: enabledChk.checked,
+        marketingText: ($('#qf-lo-mkt').value || '').slice(0, 50),
+        shopImageDataUrl: overlay._shopImageDataUrl || '',
+        headerMain: ($('#qf-lo-h1').value || '').slice(0, 50),
+        headerSub: ($('#qf-lo-h2').value || '').slice(0, 50),
+        opacity: Math.min(parseInt($('#qf-lo-opacity').value, 10) / 100, 0.90),
+      });
+      showToast('บันทึกการตั้งค่าฉลากแล้ว', 2000);
+      close();
+    });
+  }
+
+  async function compressImageToDataUrl(file, maxPx, quality) {
+    return new Promise(resolve => {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const scale = Math.min(1, maxPx / Math.max(img.width, img.height));
+        const c = document.createElement('canvas');
+        c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        resolve(c.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); resolve(''); };
+      img.src = url;
+    });
+  }
+
   // ==================== PDF TEMPLATE MANAGER MODAL ====================
 
   function openPdfTemplateManager() {
@@ -8344,11 +10165,13 @@
       const fmt = t => new Date(t).toLocaleString('th-TH', { dateStyle: 'short', timeStyle: 'short' });
       const rows = tpls.map(t => {
         const isActive = t.id === activeId;
+        const preset = t.presetId ? getPresetById(t.presetId) : null;
+        const presetTag = preset ? ` <span class="qf-pdf-tpl-preset-tag" title="สร้างจาก preset: ${escapeHtml(preset.name)}">${preset.thumbnail || '🎨'} ${escapeHtml(preset.name)}</span>` : '';
         return `
           <div class="qf-pdf-tpl-row ${isActive ? 'qf-pdf-tpl-row-active' : ''}" data-id="${escapeHtml(t.id)}">
             <div class="qf-pdf-tpl-thumb" data-tpl="${escapeHtml(t.id)}"></div>
             <div class="qf-pdf-tpl-info">
-              <div class="qf-pdf-tpl-name">${escapeHtml(t.name)}${isActive ? ' <span class="qf-pdf-tpl-active-tag">ใช้งานอยู่</span>' : ''}</div>
+              <div class="qf-pdf-tpl-name">${escapeHtml(t.name)}${isActive ? ' <span class="qf-pdf-tpl-active-tag">ใช้งานอยู่</span>' : ''}${t.isDefault ? ' <span class="qf-pdf-tpl-default-tag">เริ่มต้น</span>' : ''}${presetTag}</div>
               <div class="qf-pdf-tpl-meta">อัพเดต ${escapeHtml(fmt(t.updatedAt))} · ${t.elements.length} elements</div>
             </div>
             <div class="qf-pdf-tpl-actions">
@@ -8370,6 +10193,15 @@
           </div>
           <div class="qf-modal-body qf-pdf-tpl-mgr-body">
             <div class="qf-pdf-tpl-mgr-toolbar">
+              <label class="qf-pdf-tpl-start-label">เริ่มจาก:
+                <select class="qf-pdf-tpl-start-from" ${full ? 'disabled' : ''}>
+                  <option value="__blank__">(ว่าง)</option>
+                  ${DEFAULT_PDF_TEMPLATES.map(dt => `
+                    <option value="default:${escapeHtml(dt.id)}" ${dt.id === 'default_branded' ? 'selected' : ''}>${escapeHtml(dt.name)}</option>
+                  `).join('')}
+                  ${tpls.length > 0 ? `<optgroup label="ของฉัน">${tpls.map(t => `<option value="user:${escapeHtml(t.id)}">${escapeHtml(t.name)}</option>`).join('')}</optgroup>` : ''}
+                </select>
+              </label>
               <button class="qf-btn-confirm qf-pdf-tpl-new" ${full ? 'disabled title="ครบ 3 แล้ว — ลบก่อน"' : ''}>+ สร้างเทมเพลตใหม่</button>
               <button class="qf-pdf-tpl-btn qf-pdf-tpl-import">📥 Import JSON</button>
             </div>
@@ -8403,8 +10235,43 @@
           showToast(`ครบ ${MAX_PDF_TEMPLATES} แล้ว — ลบก่อน`, 2500);
           return;
         }
+        // Read the "เริ่มจาก" dropdown — if user picked a template to clone,
+        // open editor pre-populated with that template's data (unsaved).
+        // Otherwise (blank selection) show Phase 4a preset picker first.
+        const startSelect = overlay.querySelector('.qf-pdf-tpl-start-from');
+        const startVal = startSelect?.value || '';
         cleanup();
-        openPdfTemplateEditor();
+        if (startVal && startVal !== '__blank__') {
+          openPdfTemplateEditorFromSeed(startVal);
+        } else {
+          openPresetPicker({
+            mode: 'new',
+            confirmReplace: false,
+            onPick: (preset, isBlank) => {
+              if (isBlank || !preset) {
+                openPdfTemplateEditor();
+                return;
+              }
+              try {
+                const cloned = clonePresetAsDraft(preset);
+                const seed = {
+                  id: null,
+                  name: preset.name,
+                  presetId: preset.id,
+                  isDefault: false,
+                  elements: cloned.elements,
+                  overrides: cloned.overrides,
+                  zones: cloned.zones,
+                  brand: cloned.brand,
+                };
+                openPdfTemplateEditor(null, seed);
+              } catch (err) {
+                console.warn('[qf] preset seed failed:', err);
+                openPdfTemplateEditor();
+              }
+            },
+          });
+        }
         return;
       }
       if (e.target.closest('.qf-pdf-tpl-import')) {
@@ -8431,7 +10298,11 @@
         return;
       }
       if (e.target.closest('.qf-pdf-tpl-del')) {
-        if (!confirm('ลบเทมเพลตนี้? (ไม่สามารถย้อนกลับได้)')) return;
+        const tplToDel = loadPdfTemplates().find(t => t.id === id);
+        const msg = tplToDel?.isDefault
+          ? 'ลบ template เริ่มต้น? (ไม่สามารถย้อนกลับได้ — และจะไม่ seed ใหม่)'
+          : 'ลบเทมเพลตนี้? (ไม่สามารถย้อนกลับได้)';
+        if (!confirm(msg)) return;
         try { deletePdfTemplate(id); render(); showToast('ลบแล้ว', 1500); }
         catch (err) { showToast(err.message, 2500); }
       }
@@ -8510,7 +10381,123 @@
 
   // ==================== PDF TEMPLATE EDITOR ====================
 
-  function openPdfTemplateEditor(templateId) {
+  // Open the editor pre-filled with a default or user template as a clone.
+  // The draft has no id — save creates a fresh template. Useful for
+  // "เริ่มจาก" dropdown.
+  function openPdfTemplateEditorFromSeed(seedSpec) {
+    // seedSpec format: "default:<id>" or "user:<id>"
+    const [kind, id] = String(seedSpec || '').split(':');
+    let source = null;
+    if (kind === 'default') {
+      source = DEFAULT_PDF_TEMPLATES.find(t => t.id === id) || null;
+    } else if (kind === 'user') {
+      source = loadPdfTemplates().find(t => t.id === id) || null;
+    }
+    if (!source) { openPdfTemplateEditor(); return; }
+    const seed = JSON.parse(JSON.stringify(source));
+    seed.id = null; // new template on save
+    seed.isDefault = false;
+    seed.name = `${seed.name} (สำเนา)`.slice(0, 60);
+    // presetId carried over so "used preset" badge can display on clones.
+    if (typeof source.presetId === 'string') seed.presetId = source.presetId;
+    openPdfTemplateEditor(null, seed);
+  }
+
+  // ==================== PDF PRESET PICKER (Phase 4a) ====================
+  //
+  // Shown:
+  //   1. Before opening a blank editor (when user clicks "+ สร้างเทมเพลตใหม่"
+  //      without picking a specific "เริ่มจาก" source)
+  //   2. From the editor toolbar via the "🎨 เปลี่ยน layout" button
+  //
+  // options:
+  //   { mode: 'new' | 'replace', onPick: (preset|null, isBlank:bool) => void,
+  //     confirmReplace: bool }
+  function openPresetPicker(options) {
+    const opts = options || {};
+    const presets = getVerifiedPresets();
+    document.querySelectorAll('.qf-pdf-preset-picker-overlay').forEach(e => e.remove());
+    const overlay = document.createElement('div');
+    overlay.className = 'qf-modal-overlay qf-pdf-preset-picker-overlay';
+
+    const cards = presets.map(preset => {
+      const svg = renderPresetThumbnail(preset);
+      return `
+        <button class="qf-pdf-preset-card" data-preset-id="${escapeHtml(preset.id)}"
+          aria-label="${escapeHtml(preset.name)}">
+          <div class="qf-pdf-preset-thumb">${svg}</div>
+          <div class="qf-pdf-preset-emoji">${preset.thumbnail || ''}</div>
+          <div class="qf-pdf-preset-name">${escapeHtml(preset.name)}</div>
+          <div class="qf-pdf-preset-desc">${escapeHtml(preset.description || '')}</div>
+        </button>`;
+    }).join('');
+
+    const blankCard = opts.mode === 'replace' ? '' : `
+      <button class="qf-pdf-preset-card qf-pdf-preset-card-blank" data-preset-id="__blank__"
+        aria-label="เริ่มว่างเปล่า">
+        <div class="qf-pdf-preset-thumb qf-pdf-preset-thumb-blank">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 120" width="96" height="120">
+            <rect x="0" y="0" width="96" height="120" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
+            <line x1="48" y1="35" x2="48" y2="85" stroke="#94a3b8" stroke-width="2" />
+            <line x1="23" y1="60" x2="73" y2="60" stroke="#94a3b8" stroke-width="2" />
+          </svg>
+        </div>
+        <div class="qf-pdf-preset-emoji">✨</div>
+        <div class="qf-pdf-preset-name">เริ่มว่างเปล่า</div>
+        <div class="qf-pdf-preset-desc">สร้างจาก element ทีละตัว</div>
+      </button>`;
+
+    const title = opts.mode === 'replace' ? '🎨 เปลี่ยน layout' : '🎨 เลือก layout เริ่มต้น';
+    overlay.innerHTML = `
+      <div class="qf-modal qf-pdf-preset-picker-modal" role="dialog">
+        <div class="qf-workers-header">
+          <div class="qf-modal-title" style="margin-bottom:0;">${title}</div>
+          <button class="qf-workers-close qf-pdf-preset-close">×</button>
+        </div>
+        <div class="qf-modal-body qf-pdf-preset-picker-body">
+          <div class="qf-pdf-preset-grid">
+            ${cards}
+            ${blankCard}
+          </div>
+          <div class="qf-pdf-preset-note">
+            🔒 barcode และ QR ล็อคไว้ทุก layout — ปลอดภัยสำหรับสแกน
+          </div>
+        </div>
+      </div>
+    `;
+
+    const cleanup = () => {
+      overlay.remove();
+      document.removeEventListener('keydown', onKey);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') cleanup(); };
+    document.addEventListener('keydown', onKey);
+    overlay.onclick = (e) => { if (e.target === overlay) cleanup(); };
+
+    overlay.addEventListener('click', (e) => {
+      if (e.target.closest('.qf-pdf-preset-close')) { cleanup(); return; }
+      const card = e.target.closest('.qf-pdf-preset-card');
+      if (!card) return;
+      const pid = card.dataset.presetId;
+      if (pid === '__blank__') {
+        cleanup();
+        try { opts.onPick?.(null, true); } catch (err) { console.warn('[qf] preset onPick failed:', err); }
+        return;
+      }
+      const preset = getPresetById(pid);
+      if (!preset) { cleanup(); return; }
+      if (opts.confirmReplace) {
+        const ok = confirm('เปลี่ยน layout จะเขียนทับ elements + overrides + brand ที่แก้ไว้ตอนนี้ ต้องการทำต่อ?');
+        if (!ok) return;
+      }
+      cleanup();
+      try { opts.onPick?.(preset, false); } catch (err) { console.warn('[qf] preset onPick failed:', err); }
+    });
+
+    document.body.appendChild(overlay);
+  }
+
+  function openPdfTemplateEditor(templateId, seedDraft) {
     document.querySelectorAll('.qf-pdf-editor-overlay').forEach(e => e.remove());
     const existing = templateId ? loadPdfTemplates().find(t => t.id === templateId) : null;
     if (templateId && !existing) {
@@ -8518,15 +10505,19 @@
       return;
     }
 
-    // Working draft (mutable during edit).
-    let tpl = existing ? JSON.parse(JSON.stringify(existing)) : {
+    // Working draft (mutable during edit). Priority: existing > seedDraft > blank.
+    let tpl = existing ? JSON.parse(JSON.stringify(existing)) : (seedDraft ? JSON.parse(JSON.stringify(seedDraft)) : {
       id: null,
       name: 'เทมเพลตใหม่',
+      presetId: null,
       brand: { logoDataUrl: null, shopName: '', tagline: '' },
       elements: [],
       zones: { shrinkHeaderLogos: false, hideSkuTable: false, maskPhone: false, maskAddress: false },
-    };
+      overrides: {},
+    });
+    if (!tpl.overrides) tpl.overrides = {};
     let selectedId = null;
+    let selectedSysKey = null;  // PHASE 3 — key of selected system override
     let showGrid = true;
     const history = [JSON.parse(JSON.stringify(tpl))];
     const maxHistory = 10;
@@ -8548,6 +10539,14 @@
     overlay.className = 'qf-modal-overlay qf-pdf-editor-overlay';
     const canvasW = J_AND_T_LAYOUT.pageSize.w * PDF_TEMPLATE_SCALE;
     const canvasH = J_AND_T_LAYOUT.pageSize.h * PDF_TEMPLATE_SCALE;
+
+    // Sample PDF preview as canvas background — gives users visual context.
+    // URL is supplied by asset-bridge (ISOLATED world). If not yet received
+    // (race on editor open), request it now and apply when it arrives.
+    let showSampleBg = true;
+    if (!state.samplePreviewUrl) {
+      try { window.postMessage({ __qfAsset: 'request_sample_preview' }, '*'); } catch (_e) {}
+    }
 
     overlay.innerHTML = `
       <div class="qf-modal qf-pdf-editor-modal" role="dialog">
@@ -8584,7 +10583,9 @@
           <div class="qf-pdf-editor-center">
             <div class="qf-pdf-editor-toolbar">
               <label><input type="checkbox" class="qf-pdf-editor-grid-toggle" ${showGrid ? 'checked' : ''}> Grid</label>
+              <label><input type="checkbox" class="qf-pdf-editor-bg-toggle" ${showSampleBg ? 'checked' : ''}> แสดงตัวอย่าง label</label>
               <button class="qf-pdf-editor-undo">↶ Undo</button>
+              <button class="qf-pdf-editor-change-layout" title="เลือก preset อื่นมาแทน layout ปัจจุบัน">🎨 เปลี่ยน layout</button>
               <span class="qf-pdf-editor-hint">คลิก = เลือก · ลาก = ย้าย · Delete = ลบ · Arrow = เลื่อน</span>
             </div>
             <div class="qf-pdf-editor-canvas-wrap">
@@ -8599,6 +10600,9 @@
             <label class="qf-pdf-editor-check"><input type="checkbox" class="qf-pdf-editor-zone" data-zone="hideSkuTable" ${tpl.zones.hideSkuTable ? 'checked' : ''}> ซ่อน SKU table</label>
             <label class="qf-pdf-editor-check"><input type="checkbox" class="qf-pdf-editor-zone" data-zone="maskPhone" ${tpl.zones.maskPhone ? 'checked' : ''}> ปกปิดเบอร์โทร</label>
             <label class="qf-pdf-editor-check"><input type="checkbox" class="qf-pdf-editor-zone" data-zone="maskAddress" ${tpl.zones.maskAddress ? 'checked' : ''}> ปกปิดที่อยู่</label>
+            <div class="qf-pdf-editor-section-title">📐 System elements</div>
+            <div class="qf-pdf-editor-sys-list"></div>
+            <div class="qf-pdf-editor-sys-note">🔒 Barcode / QR ขยับไม่ได้ (สแกน-critical)</div>
           </aside>
         </div>
         <div class="qf-pdf-editor-bottom">
@@ -8620,6 +10624,17 @@
         canvasEl.classList.add('qf-pdf-editor-canvas-grid');
       } else {
         canvasEl.classList.remove('qf-pdf-editor-canvas-grid');
+      }
+      // Sample preview background — inline style so grid gradient still shows
+      // through (50% opacity).
+      if (showSampleBg && state.samplePreviewUrl) {
+        canvasEl.style.backgroundImage = `url("${state.samplePreviewUrl}")`;
+        canvasEl.style.backgroundSize = '100% 100%';
+        canvasEl.style.backgroundRepeat = 'no-repeat';
+        canvasEl.classList.add('qf-pdf-editor-canvas-has-bg');
+      } else {
+        canvasEl.style.backgroundImage = '';
+        canvasEl.classList.remove('qf-pdf-editor-canvas-has-bg');
       }
 
       // LOCKED regions — draw as red translucent boxes.
@@ -8647,6 +10662,31 @@
       hzEl.style.height = (hz.h * PDF_TEMPLATE_SCALE) + 'px';
       hzEl.textContent = 'Header zone — วางโลโก้/ข้อความแบรนด์';
       canvasEl.appendChild(hzEl);
+
+      // PHASE 3 — render enabled system-element overrides as draggable
+      // ghost boxes (blue dashed). Disabled overrides don't appear on the
+      // canvas; LOCKED barcode/QR already rendered above as red boxes.
+      const sysMeta = J_AND_T_LAYOUT.systemElements || {};
+      for (const [key, ov] of Object.entries(tpl.overrides || {})) {
+        if (!ov?.enabled) continue;
+        const meta = sysMeta[key];
+        if (!meta) continue;
+        const node = document.createElement('div');
+        node.className = 'qf-pdf-sys-el';
+        if (selectedSysKey === key) node.classList.add('qf-pdf-sys-el-selected');
+        node.dataset.sysKey = key;
+        node.style.left = (ov.x * PDF_TEMPLATE_SCALE) + 'px';
+        node.style.top = (ov.y * PDF_TEMPLATE_SCALE) + 'px';
+        node.style.width = (ov.w * PDF_TEMPLATE_SCALE) + 'px';
+        node.style.height = (ov.h * PDF_TEMPLATE_SCALE) + 'px';
+        node.title = `${meta.label} — ลากเพื่อย้าย`;
+        node.textContent = meta.label;
+        // Resize handle
+        const h2 = document.createElement('div');
+        h2.className = 'qf-pdf-editor-resize';
+        node.appendChild(h2);
+        canvasEl.appendChild(node);
+      }
 
       // Custom elements
       for (const el of tpl.elements) {
@@ -8685,6 +10725,40 @@
         handle.className = 'qf-pdf-editor-resize';
         node.appendChild(handle);
         canvasEl.appendChild(node);
+      }
+
+      // PHASE 3 — System elements sidebar list. Each row: checkbox + label.
+      // LOCKED entries (barcode/QR) are rendered as disabled red rows at the
+      // bottom with a 🔒 icon — non-draggable.
+      const sysListEl = overlay.querySelector('.qf-pdf-editor-sys-list');
+      if (sysListEl) {
+        const lines = [];
+        for (const [key, meta] of Object.entries(sysMeta)) {
+          const ov = tpl.overrides?.[key];
+          const checked = ov?.enabled ? 'checked' : '';
+          lines.push(`
+            <label class="qf-pdf-editor-sys-row" data-sys-key="${escapeHtml(key)}">
+              <input type="checkbox" class="qf-pdf-editor-sys-toggle" data-sys-key="${escapeHtml(key)}" ${checked}>
+              <span class="qf-pdf-editor-sys-label">${escapeHtml(meta.label)}</span>
+            </label>
+          `);
+        }
+        // LOCKED barcode/QR rows — always disabled, red 🔒
+        const lockedRows = [
+          { key: 'barcodeMain', label: 'Barcode (main)' },
+          { key: 'qrCode',      label: 'QR code' },
+          { key: 'barcodeLeft', label: 'Side barcode L' },
+          { key: 'barcodeRight', label: 'Side barcode R' },
+        ];
+        for (const row of lockedRows) {
+          lines.push(`
+            <div class="qf-pdf-editor-sys-row qf-pdf-editor-sys-row-locked" title="สแกน-critical — ขยับไม่ได้">
+              <span class="qf-pdf-editor-sys-lock">🔒</span>
+              <span class="qf-pdf-editor-sys-label">${escapeHtml(row.label)}</span>
+            </div>
+          `);
+        }
+        sysListEl.innerHTML = lines.join('');
       }
 
       // Properties panel
@@ -8785,16 +10859,39 @@
     // ====== Canvas drag / select / resize ======
     let dragState = null;
     canvasEl.addEventListener('mousedown', (e) => {
+      // PHASE 3 — system override ghost box (drag/resize)
+      const sysNode = e.target.closest('.qf-pdf-sys-el');
+      if (sysNode) {
+        const key = sysNode.dataset.sysKey;
+        const ov = tpl.overrides?.[key];
+        if (!ov) return;
+        selectedSysKey = key;
+        selectedId = null;
+        const isResize = e.target.classList.contains('qf-pdf-editor-resize');
+        dragState = {
+          kind: 'sys',
+          sysKey: key,
+          mode: isResize ? 'resize' : 'move',
+          startX: e.clientX, startY: e.clientY,
+          origX: ov.x, origY: ov.y, origW: ov.w, origH: ov.h,
+        };
+        rerender();
+        e.preventDefault();
+        return;
+      }
+
       const elNode = e.target.closest('.qf-pdf-editor-el');
-      if (!elNode) { selectedId = null; rerender(); return; }
+      if (!elNode) { selectedId = null; selectedSysKey = null; rerender(); return; }
       const id = elNode.dataset.id;
       selectedId = id;
+      selectedSysKey = null;
       const el = tpl.elements.find(x => x.id === id);
       if (!el) return;
       const isResize = e.target.classList.contains('qf-pdf-editor-resize');
       const startX = e.clientX;
       const startY = e.clientY;
       dragState = {
+        kind: 'element',
         id,
         mode: isResize ? 'resize' : 'move',
         startX, startY,
@@ -8806,10 +10903,36 @@
 
     document.addEventListener('mousemove', (e) => {
       if (!dragState) return;
-      const el = tpl.elements.find(x => x.id === dragState.id);
-      if (!el) return;
       const dx = (e.clientX - dragState.startX) / PDF_TEMPLATE_SCALE;
       const dy = (e.clientY - dragState.startY) / PDF_TEMPLATE_SCALE;
+
+      // PHASE 3 — system override drag/resize
+      if (dragState.kind === 'sys') {
+        const ov = tpl.overrides?.[dragState.sysKey];
+        if (!ov) return;
+        let newX = ov.x, newY = ov.y, newW = ov.w, newH = ov.h;
+        if (dragState.mode === 'move') {
+          newX = snapToGrid(dragState.origX + dx);
+          newY = snapToGrid(dragState.origY + dy);
+        } else {
+          newW = Math.max(8, snapToGrid(dragState.origW + dx));
+          newH = Math.max(8, snapToGrid(dragState.origH + dy));
+        }
+        newX = Math.max(0, Math.min(J_AND_T_LAYOUT.pageSize.w - newW, newX));
+        newY = Math.max(0, Math.min(J_AND_T_LAYOUT.pageSize.h - newH, newY));
+        const probe = { x: newX, y: newY, w: newW, h: newH };
+        const lockedHit = intersectsLocked(probe);
+        if (lockedHit) {
+          flashLockedRegion(lockedHit.id);
+          return;
+        }
+        ov.x = newX; ov.y = newY; ov.w = newW; ov.h = newH;
+        rerender();
+        return;
+      }
+
+      const el = tpl.elements.find(x => x.id === dragState.id);
+      if (!el) return;
       let newX = el.x, newY = el.y, newW = el.w, newH = el.h;
       if (dragState.mode === 'move') {
         newX = snapToGrid(dragState.origX + dx);
@@ -8866,6 +10989,37 @@
         undo();
         return;
       }
+      // PHASE 3 — keyboard ops on selected system override
+      if (selectedSysKey) {
+        const ov = tpl.overrides?.[selectedSysKey];
+        if (!ov) { selectedSysKey = null; return; }
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+          delete tpl.overrides[selectedSysKey];
+          selectedSysKey = null;
+          pushHistory();
+          rerender();
+          e.preventDefault();
+          return;
+        }
+        const step2 = e.shiftKey ? PDF_TEMPLATE_GRID_PT : 1;
+        let ddx = 0, ddy = 0;
+        if (e.key === 'ArrowLeft') ddx = -step2;
+        else if (e.key === 'ArrowRight') ddx = step2;
+        else if (e.key === 'ArrowUp') ddy = -step2;
+        else if (e.key === 'ArrowDown') ddy = step2;
+        else return;
+        const newX = Math.max(0, Math.min(J_AND_T_LAYOUT.pageSize.w - ov.w, ov.x + ddx));
+        const newY = Math.max(0, Math.min(J_AND_T_LAYOUT.pageSize.h - ov.h, ov.y + ddy));
+        const probe = { x: newX, y: newY, w: ov.w, h: ov.h };
+        const hit = intersectsLocked(probe);
+        if (hit) { flashLockedRegion(hit.id); e.preventDefault(); return; }
+        ov.x = newX; ov.y = newY;
+        pushHistory();
+        rerender();
+        e.preventDefault();
+        return;
+      }
+
       if (!selectedId) return;
       const el = tpl.elements.find(x => x.id === selectedId);
       if (!el) return;
@@ -8992,6 +11146,35 @@
       }
     });
 
+    // PHASE 3 — system override toggle. Checkbox change seeds defaults into
+    // tpl.overrides[key] on enable, removes on disable.
+    overlay.addEventListener('change', (e) => {
+      const t = e.target;
+      if (!t.classList.contains('qf-pdf-editor-sys-toggle')) return;
+      const key = t.dataset.sysKey;
+      const meta = J_AND_T_LAYOUT.systemElements?.[key];
+      if (!meta) return;
+      if (!tpl.overrides) tpl.overrides = {};
+      if (t.checked) {
+        const def = meta.default || meta;
+        tpl.overrides[key] = {
+          enabled: true,
+          x: def.x, y: def.y, w: def.w, h: def.h,
+          ...(meta.kind === 'text' ? { size: def.size || 10 } : {}),
+          ...(meta.kind === 'block' ? {
+            fontSize: def.fontSize || 7,
+            ...(key === 'skuTable' ? { columns: def.columns || ['name', 'sku', 'seller', 'qty'] } : {}),
+          } : {}),
+        };
+        selectedSysKey = key;
+      } else {
+        delete tpl.overrides[key];
+        if (selectedSysKey === key) selectedSysKey = null;
+      }
+      pushHistory();
+      rerender();
+    });
+
     // Shop name / tagline / template name
     overlay.querySelector('.qf-pdf-editor-shopname').addEventListener('input', (e) => {
       tpl.brand.shopName = e.target.value;
@@ -9006,13 +11189,69 @@
       showGrid = e.target.checked;
       rerender();
     });
+    overlay.querySelector('.qf-pdf-editor-bg-toggle').addEventListener('change', (e) => {
+      showSampleBg = e.target.checked;
+      rerender();
+    });
+    // Re-apply background when asset-bridge finally delivers the URL
+    // (editor may have opened before asset-bridge posted the message).
+    const onAssetMsg = (msg) => {
+      if (msg.source !== window) return;
+      if (msg.data?.__qfAsset === 'samplePreview' && msg.data.url && !state.samplePreviewUrl) {
+        state.samplePreviewUrl = msg.data.url;
+        if (document.body.contains(overlay)) rerender();
+      }
+    };
+    window.addEventListener('message', onAssetMsg);
     overlay.querySelector('.qf-pdf-editor-undo').addEventListener('click', (e) => {
       e.stopPropagation(); undo();
     });
 
+    // PHASE 4a — "เปลี่ยน layout" button opens preset picker in replace mode.
+    // On pick, overwrite elements/overrides/zones/brand with the preset's
+    // values. The template's name + presetId are updated too.
+    const changeLayoutBtn = overlay.querySelector('.qf-pdf-editor-change-layout');
+    if (changeLayoutBtn) {
+      changeLayoutBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openPresetPicker({
+          mode: 'replace',
+          confirmReplace: true,
+          onPick: (preset, isBlank) => {
+            if (isBlank || !preset) return;
+            try {
+              const cloned = clonePresetAsDraft(preset);
+              tpl.elements = cloned.elements;
+              tpl.overrides = cloned.overrides;
+              tpl.zones = { ...tpl.zones, ...cloned.zones };
+              tpl.brand = { ...tpl.brand, ...cloned.brand };
+              tpl.presetId = preset.id;
+              selectedId = null;
+              selectedSysKey = null;
+              pushHistory();
+              rerender();
+              const nameInput = overlay.querySelector('.qf-pdf-editor-shopname');
+              if (nameInput && typeof cloned.brand.shopName === 'string') {
+                nameInput.value = cloned.brand.shopName;
+              }
+              const tagInput = overlay.querySelector('.qf-pdf-editor-tagline');
+              if (tagInput && typeof cloned.brand.tagline === 'string') {
+                tagInput.value = cloned.brand.tagline;
+              }
+              showToast(`ใช้ layout "${preset.name}" แล้ว`, 1800);
+            } catch (err) {
+              console.warn('[qf] preset apply failed:', err);
+              showToast('ใช้ layout ล้มเหลว — ใช้ editor เปล่าแทน', 2500);
+            }
+          },
+        });
+      });
+    }
+
     // Save / Cancel
     const cleanup = () => {
       document.removeEventListener('keydown', onEditorKey);
+      window.removeEventListener('message', onAssetMsg);
       overlay.remove();
     };
     overlay.querySelector('.qf-pdf-editor-close').addEventListener('click', cleanup);
@@ -9062,7 +11301,15 @@
     openEditor: openPdfTemplateEditor,
     openManager: openPdfTemplateManager,
     mockData: mockTemplateRecordData,
+    presets: LAYOUT_PRESETS,
+    verifyPresets,
+    openPicker: openPresetPicker,
   };
+
+  // Run preset LOCKED verification once at module init. intersectsLocked is
+  // defined above; any overlap is logged via console.error so regressions
+  // surface during the test plan.
+  try { verifyPresets(); } catch (e) { console.warn('[qf] verifyPresets failed:', e); }
 
   // ==================== END PDF TEMPLATE BUILDER ====================
 

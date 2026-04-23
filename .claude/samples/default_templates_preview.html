@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8" />
+<title>Default PDF Templates Preview</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", "Noto Sans Thai", sans-serif; background: #eef0f3; color: #222; margin: 0; padding: 24px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .subtitle { color: #666; font-size: 13px; margin-bottom: 20px; }
+  .row { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+
+  .card { background: white; border: 1px solid #ddd; border-radius: 8px; padding: 14px; width: 340px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .card .desc { font-size: 12px; color: #666; margin-bottom: 10px; min-height: 32px; }
+
+  /* A6 canvas: 298×420pt, shown at 1× = 298×420 actual px. We'll scale up. */
+  .canvas {
+    position: relative;
+    width: 298px;
+    height: 420px;
+    background: #fafafa;
+    border: 1px solid #000;
+    font-size: 8px;
+    overflow: hidden;
+  }
+
+  /* LOCKED regions (same coords as jnt_layout_preview.html but unflipped Y since we use top-left in CSS) */
+  .locked { position: absolute; background: rgba(220, 38, 38, 0.18); border: 1px solid #dc2626; color: #7f1d1d; font-weight: 600; font-size: 7px; padding: 1px 2px; overflow: hidden; }
+  .shrink { position: absolute; background: rgba(234, 179, 8, 0.12); border: 1px dashed #b45309; color: #78350f; font-size: 7px; padding: 1px 2px; overflow: hidden; }
+
+  /* Template custom elements */
+  .tpl { position: absolute; font-size: 9px; padding: 1px 2px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .tpl.text { color: #000; }
+  .tpl.text.center { text-align: center; }
+  .tpl.text.bold { font-weight: 700; }
+  .tpl.text.large { font-size: 14px; font-weight: 700; }
+  .tpl.text.xlarge { font-size: 22px; font-weight: 800; }
+  .tpl.logo { background: repeating-linear-gradient(45deg, #ddd, #ddd 3px, #eee 3px, #eee 6px); border: 1px dashed #999; color: #666; display: flex; align-items: center; justify-content: center; font-size: 8px; }
+  .tpl.qr { background: #000; color: white; display: flex; align-items: center; justify-content: center; font-size: 8px; font-weight: bold; }
+  .tpl.qr::before { content: '▓ QR ▓'; }
+
+  /* Carrier labels inside LOCKED for context */
+  .note { font-size: 10px; color: #888; margin-top: 8px; }
+  .elem-count { font-size: 11px; color: #047857; font-weight: 600; margin-top: 6px; }
+
+  .legend { background: white; border: 1px solid #ddd; border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; font-size: 12px; }
+  .legend-row { display: inline-flex; align-items: center; gap: 6px; margin-right: 14px; }
+  .sw { width: 12px; height: 12px; display: inline-block; }
+  .sw.r { background: rgba(220,38,38,0.4); border: 1px solid #dc2626; }
+  .sw.y { background: rgba(234,179,8,0.4); border: 1px dashed #b45309; }
+  .sw.bk { background: #000; }
+  .sw.lg { background: repeating-linear-gradient(45deg, #ddd, #ddd 3px, #eee 3px, #eee 6px); border: 1px dashed #999; }
+</style>
+</head>
+<body>
+
+<h1>Default PDF Templates — Preview ก่อนสร้าง</h1>
+<div class="subtitle">แสดง template ทั้ง 3 แบบที่จะ seed อัตโนมัติตอน user เปิดใช้ครั้งแรก (A6 298×420pt)</div>
+
+<div class="legend">
+  <span class="legend-row"><span class="sw r"></span> LOCKED (ของ carrier — ห้ามทับ)</span>
+  <span class="legend-row"><span class="sw y"></span> SHRINKABLE (SKU table — ซ่อน/ลดได้)</span>
+  <span class="legend-row"><span class="sw lg"></span> โลโก้ร้าน (user upload)</span>
+  <span class="legend-row"><span class="sw bk"></span> QR placeholder</span>
+</div>
+
+<div class="row">
+
+<!-- ========== TEMPLATE 1: MINIMAL ========== -->
+<div class="card">
+  <h2>1. ขั้นต่ำ (Minimal)</h2>
+  <div class="desc">Variables ล้วน ไม่มีโลโก้ — เหมาะสำหรับคนที่อยากได้ alias ชัดๆ ไม่ต้อง brand</div>
+  <div class="canvas">
+    <!-- LOCKED regions (reference) -->
+    <div class="locked" style="left:188px;top:0px;width:50px;height:14px;">sortCode</div>
+    <div class="locked" style="left:10px;top:20px;width:14px;height:220px;">barL</div>
+    <div class="locked" style="left:278px;top:20px;width:14px;height:300px;">barR</div>
+    <div class="locked" style="left:164px;top:95px;width:130px;height:18px;">routeCode</div>
+    <div class="locked" style="left:204px;top:120px;width:75px;height:14px;">subZone</div>
+    <div class="locked" style="left:106px;top:70px;width:120px;height:14px;">tracking#</div>
+    <div class="locked" style="left:216px;top:225px;width:80px;height:12px;">DROP-OFF</div>
+    <div class="locked" style="left:53px;top:228px;width:110px;height:18px;">COD</div>
+    <div class="locked" style="left:43px;top:250px;width:250px;height:14px;">orderId</div>
+
+    <!-- Template elements -->
+    <div class="tpl text bold" style="right:4px;top:4px;font-size:7px;color:#666;">{orderId}</div>
+    <div class="tpl text center xlarge" style="left:20px;right:20px;top:360px;">แดง1</div>
+    <div class="tpl text center" style="left:20px;right:20px;top:390px;font-size:8px;color:#888;">{alias}</div>
+  </div>
+  <div class="elem-count">Elements: 2 (orderId text + alias text)</div>
+  <div class="note">ไม่ทับ LOCKED — alias อยู่ใต้ SKU table ด้านล่าง</div>
+</div>
+
+<!-- ========== TEMPLATE 2: BRANDED ========== -->
+<div class="card">
+  <h2>2. แบรนด์ร้าน (Branded)</h2>
+  <div class="desc">มี logo + ชื่อร้าน + tagline — เหมาะกับร้านที่อยาก brand ใบปะหน้า</div>
+  <div class="canvas">
+    <!-- LOCKED regions -->
+    <div class="locked" style="left:188px;top:0px;width:50px;height:14px;">sortCode</div>
+    <div class="locked" style="left:10px;top:20px;width:14px;height:220px;">barL</div>
+    <div class="locked" style="left:278px;top:20px;width:14px;height:300px;">barR</div>
+    <div class="locked" style="left:164px;top:95px;width:130px;height:18px;">routeCode</div>
+    <div class="locked" style="left:204px;top:120px;width:75px;height:14px;">subZone</div>
+    <div class="locked" style="left:106px;top:70px;width:120px;height:14px;">tracking#</div>
+    <div class="locked" style="left:216px;top:225px;width:80px;height:12px;">DROP-OFF</div>
+    <div class="locked" style="left:53px;top:228px;width:110px;height:18px;">COD</div>
+    <div class="locked" style="left:43px;top:250px;width:250px;height:14px;">orderId</div>
+
+    <!-- Brand zone: top-left where TikTok+J&T logos shrink -->
+    <div class="tpl logo" style="left:28px;top:4px;width:50px;height:36px;">LOGO</div>
+    <div class="tpl text bold" style="left:82px;top:8px;width:100px;font-size:11px;">{shopName}</div>
+    <div class="tpl text" style="left:82px;top:24px;width:100px;font-size:8px;color:#666;">ส่งของคุณภาพดี</div>
+
+    <!-- Alias bottom -->
+    <div class="tpl text center xlarge" style="left:20px;right:20px;top:360px;">แดง1</div>
+    <div class="tpl text center" style="left:20px;right:20px;top:395px;font-size:8px;color:#888;">วันที่: {date}</div>
+  </div>
+  <div class="elem-count">Elements: 5 (logo + shopName + tagline + alias + date)</div>
+  <div class="note">Header zone ใช้ที่ว่างข้างๆ carrier logos — ต้อง toggle "shrinkHeaderLogos" ใน zones</div>
+</div>
+
+<!-- ========== TEMPLATE 3: REVIEW PROMO ========== -->
+<div class="card">
+  <h2>3. โปรโมทรีวิว (Review Promo)</h2>
+  <div class="desc">ชื่อร้าน + ข้อความขอบคุณ + LINE QR — เพิ่มยอดรีวิว/repeat customer</div>
+  <div class="canvas">
+    <!-- LOCKED regions -->
+    <div class="locked" style="left:188px;top:0px;width:50px;height:14px;">sortCode</div>
+    <div class="locked" style="left:10px;top:20px;width:14px;height:220px;">barL</div>
+    <div class="locked" style="left:278px;top:20px;width:14px;height:300px;">barR</div>
+    <div class="locked" style="left:164px;top:95px;width:130px;height:18px;">routeCode</div>
+    <div class="locked" style="left:204px;top:120px;width:75px;height:14px;">subZone</div>
+    <div class="locked" style="left:106px;top:70px;width:120px;height:14px;">tracking#</div>
+    <div class="locked" style="left:216px;top:225px;width:80px;height:12px;">DROP-OFF</div>
+    <div class="locked" style="left:53px;top:228px;width:110px;height:18px;">COD</div>
+    <div class="locked" style="left:43px;top:250px;width:250px;height:14px;">orderId</div>
+
+    <!-- SKU table marked shrinkable (will be hidden or compact) -->
+    <div class="shrink" style="left:0px;top:290px;width:298px;height:45px;">SKU table (hidden)</div>
+
+    <!-- Brand header -->
+    <div class="tpl text center bold" style="left:28px;right:28px;top:8px;font-size:10px;">{shopName}</div>
+
+    <!-- Thank-you / promo strip (uses the freed SKU table area) -->
+    <div class="tpl text center" style="left:8px;right:72px;top:295px;font-size:9px;font-weight:700;color:#000;line-height:1.2;">
+      ✨ ขอบคุณที่อุดหนุนค่ะ
+    </div>
+    <div class="tpl text center" style="left:8px;right:72px;top:310px;font-size:8px;color:#333;">
+      รีวิว 5⭐ รับคูปอง 10%
+    </div>
+    <div class="tpl text center" style="left:8px;right:72px;top:322px;font-size:7px;color:#666;">
+      โค้ด: THANK-{orderId}
+    </div>
+
+    <!-- QR -->
+    <div class="tpl qr" style="right:8px;top:292px;width:52px;height:52px;"></div>
+    <div class="tpl text center" style="right:8px;top:345px;width:52px;font-size:7px;color:#666;">LINE ร้าน</div>
+
+    <!-- Alias bottom -->
+    <div class="tpl text center xlarge" style="left:20px;right:20px;top:362px;">แดง1</div>
+  </div>
+  <div class="elem-count">Elements: 7 (shopName + 3 promo text + QR + QR label + alias)</div>
+  <div class="note">ต้อง toggle "hideSkuTable" — ใช้พื้นที่นี้ใส่ข้อความโปรโมท. กล่องดำเป็น QR placeholder (user จะ upload QR จริง)</div>
+</div>
+
+</div>
+
+<div class="legend" style="margin-top: 20px;">
+  <b>Approval checklist:</b>
+  <ul style="margin: 6px 0 0 20px; padding: 0; font-size: 12px;">
+    <li>✓ ไม่มี element ทับ LOCKED region</li>
+    <li>✓ ทุก template ใช้ได้ทันที ไม่ต้อง config อะไรเพิ่ม (ยกเว้น logo upload ใน Branded)</li>
+    <li>? Template 3 ต้อง toggle "hideSkuTable" — user รู้ไหม? ใส่ default เปิดไว้?</li>
+    <li>? กล่อง LOGO/QR ใน preview เป็น dashed placeholder — เมื่อ user upload จะกลายเป็นภาพจริง</li>
+    <li>? ขนาด alias (xlarge bottom) — จะ trigger การซ่อน alias watermark เดิมด้วยมั้ย? หรือแสดงทั้งสอง?</li>
+  </ul>
+</div>
+
+</body>
+</html>
