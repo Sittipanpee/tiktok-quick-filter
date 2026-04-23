@@ -3161,8 +3161,18 @@
 
   // Select all visible (non-done) items in the CURRENT tab, respecting filters.
   // Used by the "เลือกทั้งหมด" button inside the select bar.
+  //
+  // Granularity rule: when variants are visible we insert variant-level keys so
+  // the badges light up (user can then click a single badge to deselect). When
+  // no variants exist, fall back to product-level. Weird tab inserts combo keys.
+  //
+  // Done check: labels page uses `isLabelsDone` (session-local printedUnitIds)
+  // instead of `isDone` — `state.doneItems` is NEVER populated on the labels
+  // page, so `isDone` always returns false and printed cards would leak into
+  // the selection. See isLabelsDone comment above for the full rationale.
   function selectAllVisible() {
     const tab = state.currentTab;
+    const labelsPg = isLabelsPage();
     if (tab === 'single' || tab === 'multi') {
       const idsKey = tab === 'single' ? 'fulfillUnitIdsSingle' : 'fulfillUnitIdsMulti';
       const type = tab === 'single' ? 'single_item' : 'single_sku';
@@ -3170,15 +3180,41 @@
       for (const p of state.products.values()) {
         const count = carrierFilteredSize(p[idsKey]);
         if (count === 0) continue;
-        if (isDone(p.productId, null, type)) continue;
-        state.selected.set(selectionKey({type:'product', productId:p.productId, scenario}),
-                          {type:'product', productId:p.productId, scenario});
+        const productDone = labelsPg
+          ? isLabelsDone(p[idsKey])
+          : isDone(p.productId, null, type);
+        if (productDone) continue;
+
+        // Visible variants mirror the grid-render filter (skuId != null, count > 0).
+        const variantList = [...(p.variants?.values() || [])].filter(v => {
+          if (v.skuId == null) return false;
+          return carrierFilteredSize(v[idsKey]) > 0;
+        });
+
+        if (variantList.length > 0) {
+          // Insert variant keys so badges visibly reflect the selection state.
+          for (const v of variantList) {
+            const vDone = labelsPg
+              ? isLabelsDone(v[idsKey])
+              : isDone(p.productId, v.skuId, type);
+            if (vDone) continue;
+            const item = {type: 'variant', productId: p.productId, skuId: v.skuId, scenario};
+            state.selected.set(selectionKey(item), item);
+          }
+        } else {
+          // No variants → select at product level.
+          const item = {type: 'product', productId: p.productId, scenario};
+          state.selected.set(selectionKey(item), item);
+        }
       }
     } else if (tab === 'weird') {
       for (const combo of state.weirdCombos.values()) {
         const count = carrierFilteredSize(combo.fulfillUnitIds);
         if (count === 0) continue;
-        if (isComboDone(combo.sigKey)) continue;
+        const comboDone = labelsPg
+          ? isLabelsDone(combo.fulfillUnitIds)
+          : isComboDone(combo.sigKey);
+        if (comboDone) continue;
         state.selected.set(selectionKey({type:'combo', sigKey:combo.sigKey}),
                           {type:'combo', sigKey:combo.sigKey});
       }
@@ -6585,7 +6621,17 @@
           ? isLabelsDone(p[idsKey])
           : isDone(p.productId, null, type);
         const productItem = {type: 'product', productId: p.productId, scenario};
-        const selected = state.selectMode && isSelected(productItem);
+        // Card highlights when EITHER the product key OR any variant/qty sub-key
+        // is selected — keeps visual aligned with selectAllVisible which inserts
+        // variant keys instead of product keys when variants are present.
+        const hasVariantSelected = state.selectMode && [...(p.variants?.values() || [])]
+          .some(v => v.skuId != null
+            && isSelected({type: 'variant', productId: p.productId, skuId: v.skuId, scenario}));
+        const hasQtySelected = state.selectMode && scenario === 'multi'
+          && [...(p.fulfillUnitIdsByQty?.keys() || [])]
+            .some(qty => isSelected({type: 'qty', productId: p.productId, skuId: null, qty}));
+        const selected = state.selectMode
+          && (isSelected(productItem) || hasVariantSelected || hasQtySelected);
         card.className = 'qf-product-card'
           + (cardDone ? ' qf-done' : '')
           + (state.selectMode ? ' qf-select-mode' : '')
@@ -7108,12 +7154,18 @@
     const platform = isShopee() ? 'sp' : 'tk';
     const sessionId = 'sess_' + Math.random().toString(36).slice(2, 10);
     const now = Date.now();
-    // 'all' mode: both printed + not-printed in records — exclude printed to avoid accidental reprint.
-    // 'printed' mode: user deliberately wants to reprint — include everything.
-    // 'not_printed' mode: processLabelRecord already excluded printed records — include everything.
-    const allIds = state.labelStatusFilter === 'all'
+    // labelStatus rules:
+    //   'all'        → both printed + not-printed in records — exclude printed to avoid accidental reprint.
+    //   'printed'    → user deliberately wants to reprint — include everything.
+    //   'not_printed'→ processLabelRecord already excluded printed records → include everything.
+    //
+    // Other filters (carrier chips, pre-order toggle, date range) must ALSO
+    // apply — planning mode should mirror what the user currently sees on the
+    // grid. applyCarrierFilter() handles all four dimensions in one pass.
+    const rawIds = state.labelStatusFilter === 'all'
       ? [...state.records.keys()].filter(id => state.records.get(id)?.labelStatus !== LABEL_STATUS_PRINTED)
       : [...state.records.keys()];
+    const allIds = applyCarrierFilter(rawIds);
     return {
       version: 2,
       sessionId,
