@@ -3053,10 +3053,19 @@
       }
 
       // ── Worker name (top-right) ──────────────────────────────────────────
+      // White stroke (4-dir offset) ช่วยให้อ่านชื่อคนแพ็คออกแม้ทับกับข้อความ
+      // ฉลากที่เป็นสีเข้ม (เช่น เลข tracking, barcode labels) — ใช้ pattern
+      // เดียวกับ alias overlay ข้างบนแต่ไม่ผ่าน `draw()` เพราะชื่อชิดขวา ไม่ใช่กลาง.
       if (workerName) {
         const wSize = Math.min(ph * 0.04, 18);
         const wWidth = font.widthOfTextAtSize(workerName, wSize);
-        page.drawText(workerName, { x: Math.max(6, pw - wWidth - 6), y: ph - wSize - 6, size: wSize, font, color: rgb(0,0,0), opacity: OP });
+        const wX = Math.max(6, pw - wWidth - 6);
+        const wY = ph - wSize - 6;
+        const strokeOp = Math.min(OP + 0.05, 0.95);
+        for (const [dx, dy] of [[-1,0],[1,0],[0,-1],[0,1]]) {
+          page.drawText(workerName, { x: wX + dx, y: wY + dy, size: wSize, font, color: rgb(1,1,1), opacity: strokeOp });
+        }
+        page.drawText(workerName, { x: wX, y: wY, size: wSize, font, color: rgb(0,0,0), opacity: OP });
       }
 
       if (onProgress && (i % 20 === 0 || i === total - 1)) { onProgress(i + 1, total); await sleep(0); }
