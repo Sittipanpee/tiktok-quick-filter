@@ -279,18 +279,18 @@
   // ── Label overlay config (masks + marketing text + shop image + headers) ──
   const LABEL_OVERLAY_KEY = 'qf_label_overlay_v1';
   function loadLabelOverlay() {
-    try { return Object.assign({ enabled: false, marketingText: 'กรุณาถ่ายรูปก่อนเปิดกล่องพัสดุ', shopImageDataUrl: '', headerMain: '', headerSub: '', opacity: 0.85 }, JSON.parse(localStorage.getItem(LABEL_OVERLAY_KEY) || 'null') || {}); }
+    try { return Object.assign({ enabled: false, marketingText: 'กรุณาถ่ายรูปก่อนเปิดกล่องพัสดุ', shopImageDataUrl: '', headerMain: '', headerSub: '', opacity: 0.85, aliasFontSize: 0, marketingFontSize: 0, header1FontSize: 0, header2FontSize: 0 }, JSON.parse(localStorage.getItem(LABEL_OVERLAY_KEY) || 'null') || {}); }
     catch { return { enabled: false, marketingText: 'กรุณาถ่ายรูปก่อนเปิดกล่องพัสดุ', shopImageDataUrl: '', headerMain: '', headerSub: '', opacity: 0.85 }; }
   }
   function saveLabelOverlay(cfg) { try { localStorage.setItem(LABEL_OVERLAY_KEY, JSON.stringify(cfg)); } catch {} }
 
   // Calibrated J&T mask rects (bottom-left PDF coords, A6 298×420pt, pixel-scanned @ 2x).
-  // Side column heights extended to y=400 to fully cover the vertical tracking
-  // numbers (calibrated at barcodeLeft y=187..397 and barcodeRight y=79..400).
-  // Width unchanged — widening would clip the address block which starts at x≈14.
+  // Side columns extended to y=0 (page bottom) to fully cover vertical tracking
+  // numbers that overflow below the previous y=38 floor (≈5 extra chars visible).
+  // Width unchanged — widening would clip address block which starts at x≈14.
   const J_AND_T_MASK_RECTS = [
-    { x: 0,   y: 38,   w: 17,  h: 362 }, // vertical OCR column L — y=38..400 (was h=244 ending at y=282)
-    { x: 283, y: 38,   w: 15,  h: 362 }, // vertical OCR column R — y=38..400 (was h=244)
+    { x: 0,   y: 0,    w: 17,  h: 340 }, // vertical OCR column L — y=0..340 (top 12-digit group at y≈345-390 left exposed)
+    { x: 283, y: 0,    w: 15,  h: 340 }, // vertical OCR column R — same logic
     { x: 0,   y: 41.5, w: 95,  h: 20  }, // TikTok Shop footer logo (preserve Order ID x>190)
     { x: 0,   y: 75,   w: 298, h: 3   }, // h-line above Qty Total
     { x: 0,   y: 62,   w: 298, h: 2   }, // h-line above footer row
@@ -3029,9 +3029,10 @@
       const lines = buildPageLines(rec);
       const page = pages[i];
       const { width: pw, height: ph } = page.getSize();
-      // Alias text sizes reduced by 10% per user request (keeps overlay unobtrusive).
-      const bigSize = Math.min(ph * 0.05, 22) * 0.9;
-      const smallSize = Math.min(ph * 0.032, 13) * 0.9;
+      // aliasFontSize=0 → auto formula; >0 → user-set pt value (bigSize = set, smallSize = set×0.65).
+      const _afs = lo.aliasFontSize || 0;
+      const bigSize = _afs > 0 ? _afs : Math.min(ph * 0.05, 22) * 0.9;
+      const smallSize = _afs > 0 ? Math.max(7, _afs * 0.65) : Math.min(ph * 0.032, 13) * 0.9;
 
       // ── J&T carrier detection ────────────────────────────────────────────
       const carrierId = state.carrierOf.get(fulfillId) || '';
@@ -3051,12 +3052,13 @@
         // 2. Vertical marketing text in masked columns (rotated 90°), centered in 362pt zone
         const mktText = (lo.marketingText || '').slice(0, 50);
         if (mktText) {
-          // Font scale: short text (≤13 chars) gets max 12pt; longer text scales down to 7pt floor.
-          // Coefficient 160 = designer's visual sweet spot between legibility and restraint.
-          const colSize = Math.max(7, Math.min(12, 160 / Math.max(mktText.length, 13)));
+          // marketingFontSize=0 → auto (7–12pt based on length); >0 → user override, capped at 15pt.
+          const _mfs = lo.marketingFontSize || 0;
+          const colSize = _mfs > 0 ? Math.min(15, _mfs) : Math.max(7, Math.min(12, 160 / Math.max(mktText.length, 13)));
           const mktW = font.widthOfTextAtSize(mktText, colSize);
-          // Mask zone: y=38..400 (362pt). Center at y=219 → vertical midpoint, reads calmly.
-          const colY = Math.max(38, Math.min(219 - mktW / 2, 400 - mktW));
+          // Mask zone: y=38..340 (302pt, reduced from 400 to leave top 12-digit OCR group uncovered).
+          // Center at y=189 = (38+340)/2.
+          const colY = Math.max(38, Math.min(189 - mktW / 2, 340 - mktW));
           // Baseline x shifted inward to keep ascenders inside mask at larger font sizes:
           //   left mask  x=0..17  → baseline x=11.5 (ascenders reach x≈2.5 at 12pt)
           //   right mask x=283..298 → baseline x=293.5 (ascenders reach x≈284.5 at 12pt)
@@ -3081,11 +3083,13 @@
           // h1 baseline y=54 @ 9pt → occupies y≈51.75..60.75 (safely between masks at 62 and 41.5)
           // h2 baseline y=44 @ 7pt → occupies y≈42.25..49.25 (3pt gap from h1 for designer rhythm)
           if (h1) {
-            const { size: s1 } = fitWidth(h1, 9, hdrMaxW);
+            const h1Base = lo.header1FontSize > 0 ? Math.min(14, lo.header1FontSize) : 9;
+            const { size: s1 } = fitWidth(h1, h1Base, hdrMaxW);
             page.drawText(h1, { x: hdrX, y: 54, size: s1, font, color: rgb(0,0,0), opacity: OP });
           }
           if (h2) {
-            const { size: s2 } = fitWidth(h2, 7, hdrMaxW);
+            const h2Base = lo.header2FontSize > 0 ? Math.min(12, lo.header2FontSize) : 7;
+            const { size: s2 } = fitWidth(h2, h2Base, hdrMaxW);
             page.drawText(h2, { x: hdrX, y: 44, size: s2, font, color: rgb(0,0,0), opacity: OP });
           }
         }
@@ -3938,7 +3942,7 @@
   // (sku, carrier) so dividers always sit directly above their labels.
   // Returns {bytes, pageCount}. idOrder must match the order ids were sent to
   // the API so page index → id can be inferred.
-  async function prependDividersToChunk(labelBytes, idOrder, workerName) {
+  async function prependDividersToChunk(labelBytes, idOrder, workerName, assigneeKind = null) {
     const { PDFDocument } = window.PDFLib;
     // Phase 2: group by (sku, carrier, qty) — creates divider per qty bucket
     // so mixed-qty prints (e.g. soap ×2 + soap ×3) get separate headers.
@@ -3973,7 +3977,7 @@
         carrierIconURL: sub.carrierIconURL,
         qty: sub.ids.length,
         orderQty: sub.qty || 1, // per-order item count — divider highlights when > 1
-      }, font, workerName);
+      }, font, workerName, assigneeKind);
       const pageIdx = sub.ids
         .map(id => pageByIdIdx.get(id))
         .filter(i => i != null);
@@ -4044,7 +4048,7 @@
   //            carrierName?, carrierIconURL?}
   // Layout redesigned (Bug #2 fix) — clean top-down stack, no overlaps.
   // ทุกอย่างขาวดำ (grayscale only).
-  async function buildDividerPage(pdfDoc, { W, H }, payload, font, workerName) {
+  async function buildDividerPage(pdfDoc, { W, H }, payload, font, workerName, assigneeKind = null) {
     const { rgb } = window.PDFLib;
     const page = pdfDoc.addPage([W, H]);
     // Phase 2: use per-field config (with preset fallback). Resolve size mult per field.
@@ -4087,10 +4091,13 @@
     const imgMult = mult('image');
 
     // Worker/team line at top (text in grey, below banner).
+    // §Team-aware: use "ทีม:" prefix when this column belongs to a team
+    // so packers immediately see the label belongs to a shared workload.
     if (cfg.showWorker && workerName) {
       const wSize = 9 * mult('worker');
       topCursor -= wSize + 2;
-      page.drawText(`ผู้แพ็ค: ${workerName}`, {
+      const prefix = assigneeKind === 'team' ? 'ทีม' : 'ผู้แพ็ค';
+      page.drawText(`${prefix}: ${workerName}`, {
         x: PAD_X,
         y: topCursor,
         size: wSize,
@@ -4601,7 +4608,8 @@
   // §4.7: Build a combined multi-SKU PDF: [divider_1][labels_1][divider_2][labels_2]…
   // groups[] shape: [{productId, skuId, alias, officialName, variantName, productImageURL, ids: string[]}]
   //   sorted by alias ascending by caller.
-  async function buildMultiSkuCombinedPdf(groups, workerName, workerIcon, withPickingList, onProgress, withDivider = true) {
+  // assigneeKind ('worker'|'team'|null) lets the divider render "ทีม:" vs "ผู้แพ็ค:".
+  async function buildMultiSkuCombinedPdf(groups, workerName, workerIcon, withPickingList, onProgress, withDivider = true, assigneeKind = null) {
     if (!window.PDFLib || !window.fontkit) throw new Error('PDFLib/fontkit ไม่พร้อมใช้งาน');
     const { PDFDocument } = window.PDFLib;
 
@@ -4700,7 +4708,7 @@
             carrierIconURL: part.carrierIconURL,
             qty: part.ids.length,
             orderQty: part.orderQty || 1,
-          }, font, workerName);
+          }, font, workerName, assigneeKind);
         }
 
         if (labelsBytes) {
@@ -4884,6 +4892,7 @@
     const workerIcon = historyMeta?.workerIcon || null;
     const withPickingList = historyMeta?.withPickingList || false;
     const withDivider = historyMeta?.withDivider || false;
+    const assigneeKind = historyMeta?.assigneeKind || null;
     const assigneeName = historyMeta?.assigneeName || workerName || null;
 
     // When divider is on, reorder each chunk's ids by (sku, carrier) so the
@@ -4928,15 +4937,21 @@
           } catch { pageCount = null; }
           result.updateChunkProgress(ci, 100, 'พร้อมแล้ว');
         } else {
+          // Per-chunk worker identity (by-person/by-person-sku set these per chunk).
+          const chunkWorkerName = chunks[ci].workerName || workerName;
+          const chunkWorkerIcon = chunks[ci].workerIcon || workerIcon;
           ({ bytes, pageCount } = await buildChunkPdf(chunks[ci].ids, (pct, label) => {
             result.updateChunkProgress(ci, pct, label);
-          }, workerName, workerIcon));
+          }, chunkWorkerName, chunkWorkerIcon));
 
           // §Divider: prepend per-subgroup dividers to each split chunk.
           // Runs BEFORE picking list so picking list stays at the very top.
           if (withDivider && window.PDFLib) {
             try {
-              const { bytes: dBytes, pageCount: dCount } = await prependDividersToChunk(bytes, chunks[ci].ids, workerName);
+              // Per-chunk assigneeKind overrides top-level (by-person/by-person-sku sets it per chunk).
+              const chunkKind = chunks[ci].assigneeKind || assigneeKind;
+              const chunkWorkerName = chunks[ci].workerName || workerName;
+              const { bytes: dBytes, pageCount: dCount } = await prependDividersToChunk(bytes, chunks[ci].ids, chunkWorkerName, chunkKind);
               bytes = dBytes;
               if (dCount != null) pageCount = dCount;
             } catch (_dErr) {
@@ -7142,13 +7157,26 @@
     const date = _todayDateStr();
     const existing = loadPlanSnapshots();
     const already = existing.find(s => s.sessionId === session.sessionId && s.date === date);
+    // §Team-aware snapshot: include teamId + memberWorkerIds so daily CSV and
+    // history lookback can resolve which packers were on the team that day,
+    // even if team composition changed afterwards.
+    const serializeCol = (col) => ({
+      assigneeKind: col.kind,
+      assigneeName: col.teamName || col.workerName || null,
+      workerId: col.workerId || null,
+      teamId: col.kind === 'team' ? (col.teamId || null) : null,
+      memberWorkerIds: col.kind === 'team' && Array.isArray(col.memberWorkerIds)
+        ? [...col.memberWorkerIds]
+        : null,
+      ids: [...(col.fulfillUnitIds || [])],
+    });
     if (already) {
       // Update in place — session may have changed columns since last save today.
       const updated = existing.map(s => {
         if (s.sessionId !== session.sessionId || s.date !== date) return s;
         const cols = {};
         for (const [cid, col] of Object.entries(session.columns || {})) {
-          cols[cid] = { assigneeKind: col.kind, assigneeName: col.teamName || col.workerName || null, ids: [...(col.fulfillUnitIds || [])] };
+          cols[cid] = serializeCol(col);
         }
         return { ...s, columns: cols, savedAt: Date.now() };
       });
@@ -7156,7 +7184,7 @@
     } else {
       const cols = {};
       for (const [cid, col] of Object.entries(session.columns || {})) {
-        cols[cid] = { assigneeKind: col.kind, assigneeName: col.teamName || col.workerName || null, ids: [...(col.fulfillUnitIds || [])] };
+        cols[cid] = serializeCol(col);
       }
       const snap = { date, sessionId: session.sessionId, columns: cols, savedAt: Date.now() };
       savePlanSnapshots([...existing, snap]);
@@ -7182,9 +7210,24 @@
           const { workerColor: _drop, ...rest } = migrated;
           migrated = { ...rest, workerIcon: worker?.icon || WORKER_COLOR_TO_ICON[migrated.workerColor] || '●' };
         }
-        // v1 → v2: add kind + columnId
+        // v1 → v2: add kind + columnId.
+        // §Team-guard: if `wid` matches a known team id, restore as team column
+        // (preserving teamId + memberWorkerIds); otherwise default to worker.
+        // Before this guard, all v1 sessions became worker columns on reload.
         if (!migrated.kind) {
-          migrated = { ...migrated, kind: 'worker', columnId: wid, workerId: wid };
+          const team = Array.isArray(state.teams) ? state.teams.find(t => t.id === wid) : null;
+          if (team) {
+            migrated = {
+              ...migrated,
+              kind: 'team',
+              columnId: wid,
+              teamId: team.id,
+              teamName: team.name,
+              memberWorkerIds: Array.isArray(team.memberWorkerIds) ? [...team.memberWorkerIds] : [],
+            };
+          } else {
+            migrated = { ...migrated, kind: 'worker', columnId: wid, workerId: wid };
+          }
         }
         columns[migrated.columnId || wid] = migrated;
       }
@@ -7718,24 +7761,26 @@
           workerIconForPdf,
           chunk.withPickingList,
           () => {},
-          chunk.withDivider
+          chunk.withDivider,
+          assigneeKind
         );
-        const blob = new Blob([bytes], { type: 'application/pdf' });
-        const url = URL.createObjectURL(blob);
-        return { ...chunk, prebuiltUrl: url };
+        return { ...chunk, prebuiltBytes: bytes };
       } catch (e) {
-        return { ...chunk, prebuiltUrl: null, buildError: e };
+        return { ...chunk, prebuiltBytes: null, buildError: e };
       }
     }));
 
     // Fall back to flat runChunkedExport if any combined build failed.
-    const allBuilt = exportChunks.every(c => c.prebuiltUrl);
+    const allBuilt = exportChunks.every(c => c.prebuiltBytes);
     if (!allBuilt) {
       return printPlanColumnChunked(printIds_, plan, col, assigneeName, assigneeKind, newSession, newCol, workerId, renderFn);
     }
 
-    // Use runChunkedExport with prebuilt chunks (each chunk is already a PDF blob URL).
-    const runChunks = exportChunks.map(c => ({ ids: c.ids, label: c.label, filename: c.filename }));
+    // Use runChunkedExport with prebuilt PDF bytes (combined-per-column, per-chunk).
+    // runChunkedExport reads `prebuiltBytes` at L4919 and skips buildChunkPdf entirely.
+    const runChunks = exportChunks.map(c => ({
+      ids: c.ids, label: c.label, filename: c.filename, prebuiltBytes: c.prebuiltBytes,
+    }));
     return runChunkedExport(runChunks, displayTitle, {
       baseFilename,
       totalLabels: printIds_.length,
@@ -7805,18 +7850,26 @@
       const mode = plan.mode || 'by-person';
 
       if (mode === 'by-person' || mode === 'single') {
-        // Each worker gets their own flat PDF (optionally chunked if chunkAt set)
+        // Each worker gets their own flat PDF (optionally chunked if chunkAt set).
+        // §Team-aware: attach per-chunk {workerName, workerIcon, assigneeKind}
+        // so runChunkedExport can render the correct divider ("ทีม:" vs "ผู้แพ็ค:")
+        // and apply per-column overlay watermark even when chunks from multiple
+        // columns are merged into one parallel Promise.all batch.
         const runChunks = [];
         for (const [, col] of nonDone) {
           const colIds = col.fulfillUnitIds.filter(id => !col.printedIds.includes(id));
           const workerName = col.teamName || col.workerName || null;
+          const workerIcon = col.workerIcon || null;
+          const kind = col.kind || 'worker';
           const hint = workerName || 'plan';
+          const chunkMeta = { workerName, workerIcon, assigneeKind: kind };
           if (plan.chunkAt && colIds.length > plan.chunkAt) {
             const sz = plan.chunkAt;
             let ci = 0;
             for (let i = 0; i < colIds.length; i += sz) {
               ci++;
               runChunks.push({
+                ...chunkMeta,
                 ids: colIds.slice(i, i + sz),
                 label: `${hint} ชุด ${ci}`,
                 filename: makeBaseFilename(`[${hint}]-ชุด${ci}`) + '.pdf',
@@ -7824,6 +7877,7 @@
             }
           } else {
             runChunks.push({
+              ...chunkMeta,
               ids: colIds,
               label: hint,
               filename: makeBaseFilename(`[${hint}]`) + '.pdf',
@@ -7836,12 +7890,16 @@
         });
 
       } else if (mode === 'by-person-sku') {
-        // Each worker × SKU = 1 chunk
+        // Each worker × SKU = 1 chunk.
+        // §Team-aware: same per-chunk identity attachment as by-person.
         const runChunks = [];
         for (const [, col] of nonDone) {
           const colIds = col.fulfillUnitIds.filter(id => !col.printedIds.includes(id));
           const workerName = col.teamName || col.workerName || null;
+          const workerIcon = col.workerIcon || null;
+          const kind = col.kind || 'worker';
           const hint = workerName || 'plan';
+          const chunkMeta = { workerName, workerIcon, assigneeKind: kind };
           const skuMap = new Map();
           for (const id of colIds) {
             const rec = state.records.get(id);
@@ -7862,6 +7920,7 @@
           for (const grp of [...skuMap.values()].sort((a, b) => a.alias.localeCompare(b.alias))) {
             const skuLabel = grp.variantName ? `${grp.alias} - ${grp.variantName}` : grp.alias;
             runChunks.push({
+              ...chunkMeta,
               ids: grp.ids,
               label: workerName ? `${workerName} · ${skuLabel}` : skuLabel,
               filename: makeBaseFilename(`[${hint}] [${skuLabel || 'SKU'}]`) + '.pdf',
@@ -7898,6 +7957,8 @@
               const [, col] = nonDone[wi];
               const colIds = col.fulfillUnitIds.filter(id => !col.printedIds.includes(id));
               const workerName = col.teamName || col.workerName || null;
+              const workerIcon = col.workerIcon || null;
+              const kind = col.kind || 'worker';
               const hint = workerName || 'plan';
               const groupMap = new Map();
               for (const id of colIds) {
@@ -7924,17 +7985,25 @@
               reportAggregate();
               try {
                 const { bytes } = await buildMultiSkuCombinedPdf(
-                  groups, workerName, col.workerIcon || null, plan.withPickingList,
+                  groups, workerName, workerIcon, plan.withPickingList,
                   (pct) => { workerProgress[wi] = pct / 100; reportAggregate(); },
-                  plan.withDivider
+                  plan.withDivider,
+                  kind
                 );
                 workerProgress[wi] = 1;
                 reportAggregate();
-                exportChunks[wi] = { ids: colIds, label: hint, filename: makeBaseFilename(`[${hint}]`) + '.pdf', prebuiltBytes: bytes };
+                exportChunks[wi] = {
+                  ids: colIds, label: hint, filename: makeBaseFilename(`[${hint}]`) + '.pdf',
+                  prebuiltBytes: bytes,
+                  workerName, workerIcon, assigneeKind: kind,
+                };
               } catch (_) {
                 workerProgress[wi] = 1;
                 reportAggregate();
-                exportChunks[wi] = { ids: colIds, label: hint, filename: makeBaseFilename(`[${hint}]`) + '.pdf' };
+                exportChunks[wi] = {
+                  ids: colIds, label: hint, filename: makeBaseFilename(`[${hint}]`) + '.pdf',
+                  workerName, workerIcon, assigneeKind: kind,
+                };
               }
             }
           };
@@ -7945,7 +8014,14 @@
           document.querySelectorAll('.qf-progress-overlay').forEach(e => e.remove());
         }
         ok = await runChunkedExport(
-          exportChunks.map(c => ({ ids: c.ids, label: c.label, filename: c.filename, prebuiltBytes: c.prebuiltBytes })),
+          exportChunks.map(c => ({
+            ids: c.ids, label: c.label, filename: c.filename,
+            prebuiltBytes: c.prebuiltBytes,
+            // Per-chunk identity preserved so divider+overlay on the non-prebuilt
+            // fallback path (if any chunk failed to prebuild) still uses the
+            // correct column's worker/team context.
+            workerName: c.workerName, workerIcon: c.workerIcon, assigneeKind: c.assigneeKind,
+          })),
           `พิมพ์รวม ${nonDone.length} คน`,
           { baseFilename, totalLabels: allPrintIds.length, withPickingList: plan.withPickingList || false, withDivider: plan.withDivider || false }
         );
@@ -8826,15 +8902,17 @@
       }
       const multiSku = hasComboRecord || skuBuckets.size > 1;
 
-      let plan;
-      if (!multiSku && allPrintIds.length <= CHUNK_PROMPT_THRESHOLD) {
-        const ok = await confirmInline(`พิมพ์ ${nonDone.length} คน (${allPrintIds.length} ใบ)?`, 'พิมพ์');
-        if (!ok) return;
-        plan = { mode: 'by-person', chunkAt: null, withPickingList: loadPickingListPref(), withDivider: false };
-      } else {
-        plan = await showPrintAllPlanModal({ total: allPrintIds.length, nonDone, hasMultiSku: multiSku, defaultPickingList: loadPickingListPref() });
-        if (!plan) return;
-      }
+      // §UX-fix: always show the full print-all modal so the user can see
+      // divider/picking-list toggles and mode choice. Previously, small
+      // single-SKU jobs bypassed the modal entirely — users with small
+      // batches had no way to opt into dividers or picking lists.
+      const plan = await showPrintAllPlanModal({
+        total: allPrintIds.length,
+        nonDone,
+        hasMultiSku: multiSku,
+        defaultPickingList: loadPickingListPref(),
+      });
+      if (!plan) return;
 
       await printAllPlanColumns(s, nonDone, plan, render);
     });
@@ -8854,7 +8932,14 @@
             if (!col) return;
             const ids = action === 'reprint' ? col.fulfillUnitIds : col.fulfillUnitIds.filter(id => !col.printedIds.includes(id));
             if (action === 'print') {
-              const ok = await confirmInline(`พิมพ์ของ ${colDisplayName} ${ids.length} ใบ?`, 'พิมพ์');
+              // §Team-aware confirm: for team columns, show member count so the
+              // manager knows how many packers share the workload before printing.
+              const memberCount = col.kind === 'team' && Array.isArray(col.memberWorkerIds)
+                ? col.memberWorkerIds.length : 0;
+              const subject = col.kind === 'team' && memberCount > 0
+                ? `ทีม ${colDisplayName} (${memberCount} คน)`
+                : colDisplayName;
+              const ok = await confirmInline(`พิมพ์ของ ${subject} ${ids.length} ใบ?`, 'พิมพ์');
               if (!ok) return;
             }
             printPlanColumn(s, cid, ids, ns => { rerender(ns); s = ns; }, { reprint: action === 'reprint' });
@@ -8871,6 +8956,14 @@
             rerender(next);
           } else if (action === 'reset') {
             if (!col) return;
+            // §UX-fix: add confirmation — reset wipes printedIds/failedIds
+            // for the session and was previously irreversible with no prompt.
+            const okReset = await confirmInline(
+              `รีเซ็ต ${colDisplayName}? ข้อมูลการพิมพ์ในรอบนี้จะถูกล้าง`,
+              'รีเซ็ต',
+              true
+            );
+            if (!okReset) return;
             const updatedCol = { ...col, status: 'pending', printedIds: [], failedIds: [], errorMsg: null, retryCount: 0 };
             const next = { ...s, columns: { ...s.columns, [cid]: updatedCol } };
             debouncedSavePlan(next);
@@ -10152,52 +10245,101 @@
             <div class="qf-lo-pv-caption">ตัวอย่าง J&amp;T A6</div>
           </div>
           <div class="qf-lo-fields">
-            <label class="qf-lo-switch-row">
-              <div class="qf-lo-switch-label">
-                <span class="qf-lo-switch-title">เปิดใช้งาน overlay</span>
-                <span class="qf-lo-switch-desc">แปะข้อความ/รูปบนฉลาก J&amp;T A6</span>
-              </div>
-              <div class="qf-lo-switch">
-                <input type="checkbox" id="qf-lo-enabled" ${cfg.enabled ? 'checked' : ''} />
-                <span class="qf-lo-switch-track"></span>
-              </div>
-            </label>
-            <div class="qf-lo-divider"></div>
+
+            <!-- Card: toggle -->
+            <div class="qf-lo-card">
+              <label class="qf-lo-switch-row">
+                <div class="qf-lo-switch-label">
+                  <span class="qf-lo-switch-title">เปิดใช้งาน overlay</span>
+                  <span class="qf-lo-switch-desc">แปะข้อความ/รูปบนฉลาก J&amp;T A6</span>
+                </div>
+                <div class="qf-lo-switch">
+                  <input type="checkbox" id="qf-lo-enabled" ${cfg.enabled ? 'checked' : ''} />
+                  <span class="qf-lo-switch-track"></span>
+                </div>
+              </label>
+            </div>
+
             <div class="qf-lo-fields-wrap ${cfg.enabled ? '' : 'qf-lo-disabled'}" id="qf-lo-fields-wrap">
 
-              <div class="qf-lo-section">
-                <div class="qf-lo-section-title">ข้อความแถบข้าง <span class="qf-lo-counter" id="qf-lo-mkt-cnt">${(cfg.marketingText||'').length}/50</span></div>
-                <div class="qf-lo-hint">วิ่งในแถบสีขาวซ้าย–ขวาของฉลาก</div>
-                <input type="text" id="qf-lo-mkt" class="qf-lo-input" maxlength="50" value="${escapeHtml(cfg.marketingText || '')}" placeholder="กรุณาถ่ายรูปก่อนเปิดกล่องพัสดุ" style="margin-top:4px;" />
+              <!-- Card: opacity -->
+              <div class="qf-lo-card">
+                <div class="qf-lo-row-between">
+                  <span class="qf-lo-card-title">ความทึบ</span>
+                  <span class="qf-lo-opacity-val" id="qf-lo-op-val">${opPct}%</span>
+                </div>
+                <input type="range" id="qf-lo-opacity" class="qf-lo-range" min="75" max="90" step="1" value="${opPct}" />
+                <div class="qf-lo-hint">85% = ค่าเริ่มต้น · 90% = สูงสุด เพื่อไม่กลืนสีดำฉลาก</div>
               </div>
 
-              <div class="qf-lo-section">
-                <div class="qf-lo-section-title">รูปภาพร้าน</div>
-                <div class="qf-lo-hint" style="margin-bottom:6px;">ออเดอร์ SKU เดียวเท่านั้น · บีบอัดอัตโนมัติ</div>
-                <div class="qf-lo-img-area">
-                  <div class="qf-lo-thumb-box" id="qf-lo-thumb-box">
-                    ${cfg.shopImageDataUrl ? `<img src="${cfg.shopImageDataUrl}" class="qf-lo-thumb" />` : `<div class="qf-lo-thumb-empty"><span>ไม่มีรูป</span></div>`}
+              <!-- Card: alias text + font size -->
+              <div class="qf-lo-card">
+                <div class="qf-lo-card-hd">
+                  <span class="qf-lo-card-title">ชื่อ alias (ล่างฉลาก)</span>
+                </div>
+                <div class="qf-lo-hint">ข้อความ alias ที่แปะด้านล่างฉลาก — ตั้งขนาดได้</div>
+                <div class="qf-lo-text-size-row">
+                  <span class="qf-lo-field-label">ขนาด</span>
+                  <input type="number" id="qf-lo-fontsize" class="qf-lo-size-input" min="0" max="28" step="1" value="${cfg.aliasFontSize || 0}" />
+                  <span class="qf-lo-size-unit">pt (0 = อัตโนมัติ ~19pt)</span>
+                </div>
+              </div>
+
+              <!-- Card: side strip text + font size -->
+              <div class="qf-lo-card">
+                <div class="qf-lo-card-hd">
+                  <span class="qf-lo-card-title">↕ ข้อความแถบข้าง</span>
+                  <span class="qf-lo-counter" id="qf-lo-mkt-cnt">${(cfg.marketingText||'').length}/50</span>
+                </div>
+                <div class="qf-lo-hint">วิ่งในแถบสีขาวซ้าย–ขวาของฉลาก</div>
+                <input type="text" id="qf-lo-mkt" class="qf-lo-input" maxlength="50" value="${escapeHtml(cfg.marketingText || '')}" placeholder="กรุณาถ่ายรูปก่อนเปิดกล่องพัสดุ" />
+                <div class="qf-lo-text-size-row" style="margin-top:6px;">
+                  <span class="qf-lo-field-label">ขนาด</span>
+                  <input type="number" id="qf-lo-mkt-size" class="qf-lo-size-input" min="0" max="15" step="1" value="${cfg.marketingFontSize || 0}" />
+                  <span class="qf-lo-size-unit">pt (0 = อัตโนมัติ 7–12pt)</span>
+                </div>
+              </div>
+
+              <!-- Card: shop logo + header texts (side-by-side) -->
+              <div class="qf-lo-card">
+                <div class="qf-lo-card-hd" style="margin-bottom:2px;">
+                  <span class="qf-lo-card-title">🖼 โลโก้ร้าน + ข้อความ</span>
+                </div>
+                <div class="qf-lo-hint" style="margin-bottom:10px;">ออเดอร์ SKU เดียวเท่านั้น · บีบอัดอัตโนมัติ</div>
+                <div class="qf-lo-shop-row">
+                  <div class="qf-lo-img-col">
+                    <div class="qf-lo-thumb-box" id="qf-lo-thumb-box">
+                      ${cfg.shopImageDataUrl ? `<img src="${cfg.shopImageDataUrl}" class="qf-lo-thumb" />` : `<div class="qf-lo-thumb-empty"><span>ไม่มีรูป</span></div>`}
+                    </div>
+                    <div class="qf-lo-img-btns">
+                      <button class="qf-btn-sm" id="qf-lo-upload-btn">อัปโหลด</button>
+                      <button class="qf-btn-sm qf-btn-sm-danger" id="qf-lo-img-clear" ${cfg.shopImageDataUrl ? '' : 'disabled'}>ลบ</button>
+                    </div>
+                    <input type="file" id="qf-lo-file" accept="image/*" style="display:none" />
                   </div>
-                  <div class="qf-lo-img-actions">
-                    <button class="qf-btn-sm" id="qf-lo-upload-btn">อัปโหลด</button>
-                    <button class="qf-btn-sm qf-btn-sm-danger" id="qf-lo-img-clear" ${cfg.shopImageDataUrl ? '' : 'disabled'}>ลบ</button>
+                  <div class="qf-lo-text-col">
+                    <div class="qf-lo-field-row">
+                      <span class="qf-lo-field-label">บรรทัดที่ 1</span>
+                      <span class="qf-lo-counter" id="qf-lo-h1-cnt">${(cfg.headerMain||'').length}/50</span>
+                    </div>
+                    <input type="text" id="qf-lo-h1" class="qf-lo-input" maxlength="50" value="${escapeHtml(cfg.headerMain || '')}" placeholder="เพิ่มเพื่อนในไลน์ รับส่วนลดพิเศษ" />
+                    <div class="qf-lo-text-size-row" style="margin-top:4px;">
+                      <span class="qf-lo-field-label">ขนาด</span>
+                      <input type="number" id="qf-lo-h1-size" class="qf-lo-size-input" min="0" max="14" step="1" value="${cfg.header1FontSize || 0}" />
+                      <span class="qf-lo-size-unit">pt (0 = อัตโนมัติ 9pt)</span>
+                    </div>
+                    <div class="qf-lo-field-row" style="margin-top:8px;">
+                      <span class="qf-lo-field-label">บรรทัดที่ 2</span>
+                      <span class="qf-lo-counter" id="qf-lo-h2-cnt">${(cfg.headerSub||'').length}/50</span>
+                    </div>
+                    <input type="text" id="qf-lo-h2" class="qf-lo-input" maxlength="50" value="${escapeHtml(cfg.headerSub || '')}" placeholder="วันนี้เท่านั้น" />
+                    <div class="qf-lo-text-size-row" style="margin-top:4px;">
+                      <span class="qf-lo-field-label">ขนาด</span>
+                      <input type="number" id="qf-lo-h2-size" class="qf-lo-size-input" min="0" max="12" step="1" value="${cfg.header2FontSize || 0}" />
+                      <span class="qf-lo-size-unit">pt (0 = อัตโนมัติ 7pt)</span>
+                    </div>
                   </div>
                 </div>
-                <input type="file" id="qf-lo-file" accept="image/*" style="display:none" />
-              </div>
-
-              <div class="qf-lo-section">
-                <div class="qf-lo-section-title">ข้อความข้างรูป</div>
-                <div class="qf-lo-row-between"><span class="qf-lo-hint">บรรทัดที่ 1</span><span class="qf-lo-counter" id="qf-lo-h1-cnt">${(cfg.headerMain||'').length}/50</span></div>
-                <input type="text" id="qf-lo-h1" class="qf-lo-input" maxlength="50" value="${escapeHtml(cfg.headerMain || '')}" placeholder="เพิ่มเพื่อนในไลน์ รับส่วนลดพิเศษ" />
-                <div class="qf-lo-row-between" style="margin-top:2px;"><span class="qf-lo-hint">บรรทัดที่ 2</span><span class="qf-lo-counter" id="qf-lo-h2-cnt">${(cfg.headerSub||'').length}/50</span></div>
-                <input type="text" id="qf-lo-h2" class="qf-lo-input" maxlength="50" value="${escapeHtml(cfg.headerSub || '')}" placeholder="วันนี้เท่านั้น" style="margin-top:2px;" />
-              </div>
-
-              <div class="qf-lo-section">
-                <div class="qf-lo-section-title">ความทึบ <span class="qf-lo-opacity-val" id="qf-lo-op-val">${opPct}%</span></div>
-                <input type="range" id="qf-lo-opacity" class="qf-lo-range" min="75" max="90" step="1" value="${opPct}" />
-                <div class="qf-lo-hint">ค่าเริ่มต้น 85% · สูงสุด 90% เพื่อไม่กลืนสีดำฉลาก</div>
               </div>
 
             </div>
@@ -10223,8 +10365,8 @@
     const cw = w => w * SCALE;
     const ch = h => h * SCALE;
     const PV_MASKS = [
-      {x:0,   y:38,   w:17,  h:244},
-      {x:283, y:38,   w:15,  h:244},
+      {x:0,   y:0,    w:17,  h:340}, // OCR column L — y=0..340 (matches J_AND_T_MASK_RECTS)
+      {x:283, y:0,    w:15,  h:340}, // OCR column R — same
       {x:0,   y:41.5, w:95,  h:20 },
       {x:0,   y:75,   w:298, h:3  },
       {x:0,   y:62,   w:298, h:2  },
@@ -10261,7 +10403,8 @@
       const mktText = ($('#qf-lo-mkt').value || '').slice(0, 50);
       if (mktText) {
         ctx.save();
-        const mktFontPx = cx(Math.max(3.0, Math.min(6.6, 120 / Math.max(mktText.length, 13))));
+        const _mfsSel = Math.min(15, Math.max(0, parseInt($('#qf-lo-mkt-size').value, 10) || 0));
+        const mktFontPx = _mfsSel > 0 ? cx(_mfsSel) : cx(Math.max(3.0, Math.min(6.6, 120 / Math.max(mktText.length, 13))));
         ctx.font = `bold ${mktFontPx}px sans-serif`;
         ctx.fillStyle = '#222';
         ctx.globalAlpha = 0.9;
@@ -10291,10 +10434,26 @@
         const hx = (shopPvImg && shopPvImg.complete) ? cx(26) : cx(2);
         ctx.fillStyle = '#000';
         ctx.globalAlpha = 0.85;
-        if (h1) { ctx.font = `bold ${cx(3.84)}px sans-serif`; ctx.fillText(h1, hx, cy(55, 7) + cx(4.2), cx(163)); }
-        if (h2) { ctx.font = `${cx(3.36)}px sans-serif`; ctx.fillText(h2, hx, cy(44, 5) + cx(3.6), cx(163)); }
+        const h1SzPdf = Math.min(14, Math.max(0, parseInt($('#qf-lo-h1-size').value, 10) || 0)) || 9;
+        const h2SzPdf = Math.min(12, Math.max(0, parseInt($('#qf-lo-h2-size').value, 10) || 0)) || 7;
+        if (h1) { ctx.font = `bold ${cx(h1SzPdf)}px sans-serif`; ctx.fillText(h1, hx, cy(55, h1SzPdf) + cx(h1SzPdf), cx(163)); }
+        if (h2) { ctx.font = `${cx(h2SzPdf)}px sans-serif`; ctx.fillText(h2, hx, cy(44, h2SzPdf) + cx(h2SzPdf), cx(163)); }
         ctx.globalAlpha = 1;
       }
+
+      // Alias text preview at bottom (shows font size effect)
+      const _afsV = Math.min(28, Math.max(0, parseInt($('#qf-lo-fontsize').value, 10) || 0));
+      const bigPt = _afsV > 0 ? _afsV : Math.min(420 * 0.05, 22) * 0.9;
+      const smallPt = _afsV > 0 ? Math.max(7, bigPt * 0.65) : Math.min(420 * 0.032, 13) * 0.9;
+      ctx.globalAlpha = 0.75;
+      ctx.fillStyle = '#000';
+      ctx.textAlign = 'center';
+      ctx.font = `bold ${cx(bigPt)}px sans-serif`;
+      ctx.fillText('ชื่อสินค้า alias', PV_W / 2, cy(4 + smallPt + 2, bigPt) + cx(bigPt));
+      ctx.font = `${cx(smallPt)}px sans-serif`;
+      ctx.fillText('ตัวเลือก/variant', PV_W / 2, cy(4, smallPt) + cx(smallPt));
+      ctx.textAlign = 'left';
+      ctx.globalAlpha = 1;
     }
 
     const sampleUrl = state.samplePreviewUrl || '';
@@ -10332,6 +10491,9 @@
     bindInput('#qf-lo-h1', '#qf-lo-h1-cnt');
     bindInput('#qf-lo-h2', '#qf-lo-h2-cnt');
     $('#qf-lo-opacity').addEventListener('input', e => { $('#qf-lo-op-val').textContent = `${e.target.value}%`; });
+    ['#qf-lo-fontsize', '#qf-lo-mkt-size', '#qf-lo-h1-size', '#qf-lo-h2-size'].forEach(sel => {
+      $(sel).addEventListener('input', () => renderPreview());
+    });
 
     // ── Image upload ──────────────────────────────────────────────────────
     const fileInput = $('#qf-lo-file');
@@ -10371,6 +10533,10 @@
         headerMain: ($('#qf-lo-h1').value || '').slice(0, 50),
         headerSub: ($('#qf-lo-h2').value || '').slice(0, 50),
         opacity: Math.min(parseInt($('#qf-lo-opacity').value, 10) / 100, 0.90),
+        aliasFontSize: Math.min(28, Math.max(0, parseInt($('#qf-lo-fontsize').value, 10) || 0)),
+        marketingFontSize: Math.min(15, Math.max(0, parseInt($('#qf-lo-mkt-size').value, 10) || 0)),
+        header1FontSize: Math.min(14, Math.max(0, parseInt($('#qf-lo-h1-size').value, 10) || 0)),
+        header2FontSize: Math.min(12, Math.max(0, parseInt($('#qf-lo-h2-size').value, 10) || 0)),
       });
       showToast('บันทึกการตั้งค่าฉลากแล้ว', 2000);
       close();
