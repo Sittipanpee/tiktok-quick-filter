@@ -3423,20 +3423,30 @@
           : makeBaseFilename(baseHint);
 
         // Slice into plan chunks; each chunk is its own combined PDF.
+        // PARALLEL BUILD: each slice (combined+split=200, e.g. 5 chunks of 200)
+        // produces an independent combined PDF in parallel via Promise.all.
+        // The previous sequential `for` loop made 5 chunks take 5× wall time
+        // — now they overlap end-to-end (generate + overlay + assemble are
+        // all network/CPU-bound and benefit from concurrency). Mirrors the
+        // plan-column combined path which already parallelized chunks.
         const slices = planSlice(allSelectedIds, plan);
         const chunkCount = slices.length;
-        const exportChunks = [];
-        // §UX: show immediate progress so the UI isn't silent during PDF build.
         const prepProgress = showProgress(`กำลังเตรียม PDF รวม (${groups.length} SKU · ${totalIds} ฉลาก)`);
+        // Shared completion counter — updates the single UI bar as parallel
+        // slices land in whatever order they finish.
+        let completedSlices = 0;
+        const bumpProgress = () => {
+          completedSlices += 1;
+          const pct = (completedSlices / chunkCount) * 100;
+          prepProgress.update(pct, `เสร็จ ${completedSlices}/${chunkCount}`);
+        };
+        let exportChunks;
         try {
-          for (let i = 0; i < slices.length; i++) {
-            const slice = slices[i];
+          exportChunks = await Promise.all(slices.map(async (slice, i) => {
             const idx = i + 1;
             const chunkSuffix = chunkCount > 1 ? `-ชุด${idx}-${chunkCount}` : '';
             const filename = `${baseFilename}${chunkSuffix}.pdf`;
             const label = chunkCount === 1 ? 'ไฟล์เดียว' : `ชุด ${idx}/${chunkCount}`;
-            const basePct = (i / chunkCount) * 100;
-            prepProgress.update(basePct, `กำลังสร้างชุด ${idx}/${chunkCount}`);
 
             // Re-group slice for this chunk's combined PDF.
             const sliceGroupMap = new Map();
@@ -3455,14 +3465,14 @@
             const sliceGroups = [...sliceGroupMap.values()].sort((a, b) => a.alias.localeCompare(b.alias));
 
             try {
-              const { bytes } = await buildMultiSkuCombinedPdf(sliceGroups, workerName, workerIcon, plan.withPickingList, (pct) => {
-                prepProgress.update(basePct + (pct / chunkCount), `ชุด ${idx}/${chunkCount} · ${pct.toFixed(0)}%`);
-              }, plan.withDivider);
-              exportChunks.push({ ids: slice, label, filename, prebuiltBytes: bytes });
+              const { bytes } = await buildMultiSkuCombinedPdf(sliceGroups, workerName, workerIcon, plan.withPickingList, () => {}, plan.withDivider);
+              bumpProgress();
+              return { ids: slice, label, filename, prebuiltBytes: bytes };
             } catch (_buildErr) {
-              exportChunks.push({ ids: slice, label, filename });
+              bumpProgress();
+              return { ids: slice, label, filename };
             }
-          }
+          }));
           prepProgress.update(100, 'พร้อมแล้ว');
         } finally {
           // Remove immediately — runChunkedExport opens its own modal next.
@@ -4032,22 +4042,14 @@
     const MID = rgb(0.35, 0.35, 0.35);
     const LIGHT = rgb(0.55, 0.55, 0.55);
 
-    // --- Banners (top + bottom) — ขาวดำ ---
-    const BANNER_H = 20;
-    page.drawRectangle({ x: 0, y: H - BANNER_H, width: W, height: BANNER_H, color: BLACK });
-    page.drawRectangle({ x: 0, y: 0, width: W, height: BANNER_H, color: BLACK });
-    const bannerText = '— แบ่งกลุ่ม SKU —';
-    const bannerSize = 11;
-    const bannerW = font.widthOfTextAtSize(bannerText, bannerSize);
-    page.drawText(bannerText, {
-      x: (W - bannerW) / 2,
-      y: H - BANNER_H + (BANNER_H - bannerSize) / 2 + 1,
-      size: bannerSize,
-      font,
-      color: rgb(1, 1, 1),
-    });
+    // --- Edge margin (replaces old black banner) ---
+    // Removed solid black banners (top+bottom @ 20pt each): thermal printers
+    // burn through a lot of heat/ribbon on large black fills, leading to
+    // dropped heads or print stalls on long jobs. Keep a small blank margin
+    // so content doesn't kiss the paper edge.
+    const BANNER_H = 10; // blank safety margin, no fill
 
-    // --- Top area cursor (below top banner) ---
+    // --- Top area cursor (below top margin) ---
     // Layout: top-down stack with vertical cursor.
     const PAD_X = 12;
     const contentMaxW = W - PAD_X * 2;
@@ -4210,21 +4212,27 @@
       });
     }
 
-    // --- Bottom-up layout: footer (y=18) → qty (y=42) → image above qty ---
-    const FOOTER_Y = BANNER_H + 8; // above bottom banner
-    const QTY_Y = FOOTER_Y + 22;
+    // --- Bottom-up layout: footer → qty → image above qty ---
+    const FOOTER_Y = BANNER_H + 10; // above bottom margin
+    // Footer is now ~75% bigger (8pt → 14pt base) so packers can read the
+    // pack-check reminder from arm's length without leaning in. QTY_Y must
+    // grow with footer so image column below doesn't overlap the warning.
+    const footerBaseSize = 14;
+    const QTY_Y = FOOTER_Y + footerBaseSize + 14;
 
-    // Footer
+    // Footer — "กรุณาตรวจสอบรายการสินค้าให้ถูกต้องก่อนแพ็ค"
+    // Darker ink (DARK vs old LIGHT) because thermal print fades the very
+    // lightest greys to nearly invisible.
     if (cfg.showFooter) {
       const footerText = 'กรุณาตรวจสอบรายการสินค้าให้ถูกต้องก่อนแพ็ค';
-      const footerSize = 8 * mult('footer');
+      const footerSize = footerBaseSize * mult('footer');
       const footerW = font.widthOfTextAtSize(footerText, footerSize);
       page.drawText(footerText, {
         x: (W - footerW) / 2,
         y: FOOTER_Y,
         size: footerSize,
         font,
-        color: LIGHT,
+        color: DARK,
       });
     }
 
