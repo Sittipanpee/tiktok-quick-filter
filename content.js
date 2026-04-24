@@ -178,7 +178,7 @@
           imageFirst: true };
       case 'standard':
       default:
-        return { preset: p, showAlias: true, aliasScale: 1.0, showName: true, showVariant: true,
+        return { preset: p, showAlias: true, aliasScale: 1.3, showName: true, showVariant: true,
           showCarrier: true, showImage: true, showQty: true, showWorker: true, showFooter: true,
           imageFirst: false };
     }
@@ -228,8 +228,8 @@
   function presetToConfig(preset) {
     const p = getDividerPresetConfig(preset);
     const fld = (vis, size) => ({ visible: !!vis, size });
-    // aliasScale 1.6 (minimal) → size 'l'; 1.0 → 'm'.
-    const aliasSize = (p.aliasScale && p.aliasScale >= 1.4) ? 'l' : 'm';
+    // aliasScale 1.6 (minimal) / 1.3 (standard) → 'l'; 1.0 → 'm'.
+    const aliasSize = (p.aliasScale && p.aliasScale >= 1.2) ? 'l' : 'm';
     return {
       fields: {
         alias:   fld(p.showAlias,   aliasSize),
@@ -4065,6 +4065,56 @@
 
   // §4.5 / §4.6: Build a single divider page for the combined multi-SKU PDF.
   // payload = {alias, officialName, variantName, productImageURL, qty,
+  // Split alias text into 1 or 2 lines, splitting near the visual midpoint.
+  // Prefers word boundary (space); falls back to character midpoint if none found.
+  function splitAliasToLines(font, text, size, maxW) {
+    if (font.widthOfTextAtSize(text, size) <= maxW) return [text];
+    const totalW = font.widthOfTextAtSize(text, size);
+    const halfW = totalW / 2;
+    let bestIdx = -1, bestDiff = Infinity;
+    for (let i = 1; i < text.length; i++) {
+      if (text[i] === ' ' || text[i] === '\u200b') {
+        const lw = font.widthOfTextAtSize(text.slice(0, i), size);
+        const diff = Math.abs(lw - halfW);
+        if (diff < bestDiff) { bestDiff = diff; bestIdx = i; }
+      }
+    }
+    if (bestIdx === -1) {
+      let acc = 0;
+      for (let i = 0; i < text.length; i++) {
+        acc += font.widthOfTextAtSize(text[i], size);
+        if (acc >= halfW) { bestIdx = i + 1; break; }
+      }
+      bestIdx = bestIdx || Math.floor(text.length / 2);
+    }
+    const l1 = text.slice(0, bestIdx).trim();
+    const l2 = text.slice(bestIdx).trim();
+    return l2 ? [l1, l2] : [l1];
+  }
+
+  // Render alias block (1–2 lines, dynamic size, center-aligned, no truncation).
+  // Returns how many pts it consumed (updates topCursor externally via return).
+  function drawAliasBlock(page, font, text, baseSize, maxW, W, topCursor, color) {
+    let sz = baseSize;
+    let lines = splitAliasToLines(font, text, sz, maxW);
+    for (let pass = 0; pass < 4; pass++) {
+      const maxLW = Math.max(...lines.map(l => font.widthOfTextAtSize(l, sz)));
+      if (maxLW <= maxW) break;
+      sz = sz * (maxW / maxLW) * 0.96;
+      lines = splitAliasToLines(font, text, sz, maxW);
+    }
+    const lineGap = Math.max(2, sz * 0.14);
+    const blockH = lines.length * sz + (lines.length - 1) * lineGap;
+    topCursor -= blockH + 4;
+    let lineY = topCursor + blockH - sz;
+    for (const line of lines) {
+      const lw = font.widthOfTextAtSize(line, sz);
+      page.drawText(line, { x: (W - lw) / 2, y: lineY, size: sz, font, color });
+      lineY -= sz + lineGap;
+    }
+    return topCursor - 4;
+  }
+
   //            carrierName?, carrierIconURL?}
   // Layout redesigned (Bug #2 fix) — clean top-down stack, no overlaps.
   // ทุกอย่างขาวดำ (grayscale only).
@@ -4148,7 +4198,7 @@
 
     // --- photo-first preset renders image FIRST, at top ---
     // For other presets image is placed between carrier and qty.
-    const IMG_MAX = 70 * imgMult; // max side for product image (shrunk from 120 to leave room)
+    const IMG_MAX = 110 * imgMult; // max side for product image
     let topImageBottom = null;
     if (cfg.imageFirst && cfg.showImage && payload.productImageURL) {
       try {
@@ -4167,22 +4217,10 @@
       } catch { /* skip */ }
     }
 
-    // --- Alias block (always the biggest element when shown) ---
+    // --- Alias block: dynamic size, up to 2 lines, center-aligned, no truncation ---
     if (cfg.showAlias && payload.alias) {
       const baseSize = Math.min(H * 0.05, 20) * (cfg.aliasScale || 1);
-      const aliasW0 = font.widthOfTextAtSize(payload.alias, baseSize);
-      const scale = aliasW0 > contentMaxW ? contentMaxW / aliasW0 : 1;
-      const aliasSize = baseSize * scale;
-      const aliasW = font.widthOfTextAtSize(payload.alias, aliasSize);
-      topCursor -= aliasSize + 4;
-      page.drawText(payload.alias, {
-        x: (W - aliasW) / 2,
-        y: topCursor,
-        size: aliasSize,
-        font,
-        color: BLACK,
-      });
-      topCursor -= 4;
+      topCursor = drawAliasBlock(page, font, payload.alias, baseSize, contentMaxW, W, topCursor, BLACK);
     }
 
     // --- Official name (word-wrap, up to 3 lines, 10pt) ---
@@ -4557,16 +4595,23 @@
     const contentW = W - PAD * 2;
 
     // ── Header bar ───────────────────────────────────────────────────────────
-    const TITLE_SIZE = 14;
+    const TITLE_SIZE = 10;
     let y = H - 14;
-    page.drawText('★ หมายเหตุ', { x: PAD, y, size: TITLE_SIZE, font, color: BLACK });
-    y -= TITLE_SIZE + 5;
+    page.drawText('★ หมายเหตุ', { x: PAD, y, size: TITLE_SIZE, font, color: MID });
+    y -= TITLE_SIZE + 4;
 
-    // Product line: alias · variant · carrier
-    const productParts = [payload.alias || payload.officialName, payload.variantName, payload.carrierName].filter(Boolean);
+    // Alias (dynamic, up to 2 lines, slightly smaller than standard divider)
+    if (payload.alias) {
+      const aliasBase = Math.min(H * 0.04, 16);
+      y = drawAliasBlock(page, font, payload.alias, aliasBase, contentW, W, y, BLACK);
+      y -= 2;
+    }
+
+    // Product line: officialName · variant · carrier (small, grey)
+    const productParts = [payload.officialName, payload.variantName, payload.carrierName].filter(Boolean);
     if (productParts.length) {
-      page.drawText(productParts.join(' · '), { x: PAD, y, size: 8, font, color: DARK, maxWidth: contentW });
-      y -= 11;
+      page.drawText(productParts.join(' · '), { x: PAD, y, size: 7.5, font, color: DARK, maxWidth: contentW });
+      y -= 10;
     }
 
     // Count

@@ -54,13 +54,14 @@ h2 { font-size: 12px; color: #374151; margin-bottom: 8px; font-weight: 700; }
 }
 
 .dp-alias {
-  font-size: 36px;
+  font-size: 46px;
   font-weight: 900;
   color: #000;
   text-align: center;
-  line-height: 1.1;
+  line-height: 1.15;
   margin: 6px 0 4px;
   word-break: break-word;
+  overflow-wrap: break-word;
 }
 
 .dp-name {
@@ -109,7 +110,7 @@ h2 { font-size: 12px; color: #374151; margin-bottom: 8px; font-weight: 700; }
   min-height: 60px;
 }
 .dp-image-placeholder {
-  width: 88px; height: 88px;
+  width: 130px; height: 130px;
   background: #f3f4f6;
   border: 1px solid #e5e7eb;
   border-radius: 4px;
@@ -198,7 +199,7 @@ h2 { font-size: 12px; color: #374151; margin-bottom: 8px; font-weight: 700; }
       <div class="dp-worker" id="el-worker">ผู้แพ็ค: เกม</div>
       <div class="dp-timestamp">พิมพ์เมื่อ 24/04/2026  09:30 น.</div>
 
-      <div class="dp-alias" id="el-alias">ครีมรักแร้</div>
+      <div class="dp-alias" id="el-alias" style="font-size:46px">ครีมรักแร้สูตรอ่อนโยน</div>
       <div class="dp-name" id="el-name">ครีมระงับกลิ่นกายสูตรอ่อนโยน 30g</div>
       <div class="dp-variant" id="el-variant">Sensitive</div>
 
@@ -261,8 +262,8 @@ h2 { font-size: 12px; color: #374151; margin-bottom: 8px; font-weight: 700; }
       </div>
       <div class="size-row">
         <button class="sz-btn" onclick="setSize('alias','s',this)">S</button>
-        <button class="sz-btn active" onclick="setSize('alias','m',this)">M</button>
-        <button class="sz-btn" onclick="setSize('alias','l',this)">L</button>
+        <button class="sz-btn" onclick="setSize('alias','m',this)">M</button>
+        <button class="sz-btn active" onclick="setSize('alias','l',this)">L</button>
         <button class="sz-btn" onclick="setSize('alias','xl',this)">XL</button>
       </div>
     </div>
@@ -306,7 +307,7 @@ h2 { font-size: 12px; color: #374151; margin-bottom: 8px; font-weight: 700; }
 <script>
 const ALIAS_SIZES = { s: '22px', m: '36px', l: '46px', xl: '58px' };
 const PRESETS = {
-  'standard':   { alias: true, carrier: true, qty: true, worker: true, footer: true, aliasSize: 'm', imageFirst: false },
+  'standard':   { alias: true, carrier: true, qty: true, worker: true, footer: true, aliasSize: 'l', imageFirst: false },
   'slim-header':{ alias: true, carrier: true, qty: true, worker: true, footer: true, aliasSize: 's', imageFirst: false },
   'photo-first':{ alias: true, carrier: false, qty: true, worker: false, footer: true, aliasSize: 'm', imageFirst: true },
   'compact':    { alias: true, carrier: true, qty: true, worker: false, footer: false, aliasSize: 's', imageFirst: false },
