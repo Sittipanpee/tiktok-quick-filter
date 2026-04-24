@@ -1453,6 +1453,8 @@
         createTime: rec.createTime || null,
         shipByTime: rec.shipByTime || null,
         autoCancelTime: rec.autoCancelTime || null,
+        hasNote: !!rec.hasNote,
+        buyerNote: rec.buyerNote || '',
         skuList: skus.map(s => ({
           productId: s.productId,
           skuId: s.skuId,
@@ -1920,12 +1922,18 @@
     // isPreOrder: any line marked → record is pre-order
     const olm = rec.order_label_module || [];
     const isPreOrder = olm.some(o => o.isPreOrder === 1 || o.is_pre_order === 1);
+    // buyerNote: check multiple common field paths across API versions
+    const tom = rec.trade_order_module?.[0] || {};
+    const buyerNote = (tom.buyer_message || tom.buyer_note || tom.remark
+      || rec.buyer_message || rec.order_note || '').trim();
     return {
       fulfillUnitId: rec.fulfill_unit_id || lm.fulfill_unit_id,
       batchId: lm.batch_id,
       orderIds: lm.order_ids || rec.order_ids,
       labelStatus: lm.label_status,
       isPreOrder,
+      hasNote: !!buyerNote,
+      buyerNote,
       // Time fields — all converted to ms timestamps (some sources are in seconds)
       // createTime: เวลาลูกค้าสร้างออเดอร์
       createTime: fm.create_time ? Number(fm.create_time)
@@ -2971,7 +2979,7 @@
     return { mode: 'multi', text: parts.join(' + ') };
   }
 
-  async function overlayAliasOnPdf(pdfBytes, fulfillUnitIds, onProgress, workerName, workerIcon) {
+  async function overlayAliasOnPdf(pdfBytes, fulfillUnitIds, onProgress, workerName, workerIcon, noteMap = null) {
     if (!window.PDFLib) return pdfBytes;
     const { PDFDocument, rgb, degrees } = window.PDFLib;
     const fontBytes = await ensureFontBytes();
@@ -3122,6 +3130,18 @@
           page.drawText(workerName, { x: wX + dx, y: wY + dy, size: wSize, font, color: rgb(1,1,1), opacity: strokeOp });
         }
         page.drawText(workerName, { x: wX, y: wY, size: wSize, font, color: rgb(0,0,0), opacity: OP });
+      }
+
+      // ── Note marker ★N (top-left corner) ────────────────────────────────
+      if (rec?.hasNote) {
+        const noteIdx = noteMap?.get(fulfillId);
+        const noteText = noteIdx != null ? `★${noteIdx}` : '★';
+        const noteSize = Math.min(ph * 0.032, 12);
+        // White halo for legibility over barcode area
+        for (const [dx, dy] of [[-1,0],[1,0],[0,-1],[0,1]]) {
+          page.drawText(noteText, { x: 4+dx, y: ph - noteSize - 3+dy, size: noteSize, font, color: rgb(1,1,1), opacity: 0.8 });
+        }
+        page.drawText(noteText, { x: 4, y: ph - noteSize - 3, size: noteSize, font, color: rgb(0,0,0), opacity: 0.78 });
       }
 
       if (onProgress && (i % 20 === 0 || i === total - 1)) { onProgress(i + 1, total); await sleep(0); }
@@ -4317,13 +4337,12 @@
   }
 
   // §7: Build picking list pages for prepending to a label PDF.
-  // Returns array of PDFPage objects already added to a temporary PDFDocument.
-  // Caller uses finalDoc.copyPages(tmpDoc, tmpDoc.getPageIndices()) to embed them.
+  // Returns a temporary PDFDocument; caller copies pages into the final doc.
   async function buildPickingListPages(groups, { W, H }, headerMeta) {
     if (!window.PDFLib || !window.fontkit) return [];
-    const { PDFDocument, rgb } = window.PDFLib;
+    const { PDFDocument } = window.PDFLib;
 
-    // Aggregate rows from groups — one row per productId:skuId bucket.
+    // Aggregate rows — one row per productId:skuId bucket (note orders counted together).
     const aggMap = new Map();
     for (const grp of groups) {
       const key = `${grp.productId || ''}:${grp.skuId || ''}`;
@@ -4332,70 +4351,39 @@
         aggMap.set(key, {
           alias: grp.alias || '',
           officialName: grp.officialName || '',
-          skuAlias: (variantInfo?.alias || '').trim(),
-          sellerSku: grp.sellerSku || '',
-          productImageURL: grp.productImageURL || null,
+          variantName: grp.variantName || (variantInfo?.alias || '').trim() || '',
           qty: 0,
-          orderIds: new Set(),
         });
       }
-      const agg = aggMap.get(key);
-      // qty = label count in this group (each id = 1 fulfillUnit = 1 order)
-      agg.qty += grp.ids.length;
-      for (const id of grp.ids) {
-        const rec = state.records.get(id);
-        const oid = rec?.orderIds?.[0];
-        if (oid) agg.orderIds.add(oid);
-      }
+      aggMap.get(key).qty += grp.ids.length;
     }
 
     let no = 0;
     const rows = [...aggMap.values()]
-      .sort((a, b) => a.alias.localeCompare(b.alias) || a.officialName.localeCompare(b.officialName))
-      .map(r => ({ ...r, no: ++no, orderIds: [...r.orderIds] }));
+      .sort((a, b) => a.alias.localeCompare(b.alias, 'th') || a.officialName.localeCompare(b.officialName, 'th'))
+      .map(r => ({ ...r, no: ++no }));
 
     const tmpDoc = await PDFDocument.create();
     if (window.fontkit) tmpDoc.registerFontkit(window.fontkit);
     const fontBytes = await ensureFontBytes();
     const font = await tmpDoc.embedFont(fontBytes, { subset: true });
 
-    const isCompact = W < 420;
-    const headerHeight = 120;
-    // Bug #3 fix: smaller rows so more fit per page (tabular 38, compact 46).
-    const rowHeight = isCompact ? 46 : 38;
-    const footerHeight = 30;
-    const rowsPerPage = Math.max(1, Math.floor((H - headerHeight - footerHeight) / rowHeight));
-    const pageCount = Math.ceil(rows.length / rowsPerPage);
-
-    // Pre-embed images for tabular layout (one fetch per group, best-effort).
-    const imageCache = new Map(); // key → embedded image or null
-    if (!isCompact) {
-      await Promise.all(rows.map(async (row) => {
-        if (!row.productImageURL || imageCache.has(row.productImageURL)) return;
-        try {
-          const resp = await _origFetch.call(window, row.productImageURL, { credentials: 'omit' });
-          if (!resp.ok) { imageCache.set(row.productImageURL, null); return; }
-          const buf = await resp.arrayBuffer();
-          const ct = resp.headers.get('content-type') || '';
-          const isPng = ct.includes('png') || row.productImageURL.toLowerCase().includes('.png');
-          const img = isPng ? await tmpDoc.embedPng(buf) : await tmpDoc.embedJpg(buf);
-          imageCache.set(row.productImageURL, img);
-        } catch { imageCache.set(row.productImageURL, null); }
-      }));
-    }
+    const headerHeight = 120; // picking-list header block
+    const colHdrHeight = 14;  // column label row
+    const rowHeight    = 28;  // compact table row
+    const footerHeight = 20;
+    const rowsPerPage  = Math.max(1, Math.floor((H - headerHeight - colHdrHeight - footerHeight) / rowHeight));
+    const pageCount    = Math.ceil(rows.length / rowsPerPage);
 
     for (let pi = 0; pi < pageCount; pi++) {
       const page = tmpDoc.addPage([W, H]);
       renderPickingHeader(page, headerMeta, font, W, H, pi + 1, pageCount);
+      renderPickingColumnHeaders(page, W, H - headerHeight, font);
 
       const pageRows = rows.slice(pi * rowsPerPage, (pi + 1) * rowsPerPage);
-      let curY = H - headerHeight;
+      let curY = H - headerHeight - colHdrHeight;
       for (const row of pageRows) {
-        if (isCompact) {
-          renderPickingRowCompact(page, row, curY, W, font);
-        } else {
-          renderPickingRowTabular(page, row, curY, W, font, imageCache);
-        }
+        renderPickingRowTable(page, row, curY, W, font);
         curY -= rowHeight;
       }
     }
@@ -4477,108 +4465,59 @@
     return lines;
   }
 
-  function renderPickingRowTabular(page, row, y, W, font, imageCache) {
+  // Column header bar for picking list table.
+  function renderPickingColumnHeaders(page, W, y, font) {
     const { rgb } = window.PDFLib;
-    const black = rgb(0, 0, 0);
+    const PAD = 10;
+    const rowH = 14;
     const grey = rgb(0.5, 0.5, 0.5);
-    const rowH = 38; // Bug #3 fix: shrunk from 50 to fit more rows
-    const pad = 24;
-    // Widths: no=20, img=32, name=flex, sku=46, sellerSku=56, qty=32, orderId=74
-    const fixedW = 260;
-    const nameW = Math.max(40, W - pad * 2 - fixedW);
-    let x = pad;
-
-    // Row number
-    page.drawText(String(row.no), { x, y: y - 12, size: 8, font, color: grey });
-    x += 20;
-
-    // Image (30×30)
-    const img = row.productImageURL ? (imageCache.get(row.productImageURL) || null) : null;
-    if (img) {
-      const boxSize = 30;
-      const ratio = img.width / img.height;
-      const iw = ratio >= 1 ? boxSize : boxSize * ratio;
-      const ih = ratio >= 1 ? boxSize / ratio : boxSize;
-      page.drawImage(img, { x, y: y - rowH + (rowH - ih) / 2, width: iw, height: ih });
-    }
-    x += 32;
-
-    // Alias (11pt) — single line truncated.
-    const aliasSize = 11;
-    const aliasRaw = row.alias || row.officialName.slice(0, 12);
-    let aliasText = aliasRaw;
-    while (aliasText.length > 1 && font.widthOfTextAtSize(aliasText, aliasSize) > nameW) {
-      aliasText = aliasText.slice(0, -1);
-    }
-    page.drawText(aliasText, { x, y: y - 12, size: aliasSize, font, color: black });
-
-    // Official name (8pt) — word-wrap up to 2 lines.
-    const nameSize = 8;
-    const nameLines = wrapTextToLines(row.officialName || '', 2, font, nameSize, nameW);
-    nameLines.forEach((line, i) => {
-      page.drawText(line, { x, y: y - 22 - i * (nameSize + 1), size: nameSize, font, color: grey });
-    });
-    x += nameW;
-
-    // SKU alias
-    const skuText = row.skuAlias || '-';
-    page.drawText(skuText.slice(0, 10), { x, y: y - 14, size: 8, font, color: grey, maxWidth: 44 });
-    x += 46;
-
-    // Seller SKU
-    const ssText = row.sellerSku || '-';
-    page.drawText(ssText.slice(0, 12), { x, y: y - 14, size: 8, font, color: grey, maxWidth: 54 });
-    x += 56;
-
-    // Qty
-    page.drawText(String(row.qty), { x, y: y - 14, size: 11, font, color: black });
-    x += 32;
-
-    // Order IDs (up to 3, +N more)
-    const oids = row.orderIds.slice(0, 3);
-    const more = row.orderIds.length - oids.length;
-    const oidText = oids.join(', ') + (more > 0 ? ` +${more}` : '');
-    page.drawText(oidText, { x, y: y - 14, size: 7, font, color: grey, maxWidth: 72 });
-
-    // Row separator
-    page.drawLine({ start: { x: pad, y: y - rowH }, end: { x: W - pad, y: y - rowH }, thickness: 0.25, color: rgb(0.85, 0.85, 0.85) });
+    const nameW = Math.max(60, W - PAD * 2 - 16 - 70 - 30);
+    page.drawRectangle({ x: 0, y: y - rowH, width: W, height: rowH, color: rgb(0.92, 0.92, 0.92) });
+    page.drawText('#',         { x: PAD,                   y: y - 10, size: 7, font, color: grey });
+    page.drawText('ชื่อสินค้า / ชื่อย่อ', { x: PAD + 16,              y: y - 10, size: 7, font, color: grey });
+    page.drawText('ตัวเลือก',  { x: PAD + 16 + nameW,      y: y - 10, size: 7, font, color: grey, maxWidth: 66 });
+    page.drawText('จำนวน',     { x: W - PAD - 28,          y: y - 10, size: 7, font, color: grey });
+    page.drawLine({ start: { x: 0, y: y - rowH }, end: { x: W, y: y - rowH }, thickness: 0.5, color: grey });
   }
 
-  function renderPickingRowCompact(page, row, y, W, font) {
+  // Unified compact table row for picking list (replaces tabular + compact renderers).
+  function renderPickingRowTable(page, row, y, W, font) {
     const { rgb } = window.PDFLib;
     const black = rgb(0, 0, 0);
-    const grey = rgb(0.5, 0.5, 0.5);
-    const rowH = 46; // Bug #3 fix: shrunk from 60
-    const pad = 12;
-    const imgSize = 34;
+    const grey  = rgb(0.5, 0.5, 0.5);
+    const rowH  = 28;
+    const PAD   = 10;
+    const nameW = Math.max(60, W - PAD * 2 - 16 - 70 - 30);
 
-    // Row number + alias (11pt, right of image)
-    const textX = pad + imgSize + 6;
-    const textW = W - textX - pad;
-    const aliasSize = 11;
-    const alias = row.alias || row.officialName.slice(0, 16);
-    let aliasText = `${row.no}. ${alias}`;
-    while (aliasText.length > 1 && font.widthOfTextAtSize(aliasText, aliasSize) > textW) {
-      aliasText = aliasText.slice(0, -1);
+    if (row.no % 2 === 0) {
+      page.drawRectangle({ x: 0, y: y - rowH, width: W, height: rowH, color: rgb(0.975, 0.975, 0.975) });
     }
-    page.drawText(aliasText, { x: textX, y: y - 12, size: aliasSize, font, color: black });
 
-    // Official name (8pt) — word-wrap up to 2 lines.
-    const ns = 8;
-    const nameLines = wrapTextToLines(row.officialName || '', 2, font, ns, textW);
-    nameLines.forEach((line, i) => {
-      page.drawText(line, { x: textX, y: y - 22 - i * (ns + 1), size: ns, font, color: grey });
-    });
+    // Row number
+    page.drawText(String(row.no), { x: PAD, y: y - 10, size: 8, font, color: rgb(0.65, 0.65, 0.65) });
 
-    // Bottom line: Qty + SKU + order count
-    const bottomY = y - rowH + 6;
-    const bottomParts = [`Qty: ${row.qty}`];
-    if (row.skuAlias) bottomParts.push(`SKU: ${row.skuAlias}`);
-    if (row.orderIds.length > 0) bottomParts.push(`Orders: ${row.orderIds.length}`);
-    page.drawText(bottomParts.join('  /  '), { x: textX, y: bottomY, size: 8, font, color: grey, maxWidth: textW });
+    // Alias (9pt, truncate to nameW)
+    const aliasRaw = row.alias || shortName(row.officialName || '');
+    let aliasText = aliasRaw;
+    while (aliasText.length > 1 && font.widthOfTextAtSize(aliasText, 9) > nameW - 2) aliasText = aliasText.slice(0, -1);
+    page.drawText(aliasText, { x: PAD + 16, y: y - 10, size: 9, font, color: black });
 
-    // Row separator
-    page.drawLine({ start: { x: pad, y: y - rowH }, end: { x: W - pad, y: y - rowH }, thickness: 0.25, color: rgb(0.85, 0.85, 0.85) });
+    // Official name (7pt, 1 line)
+    const nameLines = wrapTextToLines(row.officialName || '', 1, font, 7, nameW - 2);
+    if (nameLines.length) page.drawText(nameLines[0], { x: PAD + 16, y: y - 19, size: 7, font, color: grey });
+
+    // Variant / ตัวเลือก (7pt)
+    const varText = row.variantName || '—';
+    let vt = varText;
+    while (vt.length > 1 && font.widthOfTextAtSize(vt, 7) > 64) vt = vt.slice(0, -1);
+    page.drawText(vt, { x: PAD + 16 + nameW, y: y - 10, size: 7, font, color: grey });
+
+    // Qty (10pt, right-aligned)
+    const qStr = String(row.qty);
+    const qW = font.widthOfTextAtSize(qStr, 10);
+    page.drawText(qStr, { x: W - PAD - qW, y: y - 11, size: 10, font, color: black });
+
+    page.drawLine({ start: { x: 0, y: y - rowH }, end: { x: W, y: y - rowH }, thickness: 0.25, color: rgb(0.88, 0.88, 0.88) });
   }
 
   // §7.3: Aggregate groups into PickingListData for headerMeta computation.
@@ -4603,6 +4542,69 @@
       totalProducts: productIds.size,
       totalItems,
     };
+  }
+
+  // §7.4: Insert a full-page note-zone divider before note-order labels.
+  // payload = { alias, officialName, variantName, carrierName, notes: [{idx, msg}] }
+  async function buildNoteZoneDividerPage(pdfDoc, { W, H }, payload, font) {
+    const { rgb } = window.PDFLib;
+    const page = pdfDoc.addPage([W, H]);
+    const BLACK = rgb(0, 0, 0);
+    const DARK  = rgb(0.15, 0.15, 0.15);
+    const MID   = rgb(0.4, 0.4, 0.4);
+    const LIGHT = rgb(0.6, 0.6, 0.6);
+    const PAD   = 14;
+    const contentW = W - PAD * 2;
+
+    // ── Header bar ───────────────────────────────────────────────────────────
+    const TITLE_SIZE = 14;
+    let y = H - 14;
+    page.drawText('★ หมายเหตุ', { x: PAD, y, size: TITLE_SIZE, font, color: BLACK });
+    y -= TITLE_SIZE + 5;
+
+    // Product line: alias · variant · carrier
+    const productParts = [payload.alias || payload.officialName, payload.variantName, payload.carrierName].filter(Boolean);
+    if (productParts.length) {
+      page.drawText(productParts.join(' · '), { x: PAD, y, size: 8, font, color: DARK, maxWidth: contentW });
+      y -= 11;
+    }
+
+    // Count
+    const noteCount = (payload.notes || []).length;
+    page.drawText(`${noteCount} ออเดอร์`, { x: PAD, y, size: 8, font, color: MID });
+    y -= 8;
+
+    // Separator
+    page.drawLine({ start: { x: PAD, y }, end: { x: W - PAD, y }, thickness: 1, color: BLACK });
+    y -= 12;
+
+    // ── Note list ─────────────────────────────────────────────────────────────
+    for (const note of (payload.notes || [])) {
+      if (y < 20) break;
+      const marker = `★${note.idx}`;
+      const markerW = font.widthOfTextAtSize(marker, 10) + 6;
+      page.drawText(marker, { x: PAD, y, size: 10, font, color: BLACK });
+      // Message with word-wrap up to 3 lines
+      const msg = note.msg ? `"${note.msg}"` : '—';
+      const msgLines = wrapTextToLines(msg, 3, font, 8.5, contentW - markerW);
+      let lineY = y;
+      for (const line of msgLines) {
+        page.drawText(line, { x: PAD + markerW, y: lineY, size: 8.5, font, color: DARK });
+        lineY -= 11;
+        if (lineY < 20) break;
+      }
+      y = Math.min(lineY, y - 14) - 3;
+    }
+
+    // ── Footer timestamp ──────────────────────────────────────────────────────
+    const now = new Date();
+    const p2  = n => String(n).padStart(2, '0');
+    page.drawText(
+      `พิมพ์เมื่อ ${p2(now.getDate())}/${p2(now.getMonth()+1)}/${now.getFullYear()} ${p2(now.getHours())}:${p2(now.getMinutes())} น.`,
+      { x: PAD, y: 8, size: 7, font, color: LIGHT }
+    );
+
+    return page;
   }
 
   // §4.7: Build a combined multi-SKU PDF: [divider_1][labels_1][divider_2][labels_2]…
@@ -4678,26 +4680,35 @@
 
       for (let pi = 0; pi < parts.length; pi++) {
         const part = parts[pi];
-        // Fetch label bytes (reuse first-group probe result only for the
-        // first sub-part of the first group when it matches grp.ids).
+
+        // Split IDs: normal orders first, note orders last so pages align with noteMap.
+        const noteIds   = part.ids.filter(id => state.records.get(id)?.hasNote);
+        const normalIds = part.ids.filter(id => !state.records.get(id)?.hasNote);
+        const sortedIds = [...normalIds, ...noteIds];
+        const noteMap   = new Map();
+        noteIds.forEach((id, i) => noteMap.set(id, i + 1));
+        const hasNotes  = noteIds.length > 0;
+
+        // Fetch label bytes (reuse first-group probe when no note re-ordering needed).
         let labelsBytes;
         try {
-          if (gi === 0 && pi === 0 && firstGroupBytes && part.ids.length === grp.ids.length) {
+          if (gi === 0 && pi === 0 && firstGroupBytes && part.ids.length === grp.ids.length && !hasNotes) {
             labelsBytes = firstGroupBytes;
           } else {
-            labelsBytes = await callGenerateApiRaw(part.ids);
+            labelsBytes = await callGenerateApiRaw(sortedIds);
           }
         } catch (e) {
           throw new Error(`กลุ่ม "${part.alias}" (${gi + 1}/${groups.length}) ดึง labels ไม่ได้: ${e.message}`);
         }
 
-        // Apply alias overlay if enabled.
+        // Apply alias overlay (pass noteMap so ★N appears on note-order labels).
         if (state.overlayEnabled && labelsBytes) {
           try {
-            labelsBytes = await overlayAliasOnPdf(labelsBytes, part.ids, () => {}, workerName, workerIcon);
+            labelsBytes = await overlayAliasOnPdf(labelsBytes, sortedIds, () => {}, workerName, workerIcon, noteMap);
           } catch (_oErr) { /* continue unmodified */ }
         }
 
+        // SKU divider (always before this block of labels).
         if (withDivider) {
           await buildDividerPage(finalDoc, { W, H }, {
             alias: part.alias,
@@ -4706,7 +4717,7 @@
             productImageURL: part.productImageURL,
             carrierName: part.carrierName,
             carrierIconURL: part.carrierIconURL,
-            qty: part.ids.length,
+            qty: sortedIds.length,
             orderQty: part.orderQty || 1,
           }, font, workerName, assigneeKind);
         }
@@ -4714,8 +4725,34 @@
         if (labelsBytes) {
           try {
             const partDoc = await PDFDocument.load(labelsBytes);
-            const copied = await finalDoc.copyPages(partDoc, partDoc.getPageIndices());
-            copied.forEach(p => finalDoc.addPage(p));
+            if (!hasNotes) {
+              // No notes — copy all pages as before.
+              const copied = await finalDoc.copyPages(partDoc, partDoc.getPageIndices());
+              copied.forEach(p => finalDoc.addPage(p));
+            } else {
+              // Copy normal-order pages first.
+              if (normalIds.length > 0) {
+                const normalIdx = Array.from({ length: normalIds.length }, (_, i) => i);
+                const copiedNormal = await finalDoc.copyPages(partDoc, normalIdx);
+                copiedNormal.forEach(p => finalDoc.addPage(p));
+              }
+              // Insert note zone divider page.
+              const notes = noteIds.map((id, i) => ({
+                idx: i + 1,
+                msg: state.records.get(id)?.buyerNote || '',
+              }));
+              await buildNoteZoneDividerPage(finalDoc, { W, H }, {
+                alias: part.alias,
+                officialName: part.officialName,
+                variantName: part.variantName,
+                carrierName: part.carrierName,
+                notes,
+              }, font);
+              // Copy note-order pages after zone divider.
+              const noteIdx = Array.from({ length: noteIds.length }, (_, i) => normalIds.length + i);
+              const copiedNotes = await finalDoc.copyPages(partDoc, noteIdx);
+              copiedNotes.forEach(p => finalDoc.addPage(p));
+            }
           } catch (_copyErr) { /* skip malformed */ }
         }
       }

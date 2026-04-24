@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Overlay Settings Preview</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #e5e7eb; display: flex; align-items: center; justify-content: center; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+
+  /* Modal shell */
+  .modal { background: #fff; border-radius: 14px; box-shadow: 0 20px 60px rgba(0,0,0,0.22); width: 1020px; max-width: 98vw; display: flex; flex-direction: column; overflow: hidden; }
+  .modal-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; border-bottom: 1px solid #f0f0f0; }
+  .modal-header span { font-size: 14px; font-weight: 700; color: #161823; }
+  .modal-close { background: none; border: none; font-size: 16px; color: #9ca3af; cursor: pointer; width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center; }
+  .modal-close:hover { background: #f3f4f6; color: #374151; }
+
+  /* Body: left preview + right fields */
+  .lo-body { display: flex; height: 740px; overflow: hidden; }
+
+  /* Left: canvas preview column */
+  .lo-pv-col { flex: 0 0 520px; padding: 20px; display: flex; flex-direction: column; align-items: center; gap: 10px; border-right: 1px solid #ebebeb; background: #f8f9fa; overflow-y: auto; }
+  .lo-canvas-wrap { position: relative; width: 480px; height: 675px; border: 1px solid #dde1e7; border-radius: 8px; background: #fff; box-shadow: 0 4px 16px rgba(0,0,0,0.10); overflow: hidden; }
+
+  /* Simulated J&T label inside canvas */
+  .label-bg { width: 100%; height: 100%; background: #fff; position: relative; font-family: monospace; }
+
+  /* Side white strips (OCR mask) */
+  .mask-left  { position: absolute; left: 0;   top: 3%;  width: 8.5%;  height: 94%; background: #fff; z-index: 2; display: flex; align-items: center; justify-content: center; }
+  .mask-right { position: absolute; right: 0;  top: 3%;  width: 7.5%;  height: 94%; background: #fff; z-index: 2; display: flex; align-items: center; justify-content: center; }
+  .mkt-text-l { font-size: 7px; color: #333; writing-mode: vertical-rl; transform: rotate(180deg); letter-spacing: 1px; opacity: 0.85; }
+  .mkt-text-r { font-size: 7px; color: #333; writing-mode: vertical-rl; letter-spacing: 1px; opacity: 0.85; }
+
+  /* Label interior */
+  .label-inner { position: absolute; left: 8.5%; right: 7.5%; top: 0; bottom: 0; }
+
+  /* Top banner */
+  .label-top-bar { height: 6.5%; background: #f5f5f5; border-bottom: 1px solid #e0e0e0; display: flex; align-items: center; justify-content: space-between; padding: 0 8px; font-size: 7px; color: #555; }
+  .label-top-bar .tiktok { font-weight: 700; font-size: 8px; color: #000; }
+  .label-top-bar .jnt { font-size: 9px; font-weight: 900; color: #e00; letter-spacing: -0.5px; }
+  .label-top-bar .ez { font-size: 12px; font-weight: 700; color: #333; }
+  .label-top-bar .num { font-size: 10px; font-weight: 700; color: #555; }
+
+  /* Barcode area */
+  .label-barcode-area { height: 28%; display: flex; align-items: center; justify-content: center; background: repeating-linear-gradient(90deg, #000 0px, #000 2px, #fff 2px, #fff 4px, #000 4px, #000 5px, #fff 5px, #fff 8px, #000 8px, #000 10px, #fff 10px, #fff 13px); }
+
+  /* Route code */
+  .label-route { height: 10%; background: #f0f0f0; display: flex; align-items: center; justify-content: center; border-top: 1px solid #ddd; border-bottom: 1px solid #ddd; }
+  .route-code { font-size: 28px; font-weight: 900; color: #000; letter-spacing: 2px; }
+
+  /* Address */
+  .label-addr { height: 15%; padding: 4px 8px; font-size: 6px; color: #444; border-bottom: 1px solid #eee; display: flex; align-items: flex-start; }
+
+  /* Shop image + header overlay */
+  .label-footer { height: 18%; padding: 4px 6px; display: flex; align-items: flex-start; gap: 6px; border-top: 1px solid #eee; position: relative; }
+  .shop-logo { width: 28px; height: 28px; background: linear-gradient(135deg, #fe2c55, #ff7f7f); border-radius: 4px; flex: 0 0 28px; display: flex; align-items: center; justify-content: center; font-size: 10px; }
+  .shop-texts { flex: 1; display: flex; flex-direction: column; gap: 1px; padding-top: 2px; }
+  .shop-h1 { font-size: 7px; font-weight: 700; color: #000; opacity: 0.85; }
+  .shop-h2 { font-size: 6px; color: #000; opacity: 0.75; }
+
+  /* Alias watermark */
+  .alias-mark { position: absolute; bottom: 4px; left: 50%; transform: translateX(-50%); font-size: 16px; font-weight: 900; color: rgba(0,0,0,0.35); white-space: nowrap; }
+
+  .lo-pv-caption { font-size: 10px; color: #9ca3af; }
+
+  /* Right: fields column */
+  .lo-fields { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; background: #f4f5f7; }
+
+  /* Card */
+  .lo-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+  .lo-card-hd { display: flex; align-items: center; justify-content: space-between; }
+  .lo-card-title { font-size: 12px; font-weight: 700; color: #111827; }
+  .lo-counter { font-size: 10px; color: #d1d5db; }
+  .lo-hint { font-size: 10px; color: #9ca3af; line-height: 1.45; }
+
+  /* Toggle switch */
+  .lo-switch-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; cursor: pointer; }
+  .lo-switch-label { display: flex; flex-direction: column; gap: 2px; }
+  .lo-switch-title { font-size: 13px; font-weight: 600; color: #161823; }
+  .lo-switch-desc { font-size: 11px; color: #9ca3af; }
+  .lo-switch-track { width: 36px; height: 20px; border-radius: 10px; background: #fe2c55; cursor: pointer; position: relative; flex: 0 0 36px; }
+  .lo-switch-track::after { content: ''; position: absolute; top: 3px; left: 19px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.2); }
+
+  /* Opacity row */
+  .lo-row-between { display: flex; align-items: center; justify-content: space-between; }
+  .lo-opacity-val { font-size: 12px; font-weight: 700; color: #fe2c55; }
+  .lo-range { width: 100%; accent-color: #fe2c55; height: 4px; cursor: pointer; margin: 4px 0; }
+
+  /* Input */
+  .lo-input { width: 100%; border: 1.5px solid #e5e7eb; border-radius: 7px; padding: 7px 10px; font-size: 12px; outline: none; background: #fafbfc; color: #374151; }
+
+  /* Shop image + text row */
+  .lo-shop-row { display: flex; gap: 12px; align-items: flex-start; }
+  .lo-img-col { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .lo-thumb { width: 64px; height: 64px; object-fit: contain; border: 1.5px solid #e5e7eb; border-radius: 8px; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #fe2c55, #ff7f7f); font-size: 22px; }
+  .lo-img-btns { display: flex; gap: 4px; }
+  .btn-sm { font-size: 11px; padding: 4px 8px; border-radius: 6px; border: 1px solid #e5e7eb; background: #f9fafb; color: #374151; cursor: pointer; }
+  .btn-sm-danger { border-color: #fca5a5; color: #dc2626; background: #fff5f5; }
+
+  .lo-text-col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .lo-field-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 3px; }
+  .lo-field-label { font-size: 11px; font-weight: 500; color: #6b7280; }
+
+  /* Footer */
+  .modal-footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 14px 20px; border-top: 1px solid #f0f0f0; }
+  .btn-cancel { background: transparent; border: none; color: #6b7280; font-size: 13px; font-weight: 500; padding: 9px 16px; border-radius: 20px; cursor: pointer; }
+  .btn-confirm { background: #fe2c55; color: #fff; border: none; font-size: 13px; font-weight: 700; padding: 9px 24px; border-radius: 20px; cursor: pointer; box-shadow: 0 2px 8px rgba(254,44,85,0.30); }
+</style>
+</head>
+<body>
+<div class="modal">
+  <!-- Header -->
+  <div class="modal-header">
+    <span>🏷️ ปรับแต่งฉลาก (J&T)</span>
+    <button class="modal-close">✕</button>
+  </div>
+
+  <!-- Body -->
+  <div class="lo-body">
+
+    <!-- Left: label preview -->
+    <div class="lo-pv-col">
+      <div class="lo-canvas-wrap">
+        <div class="label-bg">
+          <!-- Side masks with marketing text -->
+          <div class="mask-left"><span class="mkt-text-l">วีสทวมใ</span></div>
+          <div class="mask-right"><span class="mkt-text-r">วีสทวมใ</span></div>
+
+          <div class="label-inner">
+            <div class="label-top-bar">
+              <span class="tiktok">TikTok Shop</span>
+              <span class="jnt">J&T EXPRESS</span>
+              <span class="ez">EZ</span>
+              <span class="num">698</span>
+            </div>
+            <div class="label-barcode-area"></div>
+            <div class="label-route"><span class="route-code">เกม</span></div>
+            <div class="label-addr">[ address hidden ] · ผู้รับ: ชื่อผู้รับ · โทร: 08X-XXX-XXXX</div>
+            <div class="label-footer">
+              <div class="shop-logo">🛍</div>
+              <div class="shop-texts">
+                <div class="shop-h1">วีสาสทาสทส</div>
+                <div class="shop-h2">สาทวสาสววส</div>
+              </div>
+              <div class="alias-mark">ครีมรักแร้ 1</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="lo-pv-caption">ตัวอย่าง J&T A6</div>
+    </div>
+
+    <!-- Right: settings fields -->
+    <div class="lo-fields">
+
+      <!-- Card 1: Toggle -->
+      <div class="lo-card">
+        <div class="lo-switch-row">
+          <div class="lo-switch-label">
+            <span class="lo-switch-title">เปิดใช้งาน overlay</span>
+            <span class="lo-switch-desc">แปะข้อความ/รูปบนฉลาก J&T A6</span>
+          </div>
+          <div class="lo-switch-track"></div>
+        </div>
+      </div>
+
+      <!-- Card 2: Opacity -->
+      <div class="lo-card">
+        <div class="lo-row-between">
+          <span class="lo-card-title">ความทึบ</span>
+          <span class="lo-opacity-val">90%</span>
+        </div>
+        <input type="range" class="lo-range" min="75" max="90" value="90" />
+        <div class="lo-hint">85% = ค่าเริ่มต้น · 90% = สูงสุด เพื่อไม่กลืนสีดำฉลาก</div>
+      </div>
+
+      <!-- Card 3: Side strip text -->
+      <div class="lo-card">
+        <div class="lo-card-hd">
+          <span class="lo-card-title">↕ ข้อความแถบข้าง</span>
+          <span class="lo-counter">9/50</span>
+        </div>
+        <div class="lo-hint">วิ่งในแถบสีขาวซ้าย–ขวาของฉลาก</div>
+        <input class="lo-input" type="text" value="วีสทวมใ" />
+      </div>
+
+      <!-- Card 4: Shop logo + texts -->
+      <div class="lo-card">
+        <div class="lo-card-hd" style="margin-bottom:2px;">
+          <span class="lo-card-title">🖼 โลโก้ร้าน + ข้อความ</span>
+        </div>
+        <div class="lo-hint" style="margin-bottom:10px;">ออเดอร์ SKU เดียวเท่านั้น · บีบอัดอัตโนมัติ</div>
+        <div class="lo-shop-row">
+          <div class="lo-img-col">
+            <div class="lo-thumb">🛍</div>
+            <div class="lo-img-btns">
+              <button class="btn-sm">อัปโหลด</button>
+              <button class="btn-sm btn-sm-danger">ลบ</button>
+            </div>
+          </div>
+          <div class="lo-text-col">
+            <div class="lo-field-row">
+              <span class="lo-field-label">บรรทัดที่ 1</span>
+              <span class="lo-counter">13/50</span>
+            </div>
+            <input class="lo-input" type="text" value="วีสาสทาสทส" style="margin-bottom:8px;" />
+            <div class="lo-field-row">
+              <span class="lo-field-label">บรรทัดที่ 2</span>
+              <span class="lo-counter">10/50</span>
+            </div>
+            <input class="lo-input" type="text" value="สาทวสาสววส" />
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /lo-fields -->
+  </div><!-- /lo-body -->
+
+  <!-- Footer -->
+  <div class="modal-footer">
+    <button class="btn-cancel">ปิด</button>
+    <button class="btn-confirm">บันทึก</button>
+  </div>
+</div>
+</body>
+</html>

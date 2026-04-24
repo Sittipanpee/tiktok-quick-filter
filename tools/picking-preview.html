@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8" />
+<title>ตัวอย่างใบหยิบสินค้า</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #d1d5db;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    padding: 32px 24px;
+  }
+  h2 { font-size: 13px; color: #374151; margin-bottom: 10px; font-weight: 700; }
+  .cols { display: flex; gap: 32px; align-items: flex-start; flex-wrap: wrap; }
+  .col { display: flex; flex-direction: column; gap: 8px; }
+
+  /* A6 page shell (288pt × 432pt @ 1.6x = 461px × 691px) */
+  .page {
+    width: 461px;
+    background: #fff;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+    border-radius: 2px;
+    font-family: 'Courier New', monospace;
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* ── HEADER ── */
+  .pl-header {
+    padding: 10px 14px 6px;
+    border-bottom: 1px solid #888;
+  }
+  .pl-title { font-size: 18px; font-weight: 900; color: #111; letter-spacing: -0.5px; }
+  .pl-meta { font-size: 9px; color: #666; margin-top: 2px; line-height: 1.6; }
+  .pl-sep { border: none; border-top: 0.5px solid #aaa; margin: 0 10px; }
+
+  /* ── COMPACT ROWS (ปัจจุบัน) ── */
+  .compact-row {
+    display: flex;
+    align-items: flex-start;
+    padding: 6px 14px;
+    gap: 8px;
+    border-bottom: 0.5px solid #e5e5e5;
+  }
+  .compact-img {
+    width: 34px; height: 34px;
+    background: #f3f4f6;
+    border: 1px solid #e5e7eb;
+    border-radius: 3px;
+    flex: 0 0 34px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+  }
+  .compact-body { flex: 1; min-width: 0; }
+  .compact-alias { font-size: 11px; font-weight: 700; color: #111; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .compact-name { font-size: 8px; color: #666; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .compact-name2 { font-size: 8px; color: #666; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .compact-bottom { font-size: 8px; color: #888; margin-top: 4px; }
+
+  /* ── TABLE ROWS (ใหม่) ── */
+  .tbl-header-row {
+    display: flex;
+    align-items: center;
+    background: #f0f0f0;
+    padding: 4px 10px;
+    border-bottom: 1px solid #bbb;
+    gap: 0;
+  }
+  .th { font-size: 7px; font-weight: 700; color: #555; letter-spacing: 0.3px; }
+  .th-no    { width: 20px; }
+  .th-name  { flex: 1; }
+  .th-var   { width: 80px; }
+  .th-qty   { width: 36px; text-align: right; }
+
+  .tbl-row {
+    display: flex;
+    align-items: center;
+    padding: 3px 10px;
+    border-bottom: 0.5px solid #ebebeb;
+    gap: 0;
+    min-height: 30px;
+  }
+  .tbl-row:nth-child(even) { background: #fafafa; }
+  .td-no    { width: 20px; font-size: 8px; color: #aaa; }
+  .td-name  { flex: 1; min-width: 0; }
+  .td-alias { font-size: 9px; font-weight: 700; color: #111; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .td-full  { font-size: 7px; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .td-var   { width: 80px; font-size: 7px; color: #555; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 4px; }
+  .td-qty   { width: 36px; font-size: 10px; font-weight: 700; color: #111; text-align: right; }
+
+  /* zone divider page */
+  .zone-divider-page {
+    width: 461px;
+    background: #fff;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+    border-radius: 2px;
+    font-family: 'Courier New', monospace;
+    position: relative;
+    overflow: hidden;
+  }
+  .zdp-top {
+    padding: 10px 14px 8px;
+    border-bottom: 1.5px solid #111;
+    display: flex; align-items: baseline; gap: 8px;
+  }
+  .zdp-icon { font-size: 15px; line-height: 1; }
+  .zdp-title { font-size: 14px; font-weight: 900; color: #111; letter-spacing: 0.5px; }
+  .zdp-product { font-size: 9px; color: #444; margin-top: 2px; }
+  .zdp-carrier { font-size: 8px; color: #888; }
+  .zdp-count { margin-left: auto; font-size: 8px; color: #888; white-space: nowrap; }
+  .zdp-notes { padding: 8px 14px 12px; display: flex; flex-direction: column; gap: 5px; }
+  .zdp-note-row { display: flex; gap: 6px; align-items: flex-start; }
+  .zdp-star { font-size: 10px; font-weight: 900; color: #111; min-width: 24px; padding-top: 1px; }
+  .zdp-msg { font-size: 9.5px; color: #222; line-height: 1.4; quotes: "\201C" "\201D"; }
+  .zdp-msg::before { content: "\201C"; }
+  .zdp-msg::after  { content: "\201D"; }
+  .zdp-footer { padding: 5px 14px 8px; border-top: 0.5px solid #ddd; font-size: 7.5px; color: #aaa; }
+  .zone-label {
+    position: absolute; top: 8px; right: 12px;
+    font-size: 7px; color: #ccc; font-family: monospace;
+  }
+
+  /* label page with asterisk */
+  .label-page {
+    width: 461px;
+    height: 200px;
+    background: #fff;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+    border-radius: 2px;
+    position: relative;
+    overflow: hidden;
+  }
+  .label-mock-content {
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .label-barcode-mock {
+    height: 40px;
+    background: repeating-linear-gradient(90deg, #000 0px, #000 2px, #fff 2px, #fff 5px, #000 5px, #000 7px, #fff 7px, #fff 11px);
+    margin: 6px 0;
+    border-radius: 1px;
+  }
+  .label-text-mock { height: 8px; background: #ddd; border-radius: 2px; }
+  .label-text-mock.w50 { width: 50%; }
+  .label-text-mock.w70 { width: 70%; }
+  .label-text-mock.w40 { width: 40%; }
+  .label-asterisk {
+    position: absolute;
+    top: 5px; left: 6px;
+    font-size: 16px;
+    font-weight: 900;
+    color: rgba(0,0,0,0.65);
+    line-height: 1;
+  }
+  .label-alias-mark {
+    position: absolute;
+    bottom: 8px; left: 50%;
+    transform: translateX(-50%);
+    font-size: 14px;
+    font-weight: 900;
+    color: rgba(0,0,0,0.35);
+    white-space: nowrap;
+    font-family: monospace;
+  }
+  .label-caption {
+    font-size: 10px;
+    color: #888;
+    font-family: sans-serif;
+  }
+
+  .page-footer {
+    text-align: center;
+    font-size: 8px;
+    color: #aaa;
+    padding: 5px;
+    font-family: monospace;
+  }
+
+  .tag { display: inline-block; font-size: 10px; padding: 2px 8px; border-radius: 99px; font-weight: 600; margin-bottom: 4px; }
+  .tag-old { background: #fee2e2; color: #b91c1c; }
+  .tag-new { background: #dcfce7; color: #15803d; }
+</style>
+</head>
+<body>
+
+<div class="cols">
+
+  <!-- BEFORE -->
+  <div class="col">
+    <h2>ปัจจุบัน (แบบการ์ด)</h2>
+    <span class="tag tag-old">เดิม</span>
+    <div class="page">
+      <div class="pl-header">
+        <div class="pl-title">ใบหยิบสินค้า</div>
+        <div class="pl-meta">
+          ผู้ใช้: di***@gmail.com<br>
+          พิมพ์เมื่อ: 2026-04-24 09:30<br>
+          ออเดอร์: 18 &nbsp; สินค้า: 4 &nbsp; ชิ้น: 22<br>
+          รับผิดชอบ: เกม
+        </div>
+      </div>
+      <hr class="pl-sep" />
+
+      <!-- rows compact -->
+      <div class="compact-row">
+        <div class="compact-img">🧴</div>
+        <div class="compact-body">
+          <div class="compact-alias">1. ครีมรักแร้</div>
+          <div class="compact-name">ครีมระงับกลิ่นกายสูตรอ่อนโยน 30g</div>
+          <div class="compact-name2">สูตร Original</div>
+          <div class="compact-bottom">จำนวน: 8 &nbsp;/&nbsp; รหัส: RA-30-ORI &nbsp;/&nbsp; ออเดอร์: 8</div>
+        </div>
+      </div>
+      <div class="compact-row">
+        <div class="compact-img">🧴</div>
+        <div class="compact-body">
+          <div class="compact-alias">2. ครีมรักแร้</div>
+          <div class="compact-name">ครีมระงับกลิ่นกายสูตรอ่อนโยน 30g</div>
+          <div class="compact-name2">สูตร Sensitive</div>
+          <div class="compact-bottom">จำนวน: 4 &nbsp;/&nbsp; รหัส: RA-30-SEN &nbsp;/&nbsp; ออเดอร์: 4</div>
+        </div>
+      </div>
+      <div class="compact-row">
+        <div class="compact-img">🧼</div>
+        <div class="compact-body">
+          <div class="compact-alias">3. สบู่มิ้น</div>
+          <div class="compact-name">สบู่อาบน้ำกลิ่นมิ้นท์เย็น ขนาด 80g</div>
+          <div class="compact-name2">-</div>
+          <div class="compact-bottom">จำนวน: 6 &nbsp;/&nbsp; รหัส: SO-80 &nbsp;/&nbsp; ออเดอร์: 6</div>
+        </div>
+      </div>
+      <div class="compact-row">
+        <div class="compact-img">💊</div>
+        <div class="compact-body">
+          <div class="compact-alias">4. วิตามินซี</div>
+          <div class="compact-name">วิตามินซีเม็ดฟู่ 1000mg Orange Flavor</div>
+          <div class="compact-name2">-</div>
+          <div class="compact-bottom">จำนวน: 4 &nbsp;/&nbsp; รหัส: VC-1000 &nbsp;/&nbsp; ออเดอร์: 4</div>
+        </div>
+      </div>
+
+      <div class="page-footer">1/1</div>
+    </div>
+  </div>
+
+  <!-- AFTER -->
+  <div class="col">
+    <h2>ใหม่ (ตาราง + ใบคั่นโซน)</h2>
+    <span class="tag tag-new">ใหม่</span>
+
+    <!-- Picking list page — ไม่มีหมายเหตุในใบหยิบ รวม QTY ปกติ -->
+    <div class="page">
+      <div class="pl-header">
+        <div class="pl-title">ใบหยิบสินค้า</div>
+        <div class="pl-meta">
+          ผู้ใช้: di***@gmail.com &nbsp;·&nbsp; 2026-04-24 09:30<br>
+          ออเดอร์: 21 &nbsp; สินค้า: 4 &nbsp; ชิ้น: 25 &nbsp;·&nbsp; รับผิดชอบ: เกม
+        </div>
+      </div>
+      <hr class="pl-sep" />
+
+      <div class="tbl-header-row">
+        <div class="th th-no">#</div>
+        <div class="th th-name">ชื่อสินค้า / ชื่อย่อ</div>
+        <div class="th th-var">ตัวเลือก</div>
+        <div class="th th-qty">จำนวน</div>
+      </div>
+
+      <div class="tbl-row">
+        <div class="td-no">1</div>
+        <div class="td-name">
+          <div class="td-alias">ครีมรักแร้</div>
+          <div class="td-full">ครีมระงับกลิ่นกายสูตรอ่อนโยน 30g</div>
+        </div>
+        <div class="td-var">Original</div>
+        <div class="td-qty">8</div>
+      </div>
+      <div class="tbl-row">
+        <div class="td-no">2</div>
+        <div class="td-name">
+          <div class="td-alias">ครีมรักแร้</div>
+          <div class="td-full">ครีมระงับกลิ่นกายสูตรอ่อนโยน 30g</div>
+        </div>
+        <div class="td-var">Sensitive</div>
+        <div class="td-qty">5</div><!-- รวมทั้งที่มีและไม่มีหมายเหตุ -->
+      </div>
+      <div class="tbl-row">
+        <div class="td-no">3</div>
+        <div class="td-name">
+          <div class="td-alias">สบู่มิ้น</div>
+          <div class="td-full">สบู่อาบน้ำกลิ่นมิ้นท์เย็น ขนาด 80g</div>
+        </div>
+        <div class="td-var">—</div>
+        <div class="td-qty">8</div>
+      </div>
+      <div class="tbl-row">
+        <div class="td-no">4</div>
+        <div class="td-name">
+          <div class="td-alias">วิตามินซี</div>
+          <div class="td-full">วิตามินซีเม็ดฟู่ 1000mg Orange Flavor</div>
+        </div>
+        <div class="td-var">—</div>
+        <div class="td-qty">4</div>
+      </div>
+
+      <div class="page-footer">1/1</div>
+    </div>
+
+    <!-- ── ใบคั่นโซน: ครีมรักแร้ Sensitive (มี 2 หมายเหตุ) ── -->
+    <div style="margin-top:14px;">
+      <div class="label-caption" style="margin-bottom:6px; font-family:sans-serif;">
+        ใบคั่นโซน — แทรกก่อนลาเบลกลุ่มนั้น (รีเซ็ตเลขใหม่ทุก SKU-group)
+      </div>
+      <div class="zone-divider-page">
+        <div class="zone-label">ใบคั่นโซน</div>
+        <div class="zdp-top">
+          <span class="zdp-icon">★</span>
+          <div>
+            <div class="zdp-title">หมายเหตุ</div>
+            <div class="zdp-product">ครีมรักแร้ · Sensitive · J&amp;T · ×1 ชิ้น</div>
+          </div>
+          <div class="zdp-count">2 ออเดอร์</div>
+        </div>
+        <div class="zdp-notes">
+          <div class="zdp-note-row">
+            <span class="zdp-star">★1</span>
+            <span class="zdp-msg">ขอครีมเยอะๆพี่</span>
+          </div>
+          <div class="zdp-note-row">
+            <span class="zdp-star">★2</span>
+            <span class="zdp-msg">ส่งหลังบ้านนะคะ</span>
+          </div>
+        </div>
+        <div class="zdp-footer">โปรดตรวจสอบหมายเหตุก่อนแพ็ค · พิมพ์เมื่อ 2026-04-24 09:30</div>
+      </div>
+    </div>
+
+    <!-- ── ใบคั่นโซน: สบู่มิ้น (มี 1 หมายเหตุ) — รีเซ็ตเลขใหม่ ── -->
+    <div style="margin-top:10px;">
+      <div class="label-caption" style="margin-bottom:6px; font-family:sans-serif;">
+        ใบคั่นโซน — กลุ่มถัดไป เลขรีเซ็ตเป็น *1 ใหม่
+      </div>
+      <div class="zone-divider-page">
+        <div class="zone-label">ใบคั่นโซน</div>
+        <div class="zdp-top">
+          <span class="zdp-icon">★</span>
+          <div>
+            <div class="zdp-title">หมายเหตุ</div>
+            <div class="zdp-product">สบู่มิ้น · J&amp;T · ×1 ชิ้น</div>
+          </div>
+          <div class="zdp-count">1 ออเดอร์</div>
+        </div>
+        <div class="zdp-notes">
+          <div class="zdp-note-row">
+            <span class="zdp-star">★1</span>
+            <span class="zdp-msg">ขอกันกระแทกด้วยนะครับ</span>
+          </div>
+        </div>
+        <div class="zdp-footer">โปรดตรวจสอบหมายเหตุก่อนแพ็ค · พิมพ์เมื่อ 2026-04-24 09:30</div>
+      </div>
+    </div>
+
+    <!-- ── ลาเบลที่มีหมายเหตุ — แสดง *N แทน ★ ── -->
+    <div style="margin-top:14px; display:flex; gap:14px; align-items:flex-end;">
+      <div>
+        <div class="label-caption" style="margin-bottom:6px; font-family:sans-serif;">ลาเบล *1</div>
+        <div class="label-page" style="width:200px;">
+          <div class="label-asterisk" style="font-size:13px; font-family:monospace;">★1</div>
+          <div class="label-mock-content" style="padding:10px;">
+            <div class="label-text-mock w40" style="height:5px; margin-bottom:4px;"></div>
+            <div class="label-barcode-mock" style="height:32px;"></div>
+            <div class="label-text-mock w70" style="height:6px;"></div>
+            <div style="height:3px;"></div>
+            <div class="label-text-mock w50" style="height:6px;"></div>
+          </div>
+          <div class="label-alias-mark" style="font-size:11px;">ครีมรักแร้</div>
+        </div>
+      </div>
+      <div>
+        <div class="label-caption" style="margin-bottom:6px; font-family:sans-serif;">ลาเบล *2</div>
+        <div class="label-page" style="width:200px;">
+          <div class="label-asterisk" style="font-size:13px; font-family:monospace;">★2</div>
+          <div class="label-mock-content" style="padding:10px;">
+            <div class="label-text-mock w40" style="height:5px; margin-bottom:4px;"></div>
+            <div class="label-barcode-mock" style="height:32px;"></div>
+            <div class="label-text-mock w70" style="height:6px;"></div>
+            <div style="height:3px;"></div>
+            <div class="label-text-mock w50" style="height:6px;"></div>
+          </div>
+          <div class="label-alias-mark" style="font-size:11px;">ครีมรักแร้</div>
+        </div>
+      </div>
+      <div>
+        <div class="label-caption" style="margin-bottom:6px; font-family:sans-serif;">ลาเบลปกติ (ไม่มีหมายเหตุ)</div>
+        <div class="label-page" style="width:200px;">
+          <div class="label-mock-content" style="padding:10px;">
+            <div class="label-text-mock w40" style="height:5px; margin-bottom:4px;"></div>
+            <div class="label-barcode-mock" style="height:32px;"></div>
+            <div class="label-text-mock w70" style="height:6px;"></div>
+            <div style="height:3px;"></div>
+            <div class="label-text-mock w50" style="height:6px;"></div>
+          </div>
+          <div class="label-alias-mark" style="font-size:11px;">ครีมรักแร้</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+</body>
+</html>
