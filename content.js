@@ -452,6 +452,56 @@
   }
   function saveLabelOverlay(cfg) { try { localStorage.setItem(LABEL_OVERLAY_KEY, JSON.stringify(cfg)); } catch {} }
 
+  // ── Print quality (sharp black vs aesthetic grey) ──
+  // Most thermal printers and budget laser printers can't render sub-50%
+  // greys cleanly — text washes out and hairline borders disappear. Sharp
+  // mode (default) clamps every grey to black or near-black with full opacity
+  // so the output is always legible. Grey mode preserves the designer-style
+  // greyscale hierarchy for users with high-DPI / colour laser printers.
+  const PRINT_QUALITY_KEY = 'qf_print_quality_v1';
+  function loadPrintQuality() {
+    try {
+      const v = localStorage.getItem(PRINT_QUALITY_KEY);
+      return v === 'grey' ? 'grey' : 'sharp'; // default sharp
+    } catch { return 'sharp'; }
+  }
+  function savePrintQuality(v) {
+    try { localStorage.setItem(PRINT_QUALITY_KEY, v === 'grey' ? 'grey' : 'sharp'); } catch {}
+  }
+  // Returns a colour palette + opacity bundle keyed by the user's print-quality
+  // preference. Callers should resolve this once at the top of a render fn so
+  // a mid-render setting flip can't half-apply.
+  function getPrintColors() {
+    const { rgb } = window.PDFLib;
+    const mode = loadPrintQuality();
+    if (mode === 'sharp') {
+      return {
+        mode,
+        BLACK:  rgb(0, 0, 0),
+        DARK:   rgb(0, 0, 0),          // was 0.15
+        MID:    rgb(0, 0, 0),          // was 0.35
+        LIGHT:  rgb(0.20, 0.20, 0.20), // keep slight tonal step for hierarchy
+        RED:    rgb(0.78, 0.12, 0.12),
+        PALE:   rgb(0.93, 0.93, 0.93),
+        BORDER: rgb(0.45, 0.45, 0.45),
+        OPACITY: 1.0,
+        STROKE_OPACITY: 1.0,
+      };
+    }
+    return {
+      mode,
+      BLACK:  rgb(0, 0, 0),
+      DARK:   rgb(0.15, 0.15, 0.15),
+      MID:    rgb(0.35, 0.35, 0.35),
+      LIGHT:  rgb(0.55, 0.55, 0.55),
+      RED:    rgb(0.78, 0.12, 0.12),
+      PALE:   rgb(0.95, 0.95, 0.95),
+      BORDER: rgb(0.70, 0.70, 0.70),
+      OPACITY: 0.85,
+      STROKE_OPACITY: 0.90,
+    };
+  }
+
   // Calibrated J&T mask rects (bottom-left PDF coords, A6 298×420pt, pixel-scanned @ 2x).
   // Side columns extended to y=0 (page bottom) to fully cover vertical tracking
   // numbers that overflow below the previous y=38 floor (≈5 extra chars visible).
@@ -3715,7 +3765,14 @@
     }
 
     const lo = loadLabelOverlay();
-    const OP = Math.min(lo.opacity ?? 0.85, 0.90);
+    const printColors = getPrintColors();
+    // §Print quality: sharp mode forces full opacity (1.0) regardless of the
+    // legacy slider value — thermal/laser printers can't render greys cleanly.
+    // Grey mode honours the user's saved opacity (capped at 0.90 to preserve
+    // some translucency for the designer-style aesthetic).
+    const OP = printColors.mode === 'sharp'
+      ? 1.0
+      : Math.min(lo.opacity ?? 0.85, 0.90);
 
     // Pre-embed shop image once for all pages
     let shopImg = null;
@@ -3830,8 +3887,9 @@
         }
       }
 
-      // ── Alias/product label — opacity reduced a further 10% (×0.9) vs global OP
-      const ALIAS_OP = OP * 0.9;
+      // ── Alias/product label — sharp mode runs at full opacity (1.0) for
+      // thermal-printer legibility; grey mode keeps the soft -10% bleed.
+      const ALIAS_OP = printColors.mode === 'sharp' ? 1.0 : OP * 0.9;
       if (lines?.mode === 'single') {
         if (lines.secondary) {
           draw(page, lines.primary, 4 + smallSize + 2, bigSize, { stroke: true, opacity: ALIAS_OP });
@@ -3852,7 +3910,7 @@
         const wWidth = font.widthOfTextAtSize(workerName, wSize);
         const wX = Math.max(6, pw - wWidth - 6);
         const wY = ph - wSize - 6;
-        const strokeOp = Math.min(OP + 0.05, 0.95);
+        const strokeOp = printColors.STROKE_OPACITY;
         for (const [dx, dy] of [[-1,0],[1,0],[0,-1],[0,1]]) {
           page.drawText(workerName, { x: wX + dx, y: wY + dy, size: wSize, font, color: rgb(1,1,1), opacity: strokeOp });
         }
@@ -3873,11 +3931,13 @@
       const sellerMap = (noteMap && noteMap.seller) ? noteMap.seller : null;
       const noteSize = Math.min(ph * 0.032, 12);
       const noteY    = ph - noteSize - 3;
+      const _noteStrokeOp = printColors.mode === 'sharp' ? 1.0 : 0.8;
+      const _noteFillOp   = printColors.mode === 'sharp' ? 1.0 : 0.78;
       const drawNoteBadge = (text, x) => {
         for (const [dx, dy] of [[-1,0],[1,0],[0,-1],[0,1]]) {
-          page.drawText(text, { x: x+dx, y: noteY+dy, size: noteSize, font, color: rgb(1,1,1), opacity: 0.8 });
+          page.drawText(text, { x: x+dx, y: noteY+dy, size: noteSize, font, color: rgb(1,1,1), opacity: _noteStrokeOp });
         }
-        page.drawText(text, { x, y: noteY, size: noteSize, font, color: rgb(0,0,0), opacity: 0.78 });
+        page.drawText(text, { x, y: noteY, size: noteSize, font, color: rgb(0,0,0), opacity: _noteFillOp });
         return font.widthOfTextAtSize(text, noteSize);
       };
       let noteCursorX = 4;
@@ -4993,12 +5053,13 @@
   // Overflow to page 2 is allowed when cells don't fit (continuation header).
   async function renderMultiSkuDivider(pdfDoc, { W, H }, payload, font, workerName, assigneeKind) {
     const { rgb } = window.PDFLib;
-    const BLACK = rgb(0, 0, 0);
-    const DARK  = rgb(0.15, 0.15, 0.15);
-    const MID   = rgb(0.35, 0.35, 0.35);
-    const LIGHT = rgb(0.55, 0.55, 0.55);
-    const RED   = rgb(0.78, 0.12, 0.12);
-    const PALE  = rgb(0.95, 0.95, 0.95);
+    const _printColors = getPrintColors();
+    const BLACK = _printColors.BLACK;
+    const DARK  = _printColors.DARK;
+    const MID   = _printColors.MID;
+    const LIGHT = _printColors.LIGHT;
+    const RED   = _printColors.RED;
+    const PALE  = _printColors.PALE;
     const WHITE = rgb(1, 1, 1);
 
     const skus = payload.skus;
@@ -5307,10 +5368,11 @@
       aliasScale:  mult('alias'),
       imageFirst:  !!eff.imageFirst,
     };
-    const BLACK = rgb(0, 0, 0);
-    const DARK = rgb(0.15, 0.15, 0.15);
-    const MID = rgb(0.35, 0.35, 0.35);
-    const LIGHT = rgb(0.55, 0.55, 0.55);
+    const _printColors = getPrintColors();
+    const BLACK = _printColors.BLACK;
+    const DARK = _printColors.DARK;
+    const MID = _printColors.MID;
+    const LIGHT = _printColors.LIGHT;
 
     // --- Edge margin (replaces old black banner) ---
     // Removed solid black banners (top+bottom @ 20pt each): thermal printers
@@ -5629,8 +5691,9 @@
 
   function renderPickingHeader(page, headerMeta, font, W, H, pageNum, pageCount) {
     const { rgb } = window.PDFLib;
-    const black = rgb(0, 0, 0);
-    const grey = rgb(0.4, 0.4, 0.4);
+    const _printColors = getPrintColors();
+    const black = _printColors.BLACK;
+    const grey = _printColors.MID;
 
     // Title
     page.drawText('Picking List', { x: 24, y: H - 36, size: 24, font, color: black });
@@ -5719,9 +5782,10 @@
   // Column header bar for picking list table.
   function renderPickingColumnHeaders(page, W, y, font) {
     const { rgb } = window.PDFLib;
+    const _printColors = getPrintColors();
     const PAD = 10;
     const rowH = 14;
-    const grey = rgb(0.5, 0.5, 0.5);
+    const grey = _printColors.MID;
     const nameW = Math.max(60, W - PAD * 2 - 16 - 70 - 30);
     page.drawRectangle({ x: 0, y: y - rowH, width: W, height: rowH, color: rgb(0.92, 0.92, 0.92) });
     page.drawText('#',         { x: PAD,                   y: y - 10, size: 7, font, color: grey });
@@ -5734,8 +5798,9 @@
   // Unified compact table row for picking list (replaces tabular + compact renderers).
   function renderPickingRowTable(page, row, y, W, font) {
     const { rgb } = window.PDFLib;
-    const black = rgb(0, 0, 0);
-    const grey  = rgb(0.5, 0.5, 0.5);
+    const _printColors = getPrintColors();
+    const black = _printColors.BLACK;
+    const grey  = _printColors.MID;
     const rowH  = 28;
     const PAD   = 10;
     const nameW = Math.max(60, W - PAD * 2 - 16 - 70 - 30);
@@ -5745,7 +5810,7 @@
     }
 
     // Row number
-    page.drawText(String(row.no), { x: PAD, y: y - 10, size: 8, font, color: rgb(0.65, 0.65, 0.65) });
+    page.drawText(String(row.no), { x: PAD, y: y - 10, size: 8, font, color: _printColors.mode === 'sharp' ? black : rgb(0.65, 0.65, 0.65) });
 
     // Alias (9pt, truncate to nameW)
     const aliasRaw = row.alias || shortName(row.officialName || '');
@@ -5824,10 +5889,11 @@
   // payload = { alias, officialName, variantName, carrierName, buyerNotes, sellerNotes }
   async function buildNoteZoneDividerPage(pdfDoc, { W, H }, payload, font) {
     const { rgb } = window.PDFLib;
-    const BLACK = rgb(0, 0, 0);
-    const DARK  = rgb(0.15, 0.15, 0.15);
-    const MID   = rgb(0.4, 0.4, 0.4);
-    const LIGHT = rgb(0.6, 0.6, 0.6);
+    const _printColors = getPrintColors();
+    const BLACK = _printColors.BLACK;
+    const DARK  = _printColors.DARK;
+    const MID   = _printColors.MID;
+    const LIGHT = _printColors.LIGHT;
     const PAD   = 14;
     const FOOTER_RESERVE = 18; // keep room for timestamp footer
     const COMPACT_THRESHOLD = 6; // per-section: >N → inline reflow
@@ -7582,6 +7648,7 @@
               <button id="qf-menu-csv">ดาวน์โหลดประวัติ CSV</button>
               <button id="qf-menu-plan">🎨 วางแผน</button>
               <button id="qf-menu-pdf-templates">🏷️ ปรับแต่งฉลาก</button>
+              <button id="qf-menu-print-quality">🖨️ ตั้งค่ากระดาษ</button>
             </div>
           </div>
           <button id="qf-toggle-btn" title="ย่อ/ขยาย">−</button>
@@ -7697,6 +7764,14 @@
         e.stopPropagation();
         settingsMenu.style.display = 'none';
         openLabelOverlaySettings();
+      });
+    }
+    const printQualityBtn = document.getElementById('qf-menu-print-quality');
+    if (printQualityBtn) {
+      printQualityBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        settingsMenu.style.display = 'none';
+        openPrintQualityModal();
       });
     }
     renderHistoryBadge();
@@ -11692,6 +11767,82 @@
   }
 
   // ==================== LABEL OVERLAY SETTINGS ====================
+
+  // §Print quality modal — choose between sharp-black (max contrast for thermal/laser
+  // printers) and aesthetic-grey (designer-style, requires fine printer for legibility).
+  // Persists in `qf_print_quality_v1`. Default = sharp.
+  function openPrintQualityModal() {
+    document.querySelectorAll('.qf-pq-overlay').forEach(e => e.remove());
+    const current = loadPrintQuality();
+    const overlay = document.createElement('div');
+    overlay.className = 'qf-modal-overlay qf-pq-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;z-index:2147483646;';
+    overlay.innerHTML = `
+      <div class="qf-modal" role="dialog" aria-label="ตั้งค่ากระดาษ" style="background:#fff;border-radius:12px;width:min(440px,92vw);box-shadow:0 20px 60px rgba(0,0,0,0.35);overflow:hidden;font-family:system-ui,'Sarabun',sans-serif;">
+        <div class="qf-modal-header" style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #eee;font-weight:600;font-size:15px;">
+          <span>🖨️ ตั้งค่ากระดาษ</span>
+          <button class="qf-pq-close" style="border:0;background:transparent;font-size:18px;cursor:pointer;color:#666;">✕</button>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;gap:10px;">
+          <div style="font-size:12px;color:#666;line-height:1.5;">
+            ตั้งค่าความเข้มของข้อความ/ใบคั่น/picking list ให้เหมาะกับเครื่องพิมพ์
+          </div>
+          <label class="qf-pq-opt" data-val="sharp" style="display:flex;gap:10px;padding:12px;border:2px solid ${current==='sharp'?'#fe2c55':'#ddd'};border-radius:10px;cursor:pointer;align-items:flex-start;">
+            <input type="radio" name="qf-pq" value="sharp" ${current==='sharp'?'checked':''} style="margin-top:3px;" />
+            <div style="flex:1;">
+              <div style="font-weight:600;font-size:14px;color:#222;">สีดำล้วน (ชัดเจน)</div>
+              <div style="font-size:12px;color:#666;line-height:1.5;margin-top:2px;">
+                opacity 100% · ไม่มีเทาอ่อน · เหมาะกับเครื่องพิมพ์ความร้อน / เลเซอร์ทั่วไป
+                <br>แนะนำสำหรับ <b>การพิมพ์ฉลากปริมาณมาก</b>
+              </div>
+            </div>
+          </label>
+          <label class="qf-pq-opt" data-val="grey" style="display:flex;gap:10px;padding:12px;border:2px solid ${current==='grey'?'#fe2c55':'#ddd'};border-radius:10px;cursor:pointer;align-items:flex-start;">
+            <input type="radio" name="qf-pq" value="grey" ${current==='grey'?'checked':''} style="margin-top:3px;" />
+            <div style="flex:1;">
+              <div style="font-weight:600;font-size:14px;color:#222;">สีเทาสวยงาม (ดีไซน์)</div>
+              <div style="font-size:12px;color:#666;line-height:1.5;margin-top:2px;">
+                ใช้เฉดเทาเป็นลำดับชั้น · ดูสวยกว่าแต่ <b>เครื่องพิมพ์ต้องละเอียด</b>
+                <br>opacity ~85% (ตาม slider เดิม)
+              </div>
+            </div>
+          </label>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid #eee;background:#fafafa;">
+          <button class="qf-pq-cancel" style="padding:8px 16px;border:1px solid #ddd;background:#fff;border-radius:8px;cursor:pointer;font-size:13px;">ยกเลิก</button>
+          <button class="qf-pq-save" style="padding:8px 16px;border:0;background:#fe2c55;color:#fff;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;">บันทึก</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const close = () => overlay.remove();
+    overlay.querySelector('.qf-pq-close').addEventListener('click', close);
+    overlay.querySelector('.qf-pq-cancel').addEventListener('click', close);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+    // Click anywhere on the row toggles selection (for nicer UX)
+    overlay.querySelectorAll('.qf-pq-opt').forEach(row => {
+      row.addEventListener('click', (e) => {
+        const v = row.getAttribute('data-val');
+        const r = overlay.querySelector(`input[name="qf-pq"][value="${v}"]`);
+        if (r) r.checked = true;
+        // Update border highlight
+        overlay.querySelectorAll('.qf-pq-opt').forEach(other => {
+          const isOn = other.getAttribute('data-val') === v;
+          other.style.border = `2px solid ${isOn ? '#fe2c55' : '#ddd'}`;
+        });
+      });
+    });
+
+    overlay.querySelector('.qf-pq-save').addEventListener('click', () => {
+      const checked = overlay.querySelector('input[name="qf-pq"]:checked');
+      const next = checked?.value === 'grey' ? 'grey' : 'sharp';
+      savePrintQuality(next);
+      close();
+      try { showToast(next === 'sharp' ? 'บันทึก: สีดำล้วน (ชัดเจน)' : 'บันทึก: สีเทาสวยงาม'); } catch {}
+    });
+  }
 
   function openLabelOverlaySettings() {
     document.querySelectorAll('.qf-lo-overlay').forEach(e => e.remove());
