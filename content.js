@@ -1,11 +1,27 @@
 (() => {
   'use strict';
+  // VERSION MARKER — bumped when testing new features in DevTools.
+  // Increment this string to confirm the browser picked up the freshest
+  // content.js after reloading the extension in chrome://extensions.
+  window.__qfContentScriptBuild = 'address-book-eye-v2';
 
   // ==================== FETCH HOOK (runs at document_start, before TikTok saves window.fetch) ====================
   let _apiListUrl = null;
   let _apiListBodyTemplate = null;
   let _labelsApiUrl = null;
   let _labelsApiBodyTemplate = null;
+  // Order detail (single order) — captured to backfill address book on-demand.
+  // Only populated when TikTok itself fires /order/get (user opened a detail
+  // view). Until captured, the pre-print backfill is a no-op.
+  let _orderGetUrl = null;
+  let _orderGetBodyTemplate = null;
+  // Buyer contact info — the REAL unmask endpoint fired when user clicks the
+  // 👁 eye icon on the order detail page. One POST per field
+  // (contact_info_type: 0=name, 1=address, 2=phone, 3=nickname). Response
+  // shape is per-field: data.plain_text_name / plain_text_phone_number /
+  // plain_text_nickname / plain_text_address{items,region,districts}.
+  let _buyerContactUrl = null;
+  let _buyerContactBodyTemplate = null;
   // Shopee captured URLs/bodies
   let _shopeeIndexUrl = null;
   let _shopeeIndexBody = null;
@@ -59,6 +75,38 @@
       captureBody(b => { if (!_labelsApiBodyTemplate) _labelsApiBodyTemplate = b; });
     }
 
+    // Order detail (single order) — used for pre-print address backfill.
+    // URL shape seen in the wild: /api/fulfillment/order/get (TikTok may
+    // rotate the prefix, so we do substring match on "fulfillment/order/get").
+    const isOrderGet = /fulfillment\/order\/get\b|\/order\/get_detail\b/.test(url);
+    if (isOrderGet && !_orderGetUrl) {
+      _orderGetUrl = url;
+      captureBody(b => { if (!_orderGetBodyTemplate) _orderGetBodyTemplate = b; });
+    }
+
+    // Buyer contact info (eye-icon decrypt) — capture URL + template body.
+    // The body schema we observed: { main_order_id, contact_info_type }.
+    // We also keep a resolvable request-body promise to pair with the response
+    // below, because the response only contains the decrypted field value and
+    // NOT the main_order_id — so we must read it from the request.
+    const isBuyerContact = /\/fulfillment\/orders\/buyer_contact_info\/get\b/.test(url);
+    let _buyerContactBodyPromise = null;
+    if (isBuyerContact) {
+      if (!_buyerContactUrl) {
+        _buyerContactUrl = url;
+        captureBody(b => { if (!_buyerContactBodyTemplate) _buyerContactBodyTemplate = b; });
+      }
+      if (rawBodyStr) {
+        _buyerContactBodyPromise = Promise.resolve().then(() => {
+          try { return JSON.parse(rawBodyStr); } catch (e) { return null; }
+        });
+      } else if (bodyPromise) {
+        _buyerContactBodyPromise = bodyPromise.then(t => {
+          try { return JSON.parse(t); } catch (e) { return null; }
+        });
+      }
+    }
+
     // Shopee APIs (some use fetch but most XHR — both branches handled)
     if (!_shopeeIndexUrl && url.includes('/api/v3/order/search_order_list_index')) {
       _shopeeIndexUrl = url;
@@ -69,7 +117,35 @@
       captureBody(b => { if (!_shopeeCardBody) _shopeeCardBody = b; });
     }
 
-    return await _origFetch.apply(this, args);
+    const resp = await _origFetch.apply(this, args);
+
+    // Passive response sniffer for /order/get — clone and parse off-thread
+    // so we never block the response path or mutate anything TikTok consumes.
+    // We ONLY save address data when response is not masked (button_status!=3).
+    if (isOrderGet && resp && resp.ok) {
+      try {
+        resp.clone().json()
+          .then(j => { try { captureAddressFromOrderGet(j); } catch (e) {} })
+          .catch(() => {});
+      } catch (e) {}
+    }
+
+    // Passive response sniffer for buyer_contact_info/get — when the user
+    // clicks an 👁 eye icon, TikTok fires this endpoint and the response body
+    // contains ONE plain-text field. We pair it with the captured request body
+    // (which carries main_order_id + contact_info_type) and merge the field
+    // into the address book record keyed by orderId.
+    if (isBuyerContact && resp && resp.ok && _buyerContactBodyPromise) {
+      try {
+        Promise.all([_buyerContactBodyPromise, resp.clone().json()])
+          .then(([reqBody, respJson]) => {
+            try { captureBuyerContactFieldResponse(reqBody, respJson); } catch (e) {}
+          })
+          .catch(() => {});
+      } catch (e) {}
+    }
+
+    return resp;
   };
 
   // XMLHttpRequest hook — same purpose as the fetch hook above. Shopee routes all
@@ -102,12 +178,17 @@
   const DONE_TIMEOUT_MS = 30 * 60 * 1000;
   const LABEL_STATUS_PRINTED     = 50;
   const LABEL_STATUS_NOT_PRINTED = 30;
+  // TikTok flags orders as "การพิมพ์ไม่สำเร็จ" (print failed) after a prior
+  // generate-doc call errored server-side. Treated as its own segment so it
+  // doesn't overlap with 'not_printed' (30) or 'printed' (50).
+  const LABEL_STATUS_PRINT_FAILED = 40;
 
   // ==================== STATE ====================
   const ALIAS_STORAGE_KEY = 'qf_product_aliases_v1';
   const VARIANT_ALIAS_STORAGE_KEY = 'qf_variant_aliases_v1';
   const WORKERS_STORAGE_KEY = 'qf_workers_v1';
   const OVERLAY_PREF_KEY = 'qf_overlay_enabled_v1';
+  const ADDRESS_CAPTURE_PREF_KEY = 'qf_address_capture_v1';
   function loadOverlayPref() {
     const v = localStorage.getItem(OVERLAY_PREF_KEY);
     return v === null ? true : v === 'true';
@@ -329,7 +410,16 @@
     overlayEnabled: loadOverlayPref(),
     workers: loadWorkers(),          // [{id, name, icon}] คนแพ็ค
     sellerEmail: null,               // §7.6: populated at widget boot from TikTok session cookie
+    addressCaptureEnabled: loadAddressCapturePref(), // pre-print address book backfill
   };
+
+  function loadAddressCapturePref() {
+    const v = localStorage.getItem(ADDRESS_CAPTURE_PREF_KEY);
+    return v === null ? true : v === 'true'; // default ON
+  }
+  function saveAddressCapturePref(enabled) {
+    localStorage.setItem(ADDRESS_CAPTURE_PREF_KEY, String(!!enabled));
+  }
 
   function loadAliases() {
     try {
@@ -564,6 +654,590 @@
     }
   }
 
+  // ==================== ADDRESS BOOK (captures unmasked recipient data BEFORE print) ====================
+  //
+  // Why: once a label is printed + TTS'd, TikTok masks the recipient fields
+  // in every subsequent /order/get response (button_status:3, mask_infos set).
+  // So we hook the call path BEFORE the first print to snapshot the unmasked
+  // data into an IndexedDB address book. Two capture sources:
+  //   1. Passive sniff — the fetch hook clones every /order/get response and
+  //      parses it off-thread (no mutation, no extra traffic).
+  //   2. Active backfill — right before buildChunkPdf calls the generate API,
+  //      we fire /order/get for any IDs we haven't captured yet (throttled,
+  //      only when we have the captured template so we mimic TikTok's exact
+  //      shape).
+  //
+  // Schema: {
+  //   orderId, fulfillUnitId, recipientName, recipientPhone,
+  //   addressDetail, subDistrict, district, province, zipcode, countryCode,
+  //   carrier, productNames, capturedAt, source('sniff'|'backfill'), isMasked
+  // }
+  //
+  // 90-day rolling window; orderId is the primary index (updates replace).
+
+  const ADDRESS_BOOK_DB = 'qf_address_book';
+  const ADDRESS_BOOK_STORE = 'addresses';
+  const ADDRESS_BOOK_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+  let _addressBookDb = null;
+
+  function openAddressBookDb() {
+    if (_addressBookDb) return Promise.resolve(_addressBookDb);
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(ADDRESS_BOOK_DB, 1);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(ADDRESS_BOOK_STORE)) {
+          const store = db.createObjectStore(ADDRESS_BOOK_STORE, { keyPath: 'orderId' });
+          store.createIndex('fulfillUnitId', 'fulfillUnitId', { unique: false });
+          store.createIndex('capturedAt', 'capturedAt', { unique: false });
+          store.createIndex('province', 'province', { unique: false });
+        }
+      };
+      req.onsuccess = (e) => { _addressBookDb = e.target.result; resolve(_addressBookDb); };
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  // Extract the first non-null string among possible field paths. Accepts
+  // either direct key access or dotted paths (for nested lookups).
+  function pick(obj, ...keys) {
+    if (!obj) return null;
+    for (const k of keys) {
+      const parts = k.split('.');
+      let cur = obj;
+      for (const p of parts) {
+        if (cur == null) { cur = null; break; }
+        cur = cur[p];
+      }
+      if (cur != null && cur !== '') return cur;
+    }
+    return null;
+  }
+
+  // Parse a single TikTok order detail object into our address book shape.
+  // Returns null if the essential recipient block is missing or fully masked.
+  function parseOrderDetail(od) {
+    if (!od || typeof od !== 'object') return null;
+
+    const orderId = String(pick(od, 'order_id', 'main_order_id', 'orderId') || '');
+    if (!orderId) return null;
+
+    // Possible recipient containers seen across TikTok API versions
+    const r = od.recipient_address || od.recipient || od.shipping_info
+           || od.receiver_info || od.buyer_info || od.delivery_address || {};
+
+    const name = String(pick(r, 'name', 'receiver_name', 'recipient_name', 'full_name',
+                             'first_name') || '').trim();
+    const phone = String(pick(r, 'phone', 'phone_number', 'mobile', 'tel',
+                              'receiver_phone') || '').trim();
+
+    // Region fields: TikTok usually returns an array like
+    //   region_fields: [{ level: 1, name: 'กรุงเทพ' }, { level: 2, name: 'เขต…' }, ...]
+    let province = null, district = null, subDistrict = null, zipcode = null, countryCode = null;
+    const regions = r.region_fields || r.regions || od.region_fields || [];
+    if (Array.isArray(regions)) {
+      for (const f of regions) {
+        const lvl = f.level ?? f.region_level;
+        const nm  = f.name || f.region_name;
+        if (!nm) continue;
+        if (lvl === 1 || lvl === 'province' || lvl === 'region_level_1') province = nm;
+        else if (lvl === 2 || lvl === 'city' || lvl === 'district' || lvl === 'region_level_2') district = nm;
+        else if (lvl === 3 || lvl === 'subdistrict' || lvl === 'region_level_3') subDistrict = nm;
+      }
+    }
+    // Fallback flat fields
+    province = province || pick(r, 'province', 'state', 'region_name_level_1', 'city_name');
+    district = district || pick(r, 'district', 'city', 'region_name_level_2');
+    subDistrict = subDistrict || pick(r, 'sub_district', 'subdistrict', 'region_name_level_3', 'ward');
+    zipcode = pick(r, 'zipcode', 'post_code', 'postal_code', 'zip');
+    countryCode = pick(r, 'country_code', 'region_code');
+
+    const detail = pick(r, 'detail_address', 'address_detail', 'address_line_1',
+                           'address_line1', 'full_address', 'address', 'street');
+
+    // Mask detection: TikTok's mask_infos or button_status:3 signal
+    const buttonStatus = pick(od, 'button_status', 'address_button_status');
+    const maskInfos    = od.mask_infos || od.address_mask_infos;
+    const looksMasked = buttonStatus === 3
+                      || (Array.isArray(maskInfos) && maskInfos.length > 0)
+                      || /\*{2,}/.test(name) || /\*{2,}/.test(detail || '');
+
+    // Carrier + first product name for context
+    const carrier = pick(od, 'shipping_provider_name', 'shipping_provider.name',
+                             'delivery_module.shipping_provider_name');
+    const skus = od.sku_module || od.items || od.item_list || [];
+    const productNames = Array.isArray(skus)
+      ? skus.map(s => s.product_name || s.productName || '').filter(Boolean).slice(0, 3).join(' | ')
+      : null;
+
+    const fulfillUnitId = String(pick(od, 'fulfill_unit_id', 'fulfillUnitId',
+                                          'label_module.fulfill_unit_id') || '');
+
+    // Reject if nothing useful was extracted
+    if (!name && !phone && !detail && !province) return null;
+
+    return {
+      orderId,
+      fulfillUnitId: fulfillUnitId || null,
+      recipientName: name || null,
+      recipientPhone: phone || null,
+      addressDetail: detail || null,
+      subDistrict, district, province, zipcode, countryCode,
+      carrier: carrier || null,
+      productNames: productNames || null,
+      capturedAt: Date.now(),
+      isMasked: looksMasked,
+      source: 'sniff',
+    };
+  }
+
+  // Entry point: response sniffer in the fetch hook calls this with the
+  // parsed JSON body of /order/get. Handles both single-order and array shapes.
+  function captureAddressFromOrderGet(json) {
+    if (!json || json.code !== 0) return;
+    const d = json.data || json.result || {};
+    // Common shapes: main_order[0], order_list[], order (single)
+    const orders = d.main_order || d.orders || d.order_list || d.list
+                 || (d.order ? [d.order] : []) || [];
+    const parsed = [];
+    for (const od of Array.isArray(orders) ? orders : [orders]) {
+      const rec = parseOrderDetail(od);
+      if (rec) parsed.push(rec);
+    }
+    if (parsed.length) {
+      saveAddressBatch(parsed, 'sniff')
+        .then(() => { try { refreshAddressBookBadge(); } catch (e) {} })
+        .catch(e => {});
+    }
+  }
+
+  // ==================== BUYER CONTACT INFO (EYE-ICON ENDPOINT) ====================
+  // /api/fulfillment/orders/buyer_contact_info/get — the REAL decrypt call
+  // fired when the user clicks the 👁 eye icon next to a masked field on the
+  // order detail page. One POST per field. Empirically observed shape:
+  //
+  //   Request:   { main_order_id: "...", contact_info_type: 0|1|2|3 }
+  //   Response:  { code: 0, data: { plain_text_*: ... } }
+  //
+  // Response keys per type:
+  //   0  →  plain_text_name           (string)
+  //   1  →  plain_text_address        (object: {items[], region, districts[]})
+  //   2  →  plain_text_phone_number   (string, e.g. "(+66)659549268")
+  //   3  →  plain_text_nickname       (string, e.g. "toeystory.tt")
+  //
+  // Because each call returns only one field, we MERGE the patch into the
+  // existing address-book record keyed by orderId.
+  const CONTACT_TYPE_NAME     = 0;
+  const CONTACT_TYPE_ADDRESS  = 1;
+  const CONTACT_TYPE_PHONE    = 2;
+  const CONTACT_TYPE_NICKNAME = 3;
+
+  // Parse the per-type response into a partial patch object. Returns null if
+  // the response body doesn't carry the expected field (e.g. wrong type or
+  // server returned an error wrapper we don't recognize).
+  function parseBuyerContactResponse(type, respData) {
+    if (!respData || typeof respData !== 'object') return null;
+    const patch = {};
+    if (type === CONTACT_TYPE_NAME && respData.plain_text_name) {
+      patch.recipientName = String(respData.plain_text_name).trim();
+    } else if (type === CONTACT_TYPE_PHONE && respData.plain_text_phone_number) {
+      patch.recipientPhone = String(respData.plain_text_phone_number).trim();
+    } else if (type === CONTACT_TYPE_NICKNAME && respData.plain_text_nickname) {
+      patch.buyerNickname = String(respData.plain_text_nickname).trim();
+    } else if (type === CONTACT_TYPE_ADDRESS && respData.plain_text_address) {
+      const addr = respData.plain_text_address;
+      const items = {};
+      if (Array.isArray(addr.items)) {
+        for (const it of addr.items) {
+          if (it && typeof it.key === 'string') items[it.key] = it.value;
+        }
+      }
+      // items keys observed: zipcode, address, address_detail, house_number
+      const detail = [items.house_number, items.address, items.address_detail]
+        .map(v => (v == null ? '' : String(v).trim()))
+        .filter(Boolean)
+        .join(' ');
+      patch.addressDetail = detail || null;
+      patch.zipcode = items.zipcode || null;
+      // districts[] ordering observed: [0]=province, [1]=district, [2]=subdistrict
+      const ds = Array.isArray(addr.districts) ? addr.districts : [];
+      if (ds[0]?.name) patch.province = String(ds[0].name).trim();
+      if (ds[1]?.name) patch.district = String(ds[1].name).trim();
+      if (ds[2]?.name) patch.subDistrict = String(ds[2].name).trim();
+      if (addr.region?.name) patch.countryCode = String(addr.region.name).trim();
+    } else {
+      return null;
+    }
+    return Object.keys(patch).length ? patch : null;
+  }
+
+  // Response-side entry point. Called with the paired request body + parsed
+  // response JSON from the fetch hook.
+  function captureBuyerContactFieldResponse(reqBody, respJson, fulfillUnitIdHint = null) {
+    if (!reqBody || !respJson) return;
+    // Detect both non-zero-code limits AND soft-reject (code:0 + rejection).
+    if (isRateLimitResponse(respJson)) {
+      recordRateLimitHit(respJson);
+      return;
+    }
+    if (respJson.code !== 0) return;
+    const orderId = String(reqBody.main_order_id || reqBody.order_id || '');
+    if (!orderId) return;
+    const type = Number(reqBody.contact_info_type);
+    const patch = parseBuyerContactResponse(type, respJson.data || {});
+    if (!patch) return;
+    patch.capturedAt = Date.now();
+    patch.isMasked = false; // we have plaintext, so definitively unmasked
+    patch.source = 'eye';
+    mergeAddressPatch(orderId, patch, fulfillUnitIdHint)
+      .then(() => { try { refreshAddressBookBadge(); } catch (e) {} })
+      .catch(() => {});
+  }
+
+  // Merge a partial field patch into the address book record, preserving
+  // existing unmasked fields from prior calls (since buyer_contact_info fires
+  // one call per field, a full record accumulates over 4 calls).
+  async function mergeAddressPatch(orderId, patch, fulfillUnitIdHint = null) {
+    try {
+      const db = await openAddressBookDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(ADDRESS_BOOK_STORE, 'readwrite');
+        const store = tx.objectStore(ADDRESS_BOOK_STORE);
+        const getReq = store.get(String(orderId));
+        getReq.onsuccess = () => {
+          const existing = getReq.result || { orderId: String(orderId) };
+          // Immutable merge — new patch wins per field, unmask flag sticks
+          // at unmasked once any unmasked patch arrived.
+          const merged = {
+            ...existing,
+            ...patch,
+            orderId: String(orderId),
+            fulfillUnitId: existing.fulfillUnitId || fulfillUnitIdHint || null,
+            isMasked: patch.isMasked === false ? false : (existing.isMasked !== true ? existing.isMasked : true),
+            capturedAt: patch.capturedAt || existing.capturedAt || Date.now(),
+            source: patch.source || existing.source || 'sniff',
+          };
+          store.put(merged);
+        };
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) {
+      console.warn('[QF] mergeAddressPatch failed:', e);
+    }
+  }
+
+  // ==================== RATE-LIMIT CIRCUIT BREAKER ====================
+  // User-confirmed: buyer_contact_info is rate-limited. Unknown exact threshold.
+  // Strategy: start conservative, learn from 429/code-error responses, back off
+  // exponentially, circuit-break for the rest of the session on repeated hits.
+  const RATE_LIMIT_STATE = {
+    consecutiveHits: 0,
+    totalHits: 0,
+    lastHitAt: 0,
+    backoffUntil: 0,        // epoch ms; skip all calls until this time
+    tripped: false,         // permanently disabled for this session
+    currentGapMs: 600,      // adaptive per-call gap (grows on each hit)
+    currentConcurrency: 1,  // adaptive concurrency (shrinks on each hit)
+  };
+
+  // Detect error codes / messages that signal rate limiting. TikTok returns
+  // non-zero code + message strings — we match on common substrings.
+  //
+  // CRITICAL: TikTok also uses a "soft reject" pattern — `code: 0` but
+  // `data.contact_customer_service: true` + `rejection_message` — meaning
+  // the quota is burned for PII (name/address/phone types 0/1/2). Nickname
+  // (type 3) is NOT protected so that call can still succeed with code:0.
+  // We treat soft-reject as a rate-limit hit too because hammering past it
+  // is pointless — the server will keep rejecting until quota resets
+  // (appears to be per-account per-day).
+  function isRateLimitResponse(respJson) {
+    if (!respJson) return false;
+    // Soft reject: server returns success code but refuses to hand out PII.
+    if (respJson.code === 0 && respJson.data && respJson.data.contact_customer_service === true) {
+      return true;
+    }
+    if (respJson.code === 0) return false;
+    const msg = String(respJson.message || respJson.msg || '').toLowerCase();
+    // Known substrings we've seen / likely to see. Kept conservative so a
+    // plain "not found" doesn't trip the breaker.
+    return /rate[\s_-]?limit|too many|frequently|request limit|qps|throttle|429/.test(msg)
+        || respJson.code === 429
+        || respJson.code === 50002 // arbitrary TikTok "too frequent" seen in other endpoints
+        || respJson.code === 50005;
+  }
+
+  function recordRateLimitHit(respJson) {
+    if (!isRateLimitResponse(respJson)) return;
+    RATE_LIMIT_STATE.consecutiveHits += 1;
+    RATE_LIMIT_STATE.totalHits += 1;
+    RATE_LIMIT_STATE.lastHitAt = Date.now();
+    // Exponential backoff: 2s, 4s, 8s, ..., cap 5 min
+    const backoff = Math.min(2000 * 2 ** (RATE_LIMIT_STATE.consecutiveHits - 1), 300000);
+    RATE_LIMIT_STATE.backoffUntil = Date.now() + backoff;
+    // Adaptive slow-down for subsequent calls
+    RATE_LIMIT_STATE.currentGapMs = Math.min(RATE_LIMIT_STATE.currentGapMs * 2, 10000);
+    RATE_LIMIT_STATE.currentConcurrency = 1;
+    if (RATE_LIMIT_STATE.consecutiveHits >= 3) {
+      // Three strikes within session → circuit-break. TikTok typically uses
+      // per-account per-day quota for PII reveals — the rejection will keep
+      // firing until the quota resets (appears to be ~24h).
+      RATE_LIMIT_STATE.tripped = true;
+      console.warn('[QF] buyer_contact_info quota exhausted. Backfill disabled until quota resets (typically ~24h).');
+      try { showToast('⚠️ สมุดที่อยู่: ดึงข้อมูลเกินโควต้ารายวัน → ปิดการดึงอัตโนมัติ (reset พรุ่งนี้)', 4500); } catch (e) {}
+    } else {
+      console.warn(`[QF] buyer_contact_info rate-limit hit #${RATE_LIMIT_STATE.consecutiveHits}, backing off ${backoff}ms`);
+    }
+  }
+
+  function recordRateLimitSuccess() {
+    if (RATE_LIMIT_STATE.consecutiveHits > 0) {
+      RATE_LIMIT_STATE.consecutiveHits = 0;
+      // Gentle recovery: shrink gap by 25% per success, floor 400ms
+      RATE_LIMIT_STATE.currentGapMs = Math.max(400, Math.floor(RATE_LIMIT_STATE.currentGapMs * 0.75));
+    }
+  }
+
+  function rateLimitGateOpen() {
+    if (RATE_LIMIT_STATE.tripped) return false;
+    if (Date.now() < RATE_LIMIT_STATE.backoffUntil) return false;
+    return true;
+  }
+
+  async function saveAddressBatch(records, source = 'sniff') {
+    if (!records.length) return;
+    try {
+      const db = await openAddressBookDb();
+      const cutoff = Date.now() - ADDRESS_BOOK_MAX_AGE_MS;
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(ADDRESS_BOOK_STORE, 'readwrite');
+        const store = tx.objectStore(ADDRESS_BOOK_STORE);
+        // Purge old records first
+        const idx = store.index('capturedAt');
+        idx.openCursor(IDBKeyRange.upperBound(cutoff)).onsuccess = function(e) {
+          const cur = e.target.result;
+          if (cur) { cur.delete(); cur.continue(); }
+        };
+        for (const r of records) {
+          // Don't overwrite an UNMASKED record with a MASKED one — we may have
+          // captured it earlier when the order was still pre-print.
+          const getReq = store.get(r.orderId);
+          getReq.onsuccess = () => {
+            const existing = getReq.result;
+            if (existing && !existing.isMasked && r.isMasked) return; // keep clean copy
+            store.put({ ...r, source });
+          };
+        }
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) {
+      console.warn('[QF] saveAddressBatch failed:', e);
+    }
+  }
+
+  async function getAddressByOrderId(orderId) {
+    try {
+      const db = await openAddressBookDb();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(ADDRESS_BOOK_STORE, 'readonly');
+        const req = tx.objectStore(ADDRESS_BOOK_STORE).get(String(orderId));
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      });
+    } catch (e) { return null; }
+  }
+
+  async function getAllAddresses() {
+    try {
+      const db = await openAddressBookDb();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(ADDRESS_BOOK_STORE, 'readonly');
+        const req = tx.objectStore(ADDRESS_BOOK_STORE).getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => reject(req.error);
+      });
+    } catch (e) { return []; }
+  }
+
+  async function clearAddressBook() {
+    try {
+      const db = await openAddressBookDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(ADDRESS_BOOK_STORE, 'readwrite');
+        tx.objectStore(ADDRESS_BOOK_STORE).clear();
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) {}
+  }
+
+  // Active backfill — called from buildChunkPdf right before the generate API.
+  // Prefers the eye-click endpoint (buyer_contact_info) because it's the ONLY
+  // endpoint that returns definitively-unmasked data. Falls back to /order/get
+  // when the eye-click template hasn't been captured yet.
+  //
+  // RATE LIMITING (user-confirmed hit during manual testing, exact threshold
+  // unknown): we start conservative and adapt. See RATE_LIMIT_STATE.
+  const ADDRESS_BACKFILL_CONCURRENCY = 1;   // start at 1 (serialize by default)
+  const ADDRESS_BACKFILL_GAP_MS_INIT = 600; // 600ms per call → ~100/min max
+  const ADDRESS_BACKFILL_MAX_PER_SESSION = 400; // hard cap, tune later
+  let _addressBackfillCount = 0;
+
+  async function tryBackfillAddresses(fulfillIds) {
+    if (!Array.isArray(fulfillIds) || !fulfillIds.length) return;
+    if (state.addressCaptureEnabled === false) return; // user-disabled
+    if (!rateLimitGateOpen()) return; // circuit-breaker open / backoff active
+
+    // Resolve orderIds from state.records (fulfillUnitId → orderIds) and
+    // determine which contact_info_type slots are still missing per order.
+    const tasks = [];
+    for (const fid of fulfillIds) {
+      const rec = state.records.get(fid);
+      if (!rec) continue;
+      const oids = rec.orderIds || [];
+      for (const oid of oids) {
+        const existing = await getAddressByOrderId(oid);
+        // Consider "fully captured" if we already have name+phone+address
+        // (the three fields we care about for reprint/claims workflow).
+        const full = existing && !existing.isMasked
+                     && existing.recipientName
+                     && existing.recipientPhone
+                     && existing.addressDetail;
+        if (full) continue;
+        const needTypes = [];
+        if (!existing?.recipientName)   needTypes.push(CONTACT_TYPE_NAME);
+        if (!existing?.addressDetail)   needTypes.push(CONTACT_TYPE_ADDRESS);
+        if (!existing?.recipientPhone)  needTypes.push(CONTACT_TYPE_PHONE);
+        // Nickname (type 3) is cheap info — only fetch if we have budget.
+        // Skipped in backfill; user sees it when they manually click an eye.
+        tasks.push({ orderId: String(oid), fulfillUnitId: String(fid), needTypes });
+      }
+    }
+    if (!tasks.length) return;
+
+    // Prefer eye-click endpoint; fall back to /order/get if template missing.
+    if (_buyerContactUrl && _buyerContactBodyTemplate) {
+      await tryBackfillViaBuyerContact(tasks);
+      return;
+    }
+    if (_orderGetUrl && _orderGetBodyTemplate) {
+      await tryBackfillViaOrderGet(tasks);
+    }
+  }
+
+  // Buyer-contact-info active backfill — fires ONE call per (order × type).
+  // Self-throttled by RATE_LIMIT_STATE which grows the gap and shrinks the
+  // concurrency on each 429/code-error.
+  async function tryBackfillViaBuyerContact(tasks) {
+    // Flatten into per-field calls so throttling is uniform.
+    const calls = [];
+    for (const t of tasks) {
+      for (const type of t.needTypes) {
+        calls.push({ orderId: t.orderId, fulfillUnitId: t.fulfillUnitId, type });
+      }
+    }
+    if (!calls.length) return;
+
+    // Apply session budget cap so a single print of 1000 labels can't burn
+    // 4000 API calls in one go.
+    const budgetRemaining = Math.max(0, ADDRESS_BACKFILL_MAX_PER_SESSION - _addressBackfillCount);
+    if (budgetRemaining <= 0) {
+      console.warn('[QF] buyer_contact_info session budget exhausted, skipping backfill');
+      return;
+    }
+    const queue = calls.slice(0, budgetRemaining);
+
+    let i = 0;
+    const runWorker = async () => {
+      while (i < queue.length) {
+        if (!rateLimitGateOpen()) break; // trip detected mid-flight → abort
+        const c = queue[i++];
+        try {
+          const body = {
+            ...(_buyerContactBodyTemplate || {}),
+            main_order_id: c.orderId,
+            contact_info_type: c.type,
+          };
+          const r = await _origFetch.call(window, _buyerContactUrl, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          _addressBackfillCount += 1;
+          if (!r.ok) continue;
+          const j = await r.json();
+          if (isRateLimitResponse(j)) {
+            recordRateLimitHit(j);
+            break; // drop remaining calls in this worker
+          }
+          recordRateLimitSuccess();
+          captureBuyerContactFieldResponse(body, j, c.fulfillUnitId);
+          await sleep(RATE_LIMIT_STATE.currentGapMs);
+        } catch (e) { /* best-effort */ }
+      }
+    };
+    const workers = Array.from(
+      { length: Math.max(1, RATE_LIMIT_STATE.currentConcurrency) },
+      runWorker
+    );
+    await Promise.all(workers);
+  }
+
+  // Legacy /order/get fallback — kept for when eye-click template isn't yet
+  // captured. Same conservative throttle as buyer_contact_info path.
+  async function tryBackfillViaOrderGet(tasks) {
+    let i = 0;
+    const runWorker = async () => {
+      while (i < tasks.length) {
+        if (!rateLimitGateOpen()) break;
+        const t = tasks[i++];
+        try {
+          const body = { ...(_orderGetBodyTemplate || {}), order_id: t.orderId, order_id_list: [t.orderId] };
+          const r = await _origFetch.call(window, _orderGetUrl, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          if (!r.ok) continue;
+          const j = await r.json();
+          if (isRateLimitResponse(j)) { recordRateLimitHit(j); break; }
+          recordRateLimitSuccess();
+          captureAddressFromOrderGet(j);
+          await sleep(RATE_LIMIT_STATE.currentGapMs);
+        } catch (e) { /* best-effort */ }
+      }
+    };
+    const workers = Array.from(
+      { length: Math.max(1, RATE_LIMIT_STATE.currentConcurrency) },
+      runWorker
+    );
+    await Promise.all(workers);
+  }
+  // `sleep` helper is declared later in the file (const sleep = ...); both
+  // declarations share the IIFE scope, so we reuse the existing one via
+  // hoisting semantics of `const` — no redeclaration here.
+
+  // CSV export — standardized column order
+  function buildAddressBookCsv(records) {
+    const cols = ['orderId', 'fulfillUnitId', 'recipientName', 'recipientPhone',
+                  'addressDetail', 'subDistrict', 'district', 'province',
+                  'zipcode', 'carrier', 'productNames', 'isMasked', 'capturedAt'];
+    const esc = v => {
+      if (v == null) return '';
+      const s = String(v).replace(/"/g, '""');
+      return /[",\n]/.test(s) ? `"${s}"` : s;
+    };
+    const header = cols.join(',');
+    const rows = records.map(r => cols.map(c => {
+      if (c === 'capturedAt') return r.capturedAt ? new Date(r.capturedAt).toISOString() : '';
+      if (c === 'isMasked') return r.isMasked ? '1' : '0';
+      return esc(r[c]);
+    }).join(','));
+    // BOM for Excel Thai compatibility
+    return '\uFEFF' + [header, ...rows].join('\n');
+  }
+
   function historyRecentCount(windowMs = 24 * 60 * 60 * 1000) {
     const cutoff = Date.now() - windowMs;
     return loadHistory().filter(e => e.timestamp >= cutoff).length;
@@ -770,6 +1444,147 @@
     document.addEventListener('keydown', onKey);
   }
 
+  // ==================== ADDRESS BOOK MODAL ====================
+  function renderAddressBookBadge(count) {
+    const btn = document.getElementById('qf-addrbook-btn');
+    if (!btn) return;
+    const badge = btn.querySelector('.qf-addrbook-badge');
+    if (!badge) return;
+    if (count > 0) {
+      badge.textContent = count > 99 ? '99+' : String(count);
+      badge.style.display = '';
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+
+  async function refreshAddressBookBadge() {
+    try {
+      const list = await getAllAddresses();
+      const clean = list.filter(r => !r.isMasked).length;
+      renderAddressBookBadge(clean);
+    } catch (e) {}
+  }
+
+  async function openAddressBookModal() {
+    document.querySelectorAll('.qf-addrbook-modal-overlay').forEach(e => e.remove());
+    const overlay = document.createElement('div');
+    overlay.className = 'qf-modal-overlay qf-addrbook-modal-overlay';
+    overlay.innerHTML = `
+      <div class="qf-modal qf-history-modal" role="dialog">
+        <div class="qf-history-modal-header">
+          <div class="qf-history-modal-title">📇 สมุดที่อยู่ (จับก่อนพิมพ์)</div>
+          <button class="qf-history-modal-close" aria-label="ปิด">×</button>
+        </div>
+        <div class="qf-addrbook-toolbar">
+          <label class="qf-addrbook-toggle">
+            <input type="checkbox" id="qf-addrbook-enable" ${state.addressCaptureEnabled ? 'checked' : ''} />
+            <span>เปิดการจับที่อยู่อัตโนมัติก่อนพิมพ์ครั้งแรก</span>
+          </label>
+          <div class="qf-addrbook-stats" id="qf-addrbook-stats">กำลังโหลด…</div>
+        </div>
+        <div class="qf-history-search-bar">
+          <input id="qf-addrbook-search" class="qf-history-order-input" type="text"
+                 placeholder="ค้นหา ชื่อ / เบอร์ / Order ID / จังหวัด…" autocomplete="off" />
+        </div>
+        <div class="qf-history-modal-body" id="qf-addrbook-body"></div>
+        <div class="qf-history-modal-footer">
+          <button id="qf-addrbook-export" class="qf-btn-confirm">📥 ดาวน์โหลด CSV</button>
+          <button id="qf-addrbook-clear" class="qf-history-clear-all">ล้างทั้งหมด</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const body = overlay.querySelector('#qf-addrbook-body');
+    const stats = overlay.querySelector('#qf-addrbook-stats');
+    const search = overlay.querySelector('#qf-addrbook-search');
+    const exportBtn = overlay.querySelector('#qf-addrbook-export');
+    const clearBtn = overlay.querySelector('#qf-addrbook-clear');
+    const toggle = overlay.querySelector('#qf-addrbook-enable');
+
+    const cleanup = () => overlay.remove();
+
+    const render = async () => {
+      const all = await getAllAddresses();
+      all.sort((a, b) => (b.capturedAt || 0) - (a.capturedAt || 0));
+      const clean = all.filter(r => !r.isMasked).length;
+      const masked = all.length - clean;
+      stats.textContent = `รวม ${all.length} ราย · ไม่ถูก mask ${clean} · ถูก mask ${masked}`;
+
+      const q = (search.value || '').trim().toLowerCase();
+      const filtered = q ? all.filter(r => {
+        const hay = [r.orderId, r.recipientName, r.recipientPhone,
+                     r.province, r.district, r.addressDetail].filter(Boolean).join(' ').toLowerCase();
+        return hay.includes(q);
+      }) : all;
+
+      if (!filtered.length) {
+        body.innerHTML = `<div class="qf-history-empty">
+          ${all.length === 0
+            ? 'ยังไม่มีที่อยู่ที่จับได้ — ระบบจะเริ่มเก็บเมื่อคุณสแกนแล้วเปิด order detail หรือกดพิมพ์ครั้งแรก'
+            : `ไม่พบรายการที่ตรงกับ "${q}"`}
+        </div>`;
+        return;
+      }
+
+      const esc = s => String(s ?? '').replace(/[&<>"]/g, c =>
+        ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+      const rows = filtered.map(r => {
+        const addr = [r.addressDetail, r.subDistrict, r.district, r.province, r.zipcode]
+          .filter(Boolean).join(' · ');
+        const mask = r.isMasked ? '<span class="qf-addrbook-mask">🔒 masked</span>' : '';
+        return `
+          <div class="qf-addrbook-row">
+            <div class="qf-addrbook-row-head">
+              <span class="qf-addrbook-name">${esc(r.recipientName || '—')}</span>
+              <span class="qf-addrbook-phone">${esc(r.recipientPhone || '—')}</span>
+              ${mask}
+            </div>
+            <div class="qf-addrbook-row-meta">
+              <span class="qf-addrbook-oid">${esc(r.orderId)}</span>
+              ${r.carrier ? `<span class="qf-addrbook-carrier">${esc(r.carrier)}</span>` : ''}
+              <span class="qf-addrbook-time">${new Date(r.capturedAt).toLocaleString('th-TH')}</span>
+            </div>
+            <div class="qf-addrbook-row-addr">${esc(addr || '—')}</div>
+          </div>`;
+      }).join('');
+      body.innerHTML = rows;
+    };
+
+    overlay.querySelector('.qf-history-modal-close').onclick = cleanup;
+    overlay.onclick = (e) => { if (e.target === overlay) cleanup(); };
+    document.addEventListener('keydown', function onKey(e) {
+      if (e.key === 'Escape') { cleanup(); document.removeEventListener('keydown', onKey); }
+    });
+
+    search.addEventListener('input', () => render());
+    toggle.addEventListener('change', () => {
+      state.addressCaptureEnabled = toggle.checked;
+      saveAddressCapturePref(toggle.checked);
+      showToast(toggle.checked ? '✅ เปิดการจับที่อยู่' : '⏸ ปิดการจับที่อยู่');
+    });
+
+    exportBtn.addEventListener('click', async () => {
+      const list = await getAllAddresses();
+      if (!list.length) { showToast('ยังไม่มีข้อมูล'); return; }
+      const csv = buildAddressBookCsv(list);
+      const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      downloadCsv(csv, `address-book-${ts}.csv`);
+      showToast(`ดาวน์โหลด ${list.length} รายการ`);
+    });
+
+    clearBtn.addEventListener('click', async () => {
+      const ok = await confirmInline('ล้างสมุดที่อยู่ทั้งหมด?', 'ล้าง', true);
+      if (!ok) return;
+      await clearAddressBook();
+      await refreshAddressBookBadge();
+      render();
+    });
+
+    render();
+  }
+
   // Small inline confirm used throughout the app. isDanger=true for destructive actions.
   function confirmInline(title, confirmLabel, isDanger = false) {
     return new Promise(resolve => {
@@ -863,6 +1678,70 @@
   window.postMessage({ __qfAsset: 'request_font' }, '*');
   // Expose state so the top-level fetch hook can write apiListUrl into it
   window.__qfState = state;
+  // Expose rate-limit state + probe helper for DevTools diagnostics.
+  // Usage examples (copy into DevTools console):
+  //   window.__qfRateLimitState()  // live view of backoff / hits
+  //   window.__qfProbeContactRateLimit('583681301773518591', { burst: 20, gapMs: 100 })
+  //     → fires N calls as fast as the gap allows, reports the first hit's
+  //        timestamp so you can compute the observed threshold.
+  window.__qfRateLimitState = () => ({ ...RATE_LIMIT_STATE, backfillCount: _addressBackfillCount });
+  window.__qfBuyerContactTemplate = () => ({
+    url: _buyerContactUrl,
+    body: _buyerContactBodyTemplate ? { ..._buyerContactBodyTemplate } : null,
+  });
+  window.__qfProbeParallelContact = async (orderId, { burst = 20, type = 3 } = {}) => {
+    if (!_buyerContactUrl || !_buyerContactBodyTemplate) {
+      console.warn('[QF] no template — click 👁 first');
+      return null;
+    }
+    const mk = (i) => {
+      const body = { ..._buyerContactBodyTemplate, main_order_id: String(orderId), contact_info_type: type };
+      const t0 = Date.now();
+      return _origFetch.call(window, _buyerContactUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+        .then(r => r.json())
+        .then(j => ({ i, t: Date.now() - t0, code: j.code, msg: (j.message || '').slice(0, 50), limited: isRateLimitResponse(j) }))
+        .catch(e => ({ i, error: String(e).slice(0, 80) }));
+    };
+    const tStart = Date.now();
+    const results = await Promise.all(Array.from({ length: burst }, (_, i) => mk(i)));
+    const elapsed = Date.now() - tStart;
+    return { burst, elapsed, results };
+  };
+  window.__qfProbeContactRateLimit = async (orderId, { burst = 20, gapMs = 100 } = {}) => {
+    if (!_buyerContactUrl || !_buyerContactBodyTemplate) {
+      console.warn('[QF] probe: buyer_contact_info template not captured yet — click one 👁 eye icon on any order detail page first');
+      return null;
+    }
+    const results = [];
+    const t0 = Date.now();
+    for (let i = 0; i < burst; i++) {
+      const callAt = Date.now() - t0;
+      try {
+        const body = { ...(_buyerContactBodyTemplate || {}), main_order_id: String(orderId), contact_info_type: CONTACT_TYPE_NICKNAME };
+        const r = await _origFetch.call(window, _buyerContactUrl, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const j = await r.json();
+        const limited = isRateLimitResponse(j);
+        results.push({ i, tMs: callAt, code: j.code, msg: j.message, limited });
+        if (limited) {
+          console.warn(`[QF] probe: FIRST rate-limit hit at call #${i} (t=${callAt}ms, ~${Math.round(i / (callAt / 60000))}/min)`);
+          break;
+        }
+      } catch (e) {
+        results.push({ i, tMs: callAt, error: String(e) });
+      }
+      if (gapMs > 0) await sleep(gapMs);
+    }
+    console.table(results);
+    return results;
+  };
 
   // ==================== PAGE DETECTION ====================
   const isShopee = () => location.hostname === 'seller.shopee.co.th';
@@ -935,7 +1814,9 @@
   // Under "พิมพ์แล้ว" filter every visible item is already printed server-side;
   // marking them done would defeat the filter's purpose (reprint view).
   function isLabelsDone(idSet) {
-    if (state.labelStatusFilter === 'printed') return false;
+    // Under 'printed' / 'failed' the user is intentionally viewing records for
+    // reprint — marking them done-greyed would defeat the tab's purpose.
+    if (state.labelStatusFilter === 'printed' || state.labelStatusFilter === 'failed') return false;
     const visible = [...idSet].filter(id => passesCarrier(id) && passesPreOrder(id));
     if (!visible.length) return false;
     return visible.every(id => state.printedUnitIds.has(id));
@@ -1204,7 +2085,9 @@
     if (!img) return '';
     if (typeof img === 'string') return img;
     // API returns { url_list: [...], thumb_url_list: [...], uri, ... }
-    return img.thumb_url_list?.[0] || img.url_list?.[0] || '';
+    // Prefer url_list (full-res) so PDF dividers aren't pixelated; the grid
+    // UI caches the same URL so one fetch serves both surfaces.
+    return img.url_list?.[0] || img.thumb_url_list?.[0] || '';
   }
 
   function processApiOrders(orders) {
@@ -1405,6 +2288,7 @@
   function labelStatusMatches(labelStatus) {
     if (state.labelStatusFilter === 'all') return true;
     if (state.labelStatusFilter === 'printed')     return labelStatus === LABEL_STATUS_PRINTED;
+    if (state.labelStatusFilter === 'failed')      return labelStatus === LABEL_STATUS_PRINT_FAILED;
     if (state.labelStatusFilter === 'not_printed') return labelStatus === LABEL_STATUS_NOT_PRINTED;
     return true;
   }
@@ -1449,12 +2333,18 @@
     if (fulfillUnitId) {
       state.records.set(fulfillUnitId, {
         fulfillUnitId,
+        // §Picking list needs rec.orderIds to count unique orders — it was
+        // previously dropped here so totalOrders always read 0.
+        orderIds: Array.isArray(rec.orderIds) ? rec.orderIds.filter(Boolean) : [],
         labelStatus: rec.labelStatus || null,
         createTime: rec.createTime || null,
         shipByTime: rec.shipByTime || null,
         autoCancelTime: rec.autoCancelTime || null,
         hasNote: !!rec.hasNote,
+        hasBuyerNote: !!(rec.hasBuyerNote || rec.buyerNote),
+        hasSellerNote: !!(rec.hasSellerNote || rec.sellerNote),
         buyerNote: rec.buyerNote || '',
+        sellerNote: rec.sellerNote || '',
         skuList: skus.map(s => ({
           productId: s.productId,
           skuId: s.skuId,
@@ -1916,24 +2806,33 @@
       productName: s.product_name,
       skuName: s.sku_name,
       sellerSkuName: s.seller_sku_name,
-      productImageURL: s.product_image?.thumb_url_list?.[0] || s.product_image?.url_list?.[0] || '',
+      productImageURL: s.product_image?.url_list?.[0] || s.product_image?.thumb_url_list?.[0] || '',
       quantity: s.quantity || 1,
     }));
     // isPreOrder: any line marked → record is pre-order
     const olm = rec.order_label_module || [];
     const isPreOrder = olm.some(o => o.isPreOrder === 1 || o.is_pre_order === 1);
-    // buyerNote: check multiple common field paths across API versions
+    // Note capture — separate buyer vs seller so they never collide on the
+    // label or in the note-zone divider. Each side has multiple candidate
+    // fields across API versions; pick the first non-empty value.
     const tom = rec.trade_order_module?.[0] || {};
-    const buyerNote = (tom.buyer_message || tom.buyer_note || tom.remark
+    const buyerNote = (tom.buyer_message || tom.buyer_note
       || rec.buyer_message || rec.order_note || '').trim();
+    const sellerNote = (tom.seller_note || tom.seller_remark || tom.seller_message
+      || rec.seller_note || rec.seller_remark || tom.remark || '').trim();
     return {
       fulfillUnitId: rec.fulfill_unit_id || lm.fulfill_unit_id,
       batchId: lm.batch_id,
       orderIds: lm.order_ids || rec.order_ids,
       labelStatus: lm.label_status,
       isPreOrder,
-      hasNote: !!buyerNote,
+      // hasNote: legacy flag — any note present. Kept so old call sites
+      // (filters, routing) don't break. Prefer hasBuyerNote/hasSellerNote.
+      hasNote: !!(buyerNote || sellerNote),
+      hasBuyerNote: !!buyerNote,
+      hasSellerNote: !!sellerNote,
       buyerNote,
+      sellerNote,
       // Time fields — all converted to ms timestamps (some sources are in seconds)
       // createTime: เวลาลูกค้าสร้างออเดอร์
       createTime: fm.create_time ? Number(fm.create_time)
@@ -1967,8 +2866,9 @@
       // Inject extension filters as server-side search_condition so API pre-filters
       // (otherwise we hit the 10,000-record cap on unfiltered queries and miss records).
       const cl = {};
-      if (state.labelStatusFilter === 'not_printed') cl.fulfillment_label_status = { value: ['30'] };
-      else if (state.labelStatusFilter === 'printed') cl.fulfillment_label_status = { value: ['50'] };
+      if (state.labelStatusFilter === 'not_printed') cl.fulfillment_label_status = { value: [String(LABEL_STATUS_NOT_PRINTED)] };
+      else if (state.labelStatusFilter === 'printed') cl.fulfillment_label_status = { value: [String(LABEL_STATUS_PRINTED)] };
+      else if (state.labelStatusFilter === 'failed')  cl.fulfillment_label_status = { value: [String(LABEL_STATUS_PRINT_FAILED)] };
       if (state.preOrderFilter === 'preorder') cl.fulfillment_order_label = { value: ['1'] };
       // 'normal' (fulfillment_order_label=0) is filtered client-side since the server
       // value for "not pre-order" isn't documented; client-side handles it.
@@ -2024,6 +2924,60 @@
   // §3.1: Chunk-plan modal thresholds
   const CHUNK_PROMPT_THRESHOLD = 200; // show modal when total > this
   const CHUNK_AUTO_SAFE_SIZE   = 200; // default X value in "แบ่งทุกๆ X ใบ" option
+
+  // §Multi-page label support
+  // When an order has multiple SKUs (or one with long content), TikTok renders
+  // the label as 2+ pages. Mixing single-page and multi-page labels in one API
+  // batch makes it impossible to know which id owns which page — breaking the
+  // alias overlay's page→id mapping and the divider's id→page lookup.
+  //
+  // Strategy: split the id list into segments preserving original order.
+  //   - multi-SKU id → its own segment of length 1 (know exact page count)
+  //   - run of single-SKU ids → merged into segments up to PRINT_BATCH_SIZE
+  //
+  // Each segment maps to one generate-API call. The caller then derives
+  // pagesPerId[] per segment and aggregates a full mapping.
+  function splitIdsIntoApiSegments(ids) {
+    const segments = [];
+    let current = null;
+    const flush = () => { if (current && current.ids.length) segments.push(current); current = null; };
+    for (const id of ids) {
+      const rec = state.records.get(id);
+      const isMulti = (rec?.skuList?.length || 1) > 1;
+      if (isMulti) {
+        flush();
+        segments.push({ ids: [id], isMultiSku: true });
+      } else {
+        if (!current) current = { ids: [], isMultiSku: false };
+        current.ids.push(id);
+        if (current.ids.length >= PRINT_BATCH_SIZE) flush();
+      }
+    }
+    flush();
+    return segments;
+  }
+
+  // Given a segment (from splitIdsIntoApiSegments) and the actual page count of
+  // its API-generated PDF, derive pagesPerId[] — one entry per id in segment.
+  //   - multi-SKU singleton: all pages belong to the one id
+  //   - single-SKU segment with pageCount === ids.length: 1 page each (expected)
+  //   - single-SKU segment with extras: distribute extras to leading ids
+  //     (best-effort fallback — rare case where TikTok renders a single-SKU
+  //     label as 2 pages; we can't know which id without per-id probing)
+  function deriveSegmentPagesPerId(segment, pageCount) {
+    const n = segment.ids.length;
+    if (n === 0) return [];
+    if (segment.isMultiSku || n === 1) return [Math.max(1, pageCount)];
+    if (pageCount === n) return segment.ids.map(() => 1);
+    const base = Math.floor(pageCount / n);
+    let extra = pageCount - base * n;
+    const out = new Array(n);
+    for (let i = 0; i < n; i++) {
+      out[i] = Math.max(1, base + (extra > 0 ? 1 : 0));
+      if (extra > 0) extra--;
+    }
+    return out;
+  }
 
   // Dedupe concurrent font fetches when multiple chunks start in parallel —
   // without this, 3 chunks would each fire a fetch for Sarabun-Bold.ttf (88KB)
@@ -2105,6 +3059,16 @@
   }
   function savePickingListPref(val) {
     try { localStorage.setItem(PICKING_LIST_PREF_KEY, val ? 'true' : 'false'); } catch {}
+  }
+
+  // Fast-path divider preference — remembers user's last toggle in the simple
+  // print-confirm modal so repeat prints don't require re-checking every time.
+  const DIVIDER_PREF_KEY = 'qf_last_divider_v1';
+  function loadDividerPref() {
+    try { return localStorage.getItem(DIVIDER_PREF_KEY) === 'true'; } catch { return false; }
+  }
+  function saveDividerPref(val) {
+    try { localStorage.setItem(DIVIDER_PREF_KEY, val ? 'true' : 'false'); } catch {}
   }
 
   // Modal for print-all in planning mode: 3 worker-centric modes.
@@ -2979,7 +3943,7 @@
     return { mode: 'multi', text: parts.join(' + ') };
   }
 
-  async function overlayAliasOnPdf(pdfBytes, fulfillUnitIds, onProgress, workerName, workerIcon, noteMap = null) {
+  async function overlayAliasOnPdf(pdfBytes, fulfillUnitIds, onProgress, workerName, workerIcon, noteMap = null, pagesPerId = null) {
     if (!window.PDFLib) return pdfBytes;
     const { PDFDocument, rgb, degrees } = window.PDFLib;
     const fontBytes = await ensureFontBytes();
@@ -2988,6 +3952,23 @@
     const font = await pdfDoc.embedFont(fontBytes, { subset: true });
     const pages = pdfDoc.getPages();
     if (!pages.length || !fulfillUnitIds?.length) return await pdfDoc.save();
+
+    // §Multi-page labels: when caller knows exact pages per id (via segment
+    // splitting), build prefix-sum array so each page maps to the correct
+    // fulfillUnitId even when label page counts vary.
+    //   pagesPerId[i] === number of consecutive pages belonging to ids[i]
+    //   pageToUnitIdx[p] === index into fulfillUnitIds
+    let pageToUnitIdx = null;
+    if (Array.isArray(pagesPerId) && pagesPerId.length === fulfillUnitIds.length) {
+      pageToUnitIdx = new Array(pages.length);
+      let p = 0;
+      for (let ui = 0; ui < pagesPerId.length; ui++) {
+        const n = Math.max(1, pagesPerId[ui] | 0);
+        for (let k = 0; k < n && p < pages.length; k++, p++) pageToUnitIdx[p] = ui;
+      }
+      // Defensive fill in case pagesPerId sum < pages.length.
+      for (; p < pages.length; p++) pageToUnitIdx[p] = fulfillUnitIds.length - 1;
+    }
 
     const lo = loadLabelOverlay();
     const OP = Math.min(lo.opacity ?? 0.85, 0.90);
@@ -3031,7 +4012,9 @@
     };
 
     for (let i = 0; i < pages.length; i++) {
-      const unitIdx = Math.min(fulfillUnitIds.length - 1, Math.floor(i / pagesPerUnit));
+      const unitIdx = pageToUnitIdx
+        ? pageToUnitIdx[i]
+        : Math.min(fulfillUnitIds.length - 1, Math.floor(i / pagesPerUnit));
       const fulfillId = fulfillUnitIds[unitIdx];
       const rec = state.records.get(fulfillId);
       const lines = buildPageLines(rec);
@@ -3132,16 +4115,38 @@
         page.drawText(workerName, { x: wX, y: wY, size: wSize, font, color: rgb(0,0,0), opacity: OP });
       }
 
-      // ── Note marker ★N (top-left corner) ────────────────────────────────
-      if (rec?.hasNote) {
-        const noteIdx = noteMap?.get(fulfillId);
-        const noteText = noteIdx != null ? `★${noteIdx}` : '★';
-        const noteSize = Math.min(ph * 0.032, 12);
-        // White halo for legibility over barcode area
+      // ── Note markers ★N ─────────────────────────────────────────────────
+      // Badges use ★ (verified present in Sarabun-Bold — no .notdef square)
+      // with Thai letter prefix for kind: "ล" (ลูกค้า) / "ร" (ร้านค้า).
+      // Both live at TOP-LEFT in a single row (buyer first, seller after a
+      // small gap). Kept away from the top-right worker-name watermark to
+      // avoid collision, and drawn adjacent when both exist so packers see
+      // them together as one "note cluster".
+      //
+      // noteMap may be either a legacy Map (buyer-only), or an object
+      // { buyer?: Map, seller?: Map }. Read both forms.
+      const buyerMap  = (noteMap && noteMap.buyer)  ? noteMap.buyer  : (noteMap instanceof Map ? noteMap : null);
+      const sellerMap = (noteMap && noteMap.seller) ? noteMap.seller : null;
+      const noteSize = Math.min(ph * 0.032, 12);
+      const noteY    = ph - noteSize - 3;
+      const drawNoteBadge = (text, x) => {
         for (const [dx, dy] of [[-1,0],[1,0],[0,-1],[0,1]]) {
-          page.drawText(noteText, { x: 4+dx, y: ph - noteSize - 3+dy, size: noteSize, font, color: rgb(1,1,1), opacity: 0.8 });
+          page.drawText(text, { x: x+dx, y: noteY+dy, size: noteSize, font, color: rgb(1,1,1), opacity: 0.8 });
         }
-        page.drawText(noteText, { x: 4, y: ph - noteSize - 3, size: noteSize, font, color: rgb(0,0,0), opacity: 0.78 });
+        page.drawText(text, { x, y: noteY, size: noteSize, font, color: rgb(0,0,0), opacity: 0.78 });
+        return font.widthOfTextAtSize(text, noteSize);
+      };
+      let noteCursorX = 4;
+      const hasBuyer  = rec?.hasBuyerNote || (rec?.hasNote && !rec?.hasSellerNote);
+      if (hasBuyer) {
+        const idx = buyerMap?.get(fulfillId);
+        const t = idx != null ? `ล★${idx}` : 'ล★';
+        noteCursorX += drawNoteBadge(t, noteCursorX) + 6; // gap before next badge
+      }
+      if (rec?.hasSellerNote) {
+        const idx = sellerMap?.get(fulfillId);
+        const t = idx != null ? `ร★${idx}` : 'ร★';
+        drawNoteBadge(t, noteCursorX);
       }
 
       if (onProgress && (i % 20 === 0 || i === total - 1)) { onProgress(i + 1, total); await sleep(0); }
@@ -3176,8 +4181,9 @@
     const rec = state.records.get(id);
     if (!rec) return true;
     if (rec.labelStatus == null) return true; // unknown status → trust the scan's server filter
-    const target = state.labelStatusFilter === 'printed' ? LABEL_STATUS_PRINTED : LABEL_STATUS_NOT_PRINTED;
-    return rec.labelStatus === target;
+    if (state.labelStatusFilter === 'printed') return rec.labelStatus === LABEL_STATUS_PRINTED;
+    if (state.labelStatusFilter === 'failed')  return rec.labelStatus === LABEL_STATUS_PRINT_FAILED;
+    return rec.labelStatus === LABEL_STATUS_NOT_PRINTED;
   }
   function applyCarrierFilter(ids) {
     return ids.filter(id => passesCarrier(id) && passesPreOrder(id) && passesDate(id) && passesLabelStatus(id));
@@ -3418,11 +4424,15 @@
     const sample = items.slice(0, 3).map(it => describeItem(it).label).join(', ')
       + (items.length > 3 ? ` +อีก ${items.length - 3}` : '');
 
+    // Fast path (!multiSku && small batch) skips the chunk-plan modal, so we
+    // offer the divider toggle inline in the confirm modal for those jobs.
+    const fastPath = !multiSku && totalIds <= CHUNK_PROMPT_THRESHOLD;
     const confirm = await showPrintConfirm({
       title: multiSku ? `พิมพ์ ${skuBuckets.size} SKU` : `พิมพ์ ${items.length} ไฟล์`,
       summary: multiSku ? `${skuBuckets.size} SKU · ${totalIds} ฉลาก` : `แยก 1 ไฟล์ต่อตัวเลือก`,
       count: totalIds,
       sampleText: sample,
+      offerDivider: fastPath,
     });
     if (!confirm) return;
 
@@ -3431,8 +4441,8 @@
     // §3.5/§4: Use showChunkPlanModal whenever multi-SKU (so user can choose combined vs split)
     // or for large batches. Default combined=false (split per SKU).
     let plan;
-    if (!multiSku && totalIds <= CHUNK_PROMPT_THRESHOLD) {
-      plan = { mode: 'single', withPickingList: loadPickingListPref(), combined: false, withDivider: false };
+    if (fastPath) {
+      plan = { mode: 'single', withPickingList: loadPickingListPref(), combined: false, withDivider: !!confirm.withDivider };
     } else {
       plan = await showChunkPlanModal({
         total: totalIds,
@@ -3707,11 +4717,18 @@
     try { localStorage.setItem('qf_last_assignee_v1', v || ''); } catch (_) {}
   }
 
-  function showPrintConfirm({ title, summary, count, sampleText }) {
+  // showPrintConfirm — yes/no print confirm + inline options.
+  //   offerDivider: when the caller will take the fast-path (single-SKU,
+  //     small batch, no chunk-plan modal) set true to expose a divider
+  //     checkbox. Returns confirm.withDivider for the caller's plan.
+  //   Picking list is intentionally NOT offered here — it's only useful for
+  //     larger multi-SKU jobs and has its own UI in the chunk-plan modal.
+  function showPrintConfirm({ title, summary, count, sampleText, offerDivider = false }) {
     return new Promise(resolve => {
       const overlay = document.createElement('div');
       overlay.className = 'qf-modal-overlay';
       const overlayChecked = state.overlayEnabled ? 'checked' : '';
+      const dividerChecked = offerDivider && loadDividerPref() ? 'checked' : '';
       const teams = state.teams || [];
       const hasAssignees = state.workers.length > 0 || teams.length > 0;
       const last = loadLastAssignee();
@@ -3737,6 +4754,12 @@
               <span class="qf-modal-toggle-label">แปะลายน้ำชื่อย่อบนใบลาเบล</span>
               <span class="qf-modal-toggle-hint">ปิดถ้าอยากได้ฉลากดิบ ไม่มีตัวอักษรใต้ฉลาก</span>
             </label>
+            ${offerDivider ? `
+            <label class="qf-modal-toggle">
+              <input type="checkbox" class="qf-divider-toggle" ${dividerChecked}/>
+              <span class="qf-modal-toggle-label">แทรกใบคั่นก่อนกลุ่มสินค้า</span>
+              <span class="qf-modal-toggle-hint">ช่วยแพ็คเกอร์แยกกลุ่ม · เพิ่ม 1 หน้าต่อกลุ่ม</span>
+            </label>` : ''}
             <div class="qf-modal-warn">ระบบจะส่งคำสั่งพิมพ์ทันที TikTok จะบันทึกว่าฉลากถูกพิมพ์</div>
             ${packerRowHtml}
           </div>
@@ -3770,7 +4793,9 @@
         overlay.remove();
         if (!ok) { resolve(false); return; }
         const a = getSelectedAssignee();
-        resolve({ ok: true, workerId: a.workerId || null, workerName: a.workerName || null, workerIcon: a.workerIcon || null, teamId: a.teamId || null, teamName: a.teamName || null });
+        const withDivider = offerDivider && !!overlay.querySelector('.qf-divider-toggle')?.checked;
+        if (offerDivider) saveDividerPref(withDivider);
+        resolve({ ok: true, workerId: a.workerId || null, workerName: a.workerName || null, workerIcon: a.workerIcon || null, teamId: a.teamId || null, teamName: a.teamName || null, withDivider });
       };
       overlay.querySelector('.qf-btn-cancel').onclick = () => cleanup(false);
       overlay.querySelector('.qf-btn-confirm').onclick = () => cleanup(true);
@@ -3783,24 +4808,45 @@
   async function buildChunkPdf(ids, onProgress, workerName, workerIcon) {
     const { PDFDocument } = window.PDFLib;
 
-    // Split ids into API batches (max PRINT_BATCH_SIZE each)
-    const batches = [];
-    for (let i = 0; i < ids.length; i += PRINT_BATCH_SIZE) {
-      batches.push(ids.slice(i, i + PRINT_BATCH_SIZE));
-    }
-    const batchCount = batches.length;
+    // §Multi-page labels: split into segments so multi-SKU (2+ page) labels
+    // land in size-1 segments where we can count their pages exactly. Single-
+    // SKU runs merge into up-to-PRINT_BATCH_SIZE segments (fast path).
+    const segments = splitIdsIntoApiSegments(ids);
+    const segmentCount = segments.length;
 
-    // Per-batch progress [0..1]; averaged into single bar
-    const batchProgress = new Float64Array(batchCount);
+    // Per-segment progress [0..1]; averaged into single bar.
+    const segProgress = new Float64Array(segmentCount);
     const reportProgress = () => {
-      const avg = batchProgress.reduce((a, b) => a + b, 0) / batchCount;
-      onProgress(avg, batchCount > 1 ? `ประมวลผล ${batchCount} ชุดพร้อมกัน...` : '');
+      const avg = segProgress.reduce((a, b) => a + b, 0) / segmentCount;
+      onProgress(avg, segmentCount > 1 ? `ประมวลผล ${segmentCount} ชุดพร้อมกัน...` : '');
     };
 
-    // Fire all batches in parallel — generate + download + overlay run concurrently
-    const batchResults = await Promise.all(batches.map(async (batch, bi) => {
-      const setP = (frac) => { batchProgress[bi] = frac; reportProgress(); };
+    // §Note badges: build chunk-wide buyer/seller index maps so ★N numbering
+    // stays consistent across all API segments within this chunk. Walk `ids`
+    // in the original order so indexes match the visual sequence of pages.
+    const chunkBuyerMap  = new Map();
+    const chunkSellerMap = new Map();
+    for (const id of ids) {
+      const r = state.records.get(id);
+      if (!r) continue;
+      if (r.hasBuyerNote  || (r.hasNote && !r.hasSellerNote)) chunkBuyerMap.set(id, chunkBuyerMap.size + 1);
+      if (r.hasSellerNote) chunkSellerMap.set(id, chunkSellerMap.size + 1);
+    }
+    const chunkNoteMap = { buyer: chunkBuyerMap, seller: chunkSellerMap };
+
+    // Fire all segments in parallel — generate + download + overlay run concurrently.
+    const segResults = await Promise.all(segments.map(async (segment, bi) => {
+      const batch = segment.ids;
+      const setP = (frac) => { segProgress[bi] = frac; reportProgress(); };
       setP(0.05);
+
+      // §Pre-print address capture: snapshot unmasked recipient data BEFORE
+      // the generate API marks these labels as TTS (which masks subsequent
+      // reads forever). Best-effort, non-blocking on failure — if it fails
+      // or the order-get template isn't captured yet, we proceed with print.
+      try {
+        await tryBackfillAddresses(batch);
+      } catch (e) { /* non-fatal */ }
 
       const body = {
         fulfill_unit_id_list: batch,
@@ -3839,14 +4885,14 @@
       if (!docUrl) {
         console.warn('[QF] generate succeeded but no doc_url:', data);
         setP(1.0);
-        return null;
+        return { bytes: null, pagesPerId: segment.ids.map(() => 1) };
       }
 
       setP(0.25);
       // IMPORTANT: use `_origFetch` (captured at document_start before TikTok's
       // own wrapper installed itself) so concurrent chunk downloads don't get
       // serialized behind TikTok's signing/queueing mutex. Without this, the
-      // outer `Promise.all(chunks.map…)` + inner `Promise.all(batches.map…)`
+      // outer `Promise.all(chunks.map…)` + inner `Promise.all(segments.map…)`
       // effectively run one-at-a-time because TikTok's wrapper holds a lock
       // while it synchronously signs each request. `credentials: 'omit'` is
       // fine here — `docUrl` is a pre-signed TikTok CDN URL, not an API call.
@@ -3854,13 +4900,22 @@
       const pdfBytes = await pdfResp.arrayBuffer();
       setP(0.40);
 
+      // Count pages now so we can derive pagesPerId for this segment AND pass
+      // it to the overlay so alias text lands on the right label.
+      let segPageCount = batch.length;
+      try {
+        const probe = await PDFDocument.load(pdfBytes);
+        segPageCount = probe.getPageCount();
+      } catch { /* stick with expected count */ }
+      const segPagesPerId = deriveSegmentPagesPerId(segment, segPageCount);
+
       let modifiedBytes;
       if (state.overlayEnabled) {
         try {
           modifiedBytes = await overlayAliasOnPdf(pdfBytes, batch, (cur, totPages) => {
-            batchProgress[bi] = 0.40 + 0.50 * (cur / totPages);
+            segProgress[bi] = 0.40 + 0.50 * (cur / totPages);
             reportProgress();
-          }, workerName, workerIcon);
+          }, workerName, workerIcon, chunkNoteMap, segPagesPerId);
         } catch (e) {
           console.warn('[QF] overlay failed, using original:', e);
           modifiedBytes = pdfBytes;
@@ -3870,15 +4925,17 @@
       }
 
       setP(1.0);
-      return modifiedBytes;
+      return { bytes: modifiedBytes, pagesPerId: segPagesPerId };
     }));
 
-    // Merge pages in original batch order
+    // Merge pages in original segment order; aggregate pagesPerId.
     const mergedDoc = await PDFDocument.create();
     let pageCount = 0;
-    for (const modifiedBytes of batchResults) {
-      if (!modifiedBytes) continue;
-      const partDoc = await PDFDocument.load(modifiedBytes);
+    const pagesPerId = [];
+    for (const r of segResults) {
+      pagesPerId.push(...r.pagesPerId);
+      if (!r.bytes) continue;
+      const partDoc = await PDFDocument.load(r.bytes);
       const indices = partDoc.getPageIndices();
       const copied = await mergedDoc.copyPages(partDoc, indices);
       copied.forEach(p => mergedDoc.addPage(p));
@@ -3886,7 +4943,7 @@
     }
 
     const bytes = await mergedDoc.save();
-    return { bytes, pageCount };
+    return { bytes, pageCount, pagesPerId };
   }
 
   // Sub-group ids by (productId:skuId, carrier, qty) so each SKU × carrier × qty
@@ -3962,7 +5019,7 @@
   // (sku, carrier) so dividers always sit directly above their labels.
   // Returns {bytes, pageCount}. idOrder must match the order ids were sent to
   // the API so page index → id can be inferred.
-  async function prependDividersToChunk(labelBytes, idOrder, workerName, assigneeKind = null) {
+  async function prependDividersToChunk(labelBytes, idOrder, workerName, assigneeKind = null, pagesPerId = null) {
     const { PDFDocument } = window.PDFLib;
     // Phase 2: group by (sku, carrier, qty) — creates divider per qty bucket
     // so mixed-qty prints (e.g. soap ×2 + soap ×3) get separate headers.
@@ -3973,11 +5030,23 @@
     const totalPages = labelDoc.getPageCount();
     if (totalPages === 0) return { bytes: labelBytes, pageCount: 0 };
 
-    // idOrder is the order ids were sent to TikTok. Assume 1 id ↔ 1 page.
-    // (TikTok returns 1 label per fulfill_unit_id.) Build id → pageIndex map.
-    const pageByIdIdx = new Map();
-    const limit = Math.min(idOrder.length, totalPages);
-    for (let i = 0; i < limit; i++) pageByIdIdx.set(idOrder[i], i);
+    // Build id → [pageIndices] map. Multi-page labels (e.g. 2+ SKU orders)
+    // span several pages, so each id may own a contiguous run. When caller
+    // provides pagesPerId[] we use it; otherwise fall back to 1 page per id
+    // (safe for historical single-SKU-only flows).
+    const pageIdxById = new Map();
+    {
+      const perId = Array.isArray(pagesPerId) && pagesPerId.length === idOrder.length
+        ? pagesPerId
+        : idOrder.map(() => 1);
+      let p = 0;
+      for (let i = 0; i < idOrder.length && p < totalPages; i++) {
+        const span = Math.max(1, perId[i] | 0);
+        const indices = [];
+        for (let k = 0; k < span && p < totalPages; k++, p++) indices.push(p);
+        pageIdxById.set(idOrder[i], indices);
+      }
+    }
 
     const finalDoc = await PDFDocument.create();
     if (window.fontkit) finalDoc.registerFontkit(window.fontkit);
@@ -3987,6 +5056,7 @@
     const W = labelDoc.getPage(0).getWidth();
     const H = labelDoc.getPage(0).getHeight();
 
+    const calendarMode = getActiveCalendarSummary();
     for (const sub of subs) {
       await buildDividerPage(finalDoc, { W, H }, {
         alias: sub.alias,
@@ -3997,10 +5067,10 @@
         carrierIconURL: sub.carrierIconURL,
         qty: sub.ids.length,
         orderQty: sub.qty || 1, // per-order item count — divider highlights when > 1
+        calendarMode,
       }, font, workerName, assigneeKind);
-      const pageIdx = sub.ids
-        .map(id => pageByIdIdx.get(id))
-        .filter(i => i != null);
+      // Flatten every page owned by each id in this sub-group.
+      const pageIdx = sub.ids.flatMap(id => pageIdxById.get(id) || []);
       if (pageIdx.length) {
         const copied = await finalDoc.copyPages(labelDoc, pageIdx);
         copied.forEach(p => finalDoc.addPage(p));
@@ -4196,6 +5266,19 @@
       topCursor -= 6;
     }
 
+    // --- Calendar filter line (only when active) ---
+    // Tells the packer which date-window these labels came from — matches the
+    // picking-list header so both surfaces report the same source slice.
+    if (payload.calendarMode) {
+      const calSize = 8;
+      topCursor -= calSize + 2;
+      page.drawText(
+        `ปฏิทิน: ${payload.calendarMode.fieldLabel} · ${payload.calendarMode.rangeText}`,
+        { x: PAD_X, y: topCursor, size: calSize, font, color: MID, maxWidth: contentMaxW }
+      );
+      topCursor -= 6;
+    }
+
     // --- photo-first preset renders image FIRST, at top ---
     // For other presets image is placed between carrier and qty.
     const IMG_MAX = 110 * imgMult; // max side for product image
@@ -4218,31 +5301,17 @@
     }
 
     // --- Alias block: dynamic size, up to 2 lines, center-aligned, no truncation ---
+    // Header now combines alias + variant as the "headline" so packers see the
+    // short nickname at a glance. Official product name is deferred to the
+    // image caption (rendered below image) so this top area stays clean.
     if (cfg.showAlias && payload.alias) {
       const baseSize = Math.min(H * 0.05, 20) * (cfg.aliasScale || 1);
       topCursor = drawAliasBlock(page, font, payload.alias, baseSize, contentMaxW, W, topCursor, BLACK);
     }
 
-    // --- Official name (word-wrap, up to 3 lines, 10pt) ---
-    if (cfg.showName && payload.officialName) {
-      const nameSize = 10 * mult('name');
-      const nameLines = wrapTextLines(font, payload.officialName, nameSize, contentMaxW).slice(0, 3);
-      for (const line of nameLines) {
-        const lineW = font.widthOfTextAtSize(line, nameSize);
-        topCursor -= nameSize + 2;
-        page.drawText(line, {
-          x: (W - lineW) / 2,
-          y: topCursor,
-          size: nameSize,
-          font,
-          color: DARK,
-        });
-      }
-    }
-
-    // --- Variant line (9pt grey, up to 2 lines) ---
+    // --- Variant line (13pt dark — part of the headline now, larger than before) ---
     if (cfg.showVariant && payload.variantName) {
-      const varSize = 9 * mult('variant');
+      const varSize = 13 * mult('variant');
       const varLines = wrapTextLines(font, payload.variantName, varSize, contentMaxW).slice(0, 2);
       for (const line of varLines) {
         const lineW = font.widthOfTextAtSize(line, varSize);
@@ -4252,18 +5321,21 @@
           y: topCursor,
           size: varSize,
           font,
-          color: MID,
+          color: DARK,
         });
       }
       topCursor -= 4;
     }
 
-    // --- Carrier badge (outlined box, 22pt tall) ---
+    // --- Carrier badge — pinned to top-right corner ---
+    // Was previously rendered inline in the center stack; moved out of the
+    // flow so the headline (alias+variant) reads cleanly and the carrier
+    // stays easy to spot at a glance. Doesn't mutate topCursor.
     if (cfg.showCarrier && payload.carrierName) {
-      const carrierSize = 11 * mult('carrier');
-      const carrierLabel = `ขนส่ง: ${payload.carrierName}`;
+      const carrierSize = 10 * mult('carrier');
+      const carrierLabel = payload.carrierName;
       const labelW = font.widthOfTextAtSize(carrierLabel, carrierSize);
-      const iconSize = 16;
+      const iconSize = 14;
       let iconImg = null;
       if (payload.carrierIconURL) {
         try {
@@ -4276,18 +5348,18 @@
           }
         } catch { iconImg = null; }
       }
-      const gap = iconImg ? 6 : 0;
+      const gap = iconImg ? 5 : 0;
       const iconW = iconImg ? iconSize : 0;
       const rowW = iconW + gap + labelW;
-      const padX = 10;
+      const padX = 6;
       const boxW = rowW + padX * 2;
-      const boxH = 22;
-      const boxX = (W - boxW) / 2;
-      topCursor -= boxH + 6;
-      const boxY = topCursor;
+      const boxH = 18;
+      // Anchor top-right with a small safety margin from edges.
+      const boxX = W - PAD_X - boxW;
+      const boxY = H - BANNER_H - boxH - 2;
       page.drawRectangle({
         x: boxX, y: boxY, width: boxW, height: boxH,
-        borderColor: BLACK, borderWidth: 1,
+        borderColor: BLACK, borderWidth: 0.75,
         color: rgb(1, 1, 1),
       });
       let cur = boxX + padX;
@@ -4351,9 +5423,15 @@
     }
 
     // Product image (when NOT imageFirst) — placed between top block and qty.
+    // Reserve 3 lines (≈27pt) at the bottom of the image slot for the
+    // officialName caption so image + caption share the same slot cleanly.
+    let imageBottomY = null;
+    const captionLineH = 9;
+    const captionMaxLines = 3;
+    const captionReserveH = (cfg.showName && payload.officialName) ? (captionLineH * captionMaxLines + 6) : 0;
     if (!cfg.imageFirst && cfg.showImage && payload.productImageURL) {
-      const availableTop = topCursor - 6;    // top of available vertical space
-      const availableBot = QTY_Y + 18;       // leave room above qty
+      const availableTop = topCursor - 6;                 // top of available vertical space
+      const availableBot = QTY_Y + 18 + captionReserveH;  // leave room for qty + caption
       const availH = availableTop - availableBot;
       if (availH > 30) {
         try {
@@ -4366,8 +5444,33 @@
             const ih = ratio >= 1 ? maxSide / ratio : maxSide;
             const iy = availableBot + (availH - ih) / 2;
             page.drawImage(image, { x: (W - iw) / 2, y: iy, width: iw, height: ih });
+            imageBottomY = iy;
           }
         } catch { /* skip */ }
+      }
+    }
+
+    // --- Official name caption (below image, above qty) ---
+    // Acts as the image's caption so the headline stays short (alias+variant)
+    // while the full product name remains visible for pack-check.
+    if (cfg.showName && payload.officialName) {
+      const captionSize = 7.5 * mult('name');
+      const captionLines = wrapTextLines(font, payload.officialName, captionSize, contentMaxW).slice(0, captionMaxLines);
+      // Anchor just below the image when present; otherwise float above qty.
+      const topY = imageBottomY != null
+        ? imageBottomY - 4
+        : QTY_Y + 18 + captionReserveH - 2;
+      let y = topY;
+      for (const line of captionLines) {
+        y -= captionSize + 2;
+        const lineW = font.widthOfTextAtSize(line, captionSize);
+        page.drawText(line, {
+          x: (W - lineW) / 2,
+          y,
+          size: captionSize,
+          font,
+          color: MID,
+        });
       }
     }
 
@@ -4406,7 +5509,8 @@
     const fontBytes = await ensureFontBytes();
     const font = await tmpDoc.embedFont(fontBytes, { subset: true });
 
-    const headerHeight = 120; // picking-list header block
+    // Picking-list header block grows by 14pt when calendar-mode line is shown.
+    const headerHeight = 120 + (headerMeta.calendarMode ? 14 : 0);
     const colHdrHeight = 14;  // column label row
     const rowHeight    = 28;  // compact table row
     const footerHeight = 20;
@@ -4452,12 +5556,27 @@
     page.drawText(totalsText, { x: 24, y: H - 84, size: 10, font, color: grey, maxWidth: W - 48 });
 
     // Assignee
+    let yCursor = H - 98;
     if (headerMeta.assigneeName) {
-      page.drawText(`รับผิดชอบ: ${headerMeta.assigneeName}`, { x: 24, y: H - 98, size: 10, font, color: black, maxWidth: W - 48 });
+      page.drawText(`รับผิดชอบ: ${headerMeta.assigneeName}`, { x: 24, y: yCursor, size: 10, font, color: black, maxWidth: W - 48 });
+      yCursor -= 14;
     }
 
-    // Separator line
-    page.drawLine({ start: { x: 12, y: H - 108 }, end: { x: W - 12, y: H - 108 }, thickness: 0.5, color: grey });
+    // Calendar-mode line: only when user has an active date filter.
+    // Shows which field was used (วันที่ต้องส่ง / ลูกค้าสั่ง / ยกเลิกอัตโนมัติ)
+    // plus the selected date range, so packers know why this picking list
+    // contains exactly these orders.
+    if (headerMeta.calendarMode) {
+      const { fieldLabel, rangeText } = headerMeta.calendarMode;
+      page.drawText(`ปฏิทิน: ${fieldLabel} · ${rangeText}`, {
+        x: 24, y: yCursor, size: 10, font, color: black, maxWidth: W - 48,
+      });
+      yCursor -= 14;
+    }
+
+    // Separator line — positioned below the last drawn line.
+    const sepY = Math.min(H - 108, yCursor + 4);
+    page.drawLine({ start: { x: 12, y: sepY }, end: { x: W - 12, y: sepY }, thickness: 0.5, color: grey });
 
     // Page footer
     page.drawText(`${pageNum}/${pageCount}`, { x: W - 50, y: 18, size: 9, font, color: grey });
@@ -4579,7 +5698,30 @@
       totalOrders: orderIds.size,
       totalProducts: productIds.size,
       totalItems,
+      calendarMode: getActiveCalendarSummary(),
     };
+  }
+
+  // Summarize the active calendar-filter selection for the picking list header.
+  // Returns null when no date filter is active; otherwise
+  // { fieldLabel, rangeText } with Thai short-date formatting.
+  function getActiveCalendarSummary() {
+    const df = state.dateFilter;
+    if (!df || (df.start == null && df.end == null)) return null;
+    const fieldLabel = FIELD_LABELS[df.field] || FIELD_LABELS.createTime;
+    const fmt = (ts) => new Date(ts).toLocaleDateString('th-TH', {
+      day: 'numeric', month: 'short', year: 'numeric',
+    });
+    let rangeText;
+    if (df.start != null && df.end != null) {
+      const endInclusive = df.end - 86400000;
+      rangeText = (df.start === endInclusive) ? fmt(df.start) : `${fmt(df.start)} – ${fmt(endInclusive)}`;
+    } else if (df.start != null) {
+      rangeText = fmt(df.start);
+    } else {
+      rangeText = `ก่อน ${fmt(df.end - 86400000)}`;
+    }
+    return { fieldLabel, rangeText };
   }
 
   // §7.4: Insert a full-page note-zone divider before note-order labels.
@@ -4593,6 +5735,10 @@
     const LIGHT = rgb(0.6, 0.6, 0.6);
     const PAD   = 14;
     const contentW = W - PAD * 2;
+
+    // Back-compat: older callers may pass `notes` (buyer-only).
+    const buyerNotes  = payload.buyerNotes  || payload.notes || [];
+    const sellerNotes = payload.sellerNotes || [];
 
     // ── Header bar ───────────────────────────────────────────────────────────
     const TITLE_SIZE = 10;
@@ -4615,31 +5761,45 @@
     }
 
     // Count
-    const noteCount = (payload.notes || []).length;
-    page.drawText(`${noteCount} ออเดอร์`, { x: PAD, y, size: 8, font, color: MID });
+    const noteCount = buyerNotes.length + sellerNotes.length;
+    const countParts = [];
+    if (buyerNotes.length)  countParts.push(`ลูกค้า ${buyerNotes.length}`);
+    if (sellerNotes.length) countParts.push(`ร้านค้า ${sellerNotes.length}`);
+    const countText = countParts.length ? `${noteCount} รายการ · ${countParts.join(' · ')}` : `${noteCount} ออเดอร์`;
+    page.drawText(countText, { x: PAD, y, size: 8, font, color: MID });
     y -= 8;
 
     // Separator
     page.drawLine({ start: { x: PAD, y }, end: { x: W - PAD, y }, thickness: 1, color: BLACK });
     y -= 12;
 
-    // ── Note list ─────────────────────────────────────────────────────────────
-    for (const note of (payload.notes || [])) {
-      if (y < 20) break;
-      const marker = `★${note.idx}`;
-      const markerW = font.widthOfTextAtSize(marker, 10) + 6;
-      page.drawText(marker, { x: PAD, y, size: 10, font, color: BLACK });
-      // Message with word-wrap up to 3 lines
-      const msg = note.msg ? `"${note.msg}"` : '—';
-      const msgLines = wrapTextToLines(msg, 3, font, 8.5, contentW - markerW);
-      let lineY = y;
-      for (const line of msgLines) {
-        page.drawText(line, { x: PAD + markerW, y: lineY, size: 8.5, font, color: DARK });
-        lineY -= 11;
-        if (lineY < 20) break;
+    // Render one note section (buyer or seller) — shared code, differs only
+    // by section heading + marker prefix. Uses glyphs ALL confirmed present
+    // in Sarabun-Bold (★ + Thai letters) to avoid .notdef squares.
+    const drawSection = (heading, prefix, notes) => {
+      if (!notes.length || y < 30) return;
+      page.drawText(heading, { x: PAD, y, size: 9, font, color: BLACK });
+      y -= 11;
+      for (const note of notes) {
+        if (y < 20) break;
+        const marker = `${prefix}★${note.idx}`;
+        const markerW = font.widthOfTextAtSize(marker, 10) + 6;
+        page.drawText(marker, { x: PAD, y, size: 10, font, color: BLACK });
+        const msg = note.msg ? `"${note.msg}"` : '—';
+        const msgLines = wrapTextToLines(msg, 3, font, 8.5, contentW - markerW);
+        let lineY = y;
+        for (const line of msgLines) {
+          page.drawText(line, { x: PAD + markerW, y: lineY, size: 8.5, font, color: DARK });
+          lineY -= 11;
+          if (lineY < 20) break;
+        }
+        y = Math.min(lineY, y - 14) - 3;
       }
-      y = Math.min(lineY, y - 14) - 3;
-    }
+      y -= 4;
+    };
+
+    drawSection('หมายเหตุลูกค้า', 'ล', buyerNotes);
+    drawSection('หมายเหตุร้านค้า', 'ร', sellerNotes);
 
     // ── Footer timestamp ──────────────────────────────────────────────────────
     const now = new Date();
@@ -4669,8 +5829,11 @@
     let W = 288; // A6 fallback width (pt)
     let H = 432; // A6 fallback height (pt)
     let firstGroupBytes = null;
+    let firstGroupPagesPerId = null;
     try {
-      firstGroupBytes = await callGenerateApiRaw(groups[0].ids);
+      const res = await callGenerateApiRaw(groups[0].ids);
+      firstGroupBytes = res.bytes;
+      firstGroupPagesPerId = res.pagesPerId;
       const sampleDoc = await PDFDocument.load(firstGroupBytes);
       const samplePage = sampleDoc.getPage(0);
       W = samplePage.getWidth();
@@ -4726,21 +5889,40 @@
       for (let pi = 0; pi < parts.length; pi++) {
         const part = parts[pi];
 
-        // Split IDs: normal orders first, note orders last so pages align with noteMap.
-        const noteIds   = part.ids.filter(id => state.records.get(id)?.hasNote);
-        const normalIds = part.ids.filter(id => !state.records.get(id)?.hasNote);
+        // Split IDs: normal first, noted last. An id is "noted" if it has
+        // EITHER a buyer note OR a seller note (or both). Each side has its
+        // own independent 1..N index space so the divider page can list them
+        // separately without number collisions.
+        const noteIds   = part.ids.filter(id => {
+          const r = state.records.get(id);
+          return r?.hasBuyerNote || r?.hasSellerNote || r?.hasNote;
+        });
+        const normalIds = part.ids.filter(id => {
+          const r = state.records.get(id);
+          return !(r?.hasBuyerNote || r?.hasSellerNote || r?.hasNote);
+        });
         const sortedIds = [...normalIds, ...noteIds];
-        const noteMap   = new Map();
-        noteIds.forEach((id, i) => noteMap.set(id, i + 1));
-        const hasNotes  = noteIds.length > 0;
+        const buyerMap  = new Map();
+        const sellerMap = new Map();
+        for (const id of noteIds) {
+          const r = state.records.get(id);
+          if (r?.hasBuyerNote || (r?.hasNote && !r?.hasSellerNote)) buyerMap.set(id, buyerMap.size + 1);
+          if (r?.hasSellerNote) sellerMap.set(id, sellerMap.size + 1);
+        }
+        const noteMap = { buyer: buyerMap, seller: sellerMap };
+        const hasNotes = noteIds.length > 0;
 
         // Fetch label bytes (reuse first-group probe when no note re-ordering needed).
         let labelsBytes;
+        let labelsPagesPerId = null;
         try {
           if (gi === 0 && pi === 0 && firstGroupBytes && part.ids.length === grp.ids.length && !hasNotes) {
             labelsBytes = firstGroupBytes;
+            labelsPagesPerId = firstGroupPagesPerId;
           } else {
-            labelsBytes = await callGenerateApiRaw(sortedIds);
+            const res = await callGenerateApiRaw(sortedIds);
+            labelsBytes = res.bytes;
+            labelsPagesPerId = res.pagesPerId;
           }
         } catch (e) {
           throw new Error(`กลุ่ม "${part.alias}" (${gi + 1}/${groups.length}) ดึง labels ไม่ได้: ${e.message}`);
@@ -4749,7 +5931,7 @@
         // Apply alias overlay (pass noteMap so ★N appears on note-order labels).
         if (state.overlayEnabled && labelsBytes) {
           try {
-            labelsBytes = await overlayAliasOnPdf(labelsBytes, sortedIds, () => {}, workerName, workerIcon, noteMap);
+            labelsBytes = await overlayAliasOnPdf(labelsBytes, sortedIds, () => {}, workerName, workerIcon, noteMap, labelsPagesPerId);
           } catch (_oErr) { /* continue unmodified */ }
         }
 
@@ -4764,6 +5946,7 @@
             carrierIconURL: part.carrierIconURL,
             qty: sortedIds.length,
             orderQty: part.orderQty || 1,
+            calendarMode: getActiveCalendarSummary(),
           }, font, workerName, assigneeKind);
         }
 
@@ -4775,28 +5958,54 @@
               const copied = await finalDoc.copyPages(partDoc, partDoc.getPageIndices());
               copied.forEach(p => finalDoc.addPage(p));
             } else {
-              // Copy normal-order pages first.
+              // §Multi-page labels: labels may span >1 page each, so the
+              // normal/note boundary is not simply normalIds.length. Use
+              // pagesPerId to compute actual page index ranges per id.
+              const perId = (Array.isArray(labelsPagesPerId) && labelsPagesPerId.length === sortedIds.length)
+                ? labelsPagesPerId
+                : sortedIds.map(() => 1);
+              const pageRangeFor = (startIdIdx, endIdIdx) => {
+                let startPage = 0;
+                for (let k = 0; k < startIdIdx; k++) startPage += Math.max(1, perId[k] | 0);
+                let count = 0;
+                for (let k = startIdIdx; k < endIdIdx; k++) count += Math.max(1, perId[k] | 0);
+                return Array.from({ length: count }, (_, i) => startPage + i);
+              };
+
+              // Copy normal-order pages first (spanning 0..normalIds.length-1).
               if (normalIds.length > 0) {
-                const normalIdx = Array.from({ length: normalIds.length }, (_, i) => i);
-                const copiedNormal = await finalDoc.copyPages(partDoc, normalIdx);
-                copiedNormal.forEach(p => finalDoc.addPage(p));
+                const normalIdx = pageRangeFor(0, normalIds.length);
+                if (normalIdx.length > 0) {
+                  const copiedNormal = await finalDoc.copyPages(partDoc, normalIdx);
+                  copiedNormal.forEach(p => finalDoc.addPage(p));
+                }
               }
-              // Insert note zone divider page.
-              const notes = noteIds.map((id, i) => ({
-                idx: i + 1,
-                msg: state.records.get(id)?.buyerNote || '',
-              }));
+              // Insert note-zone divider page. Buyer & seller notes are
+              // listed in SEPARATE sections with their own indexes so the ★N
+              // on each label maps back to exactly one message.
+              const buyerNotes = [];
+              const sellerNotes = [];
+              for (const id of noteIds) {
+                const r = state.records.get(id);
+                const bIdx = buyerMap.get(id);
+                if (bIdx != null && r?.buyerNote) buyerNotes.push({ idx: bIdx, msg: r.buyerNote });
+                const sIdx = sellerMap.get(id);
+                if (sIdx != null && r?.sellerNote) sellerNotes.push({ idx: sIdx, msg: r.sellerNote });
+              }
               await buildNoteZoneDividerPage(finalDoc, { W, H }, {
                 alias: part.alias,
                 officialName: part.officialName,
                 variantName: part.variantName,
                 carrierName: part.carrierName,
-                notes,
+                buyerNotes,
+                sellerNotes,
               }, font);
               // Copy note-order pages after zone divider.
-              const noteIdx = Array.from({ length: noteIds.length }, (_, i) => normalIds.length + i);
-              const copiedNotes = await finalDoc.copyPages(partDoc, noteIdx);
-              copiedNotes.forEach(p => finalDoc.addPage(p));
+              const noteIdx = pageRangeFor(normalIds.length, sortedIds.length);
+              if (noteIdx.length > 0) {
+                const copiedNotes = await finalDoc.copyPages(partDoc, noteIdx);
+                copiedNotes.forEach(p => finalDoc.addPage(p));
+              }
             }
           } catch (_copyErr) { /* skip malformed */ }
         }
@@ -4809,15 +6018,14 @@
     return { bytes, pageCount: finalDoc.getPageCount() };
   }
 
-  // Helper: call TikTok's generate API for a list of fulfillUnitIds and return raw PDF bytes.
-  // Splits into batches of PRINT_BATCH_SIZE, merges pages, returns combined bytes.
+  // Helper: call TikTok's generate API for a list of fulfillUnitIds.
+  // Splits into segments that respect multi-SKU (multi-page) labels so we can
+  // track the exact page count per id. Returns { bytes, pagesPerId }.
   async function callGenerateApiRaw(ids) {
     const { PDFDocument } = window.PDFLib;
-    const batches = [];
-    for (let i = 0; i < ids.length; i += PRINT_BATCH_SIZE) {
-      batches.push(ids.slice(i, i + PRINT_BATCH_SIZE));
-    }
-    const batchDocs = await Promise.all(batches.map(async (batch) => {
+    const segments = splitIdsIntoApiSegments(ids);
+    const segResults = await Promise.all(segments.map(async (segment) => {
+      const batch = segment.ids;
       const body = {
         fulfill_unit_id_list: batch,
         content_type_list: [1, 2],
@@ -4848,17 +6056,24 @@
 
       const pdfResp = await _origFetch.call(window, docUrl);
       if (!pdfResp.ok) throw new Error(`PDF fetch HTTP ${pdfResp.status}`);
-      return pdfResp.arrayBuffer();
+      const bytes = await pdfResp.arrayBuffer();
+      let pageCount = batch.length;
+      try {
+        const probe = await PDFDocument.load(bytes);
+        pageCount = probe.getPageCount();
+      } catch { /* fall through with expected count */ }
+      return { bytes, pagesPerId: deriveSegmentPagesPerId(segment, pageCount) };
     }));
 
-    if (batchDocs.length === 1) return batchDocs[0];
+    const pagesPerId = segResults.flatMap(r => r.pagesPerId);
+    if (segResults.length === 1) return { bytes: segResults[0].bytes, pagesPerId };
     const merged = await PDFDocument.create();
-    for (const bytes of batchDocs) {
-      const part = await PDFDocument.load(bytes);
+    for (const r of segResults) {
+      const part = await PDFDocument.load(r.bytes);
       const copied = await merged.copyPages(part, part.getPageIndices());
       copied.forEach(p => merged.addPage(p));
     }
-    return merged.save();
+    return { bytes: await merged.save(), pagesPerId };
   }
 
   async function printIds(ids, displayLabel, sampleText, filenameHint) {
@@ -4882,18 +6097,8 @@
     }
     if (!ids.length) { showToast('ไม่พบ ID สำหรับพิมพ์ — ลองสแกนใหม่', 3000); return false; }
 
-    const confirm = await showPrintConfirm({
-      title: displayLabel || 'พิมพ์ฉลาก',
-      count: ids.length,
-      sampleText,
-    });
-    if (!confirm) return false;
-    const { workerId, workerName, workerIcon } = confirm;
-
     // §3.5: Use showChunkPlanModal when multi-SKU OR above threshold.
-    let plan;
-    // Detect multi-SKU: count distinct productId:skuId buckets across ALL skus in every record.
-    // A single record with >1 skus (weird combo) is already multi-SKU on its own.
+    // Detect multi-SKU first so we know which path to take.
     const skuBuckets = new Set();
     let hasComboRecord = false;
     for (const id of ids) {
@@ -4905,8 +6110,20 @@
       }
     }
     const multiSku = hasComboRecord || skuBuckets.size > 1;
-    if (!multiSku && ids.length <= CHUNK_PROMPT_THRESHOLD) {
-      plan = { mode: 'single', withPickingList: loadPickingListPref(), combined: false, withDivider: false };
+    const fastPath = !multiSku && ids.length <= CHUNK_PROMPT_THRESHOLD;
+
+    const confirm = await showPrintConfirm({
+      title: displayLabel || 'พิมพ์ฉลาก',
+      count: ids.length,
+      sampleText,
+      offerDivider: fastPath,
+    });
+    if (!confirm) return false;
+    const { workerId, workerName, workerIcon } = confirm;
+
+    let plan;
+    if (fastPath) {
+      plan = { mode: 'single', withPickingList: loadPickingListPref(), combined: false, withDivider: !!confirm.withDivider };
     } else {
       plan = await showChunkPlanModal({ total: ids.length, multiSku, defaultPickingList: loadPickingListPref() });
       if (!plan) return false;
@@ -5022,7 +6239,8 @@
           // Per-chunk worker identity (by-person/by-person-sku set these per chunk).
           const chunkWorkerName = chunks[ci].workerName || workerName;
           const chunkWorkerIcon = chunks[ci].workerIcon || workerIcon;
-          ({ bytes, pageCount } = await buildChunkPdf(chunks[ci].ids, (pct, label) => {
+          let chunkPagesPerId;
+          ({ bytes, pageCount, pagesPerId: chunkPagesPerId } = await buildChunkPdf(chunks[ci].ids, (pct, label) => {
             result.updateChunkProgress(ci, pct, label);
           }, chunkWorkerName, chunkWorkerIcon));
 
@@ -5033,7 +6251,7 @@
               // Per-chunk assigneeKind overrides top-level (by-person/by-person-sku sets it per chunk).
               const chunkKind = chunks[ci].assigneeKind || assigneeKind;
               const chunkWorkerName = chunks[ci].workerName || workerName;
-              const { bytes: dBytes, pageCount: dCount } = await prependDividersToChunk(bytes, chunks[ci].ids, chunkWorkerName, chunkKind);
+              const { bytes: dBytes, pageCount: dCount } = await prependDividersToChunk(bytes, chunks[ci].ids, chunkWorkerName, chunkKind, chunkPagesPerId);
               bytes = dBytes;
               if (dCount != null) pageCount = dCount;
             } catch (_dErr) {
@@ -6193,6 +7411,7 @@
         <div id="qf-header-actions">
           ${!labels ? '<button id="qf-reset-btn" title="รีเซ็ตฟิลเตอร์">↺</button>' : ''}
           ${isTikTok() && labels ? '<button id="qf-history-btn" class="qf-history-btn" title="ประวัติการพิมพ์">⏱<span class="qf-history-badge" style="display:none;">0</span></button>' : ''}
+          ${isTikTok() && labels ? '<button id="qf-addrbook-btn" class="qf-history-btn" title="สมุดที่อยู่ (จับก่อนพิมพ์)">📇<span class="qf-addrbook-badge" style="display:none;">0</span></button>' : ''}
           <div id="qf-settings-wrap" style="position:relative;">
             <button id="qf-settings-btn" title="ตั้งค่า">⋮</button>
             <div id="qf-settings-menu" class="qf-settings-menu" style="display:none;">
@@ -6229,6 +7448,7 @@
             <div class="qf-filter-label">สถานะ</div>
             <div class="qf-segmented" id="qf-status-seg">
               <button class="qf-seg-btn ${state.labelStatusFilter==='not_printed'?'active':''}" data-val="not_printed">ยังไม่พิมพ์</button>
+              <button class="qf-seg-btn ${state.labelStatusFilter==='failed'?'active':''}" data-val="failed">พิมพ์ไม่สำเร็จ</button>
               <button class="qf-seg-btn ${state.labelStatusFilter==='printed'?'active':''}" data-val="printed">พิมพ์แล้ว</button>
               <button class="qf-seg-btn ${state.labelStatusFilter==='all'?'active':''}" data-val="all">ทั้งหมด</button>
             </div>
@@ -6286,6 +7506,10 @@
       e.stopPropagation();
       openHistoryModal();
     });
+    document.getElementById('qf-addrbook-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openAddressBookModal();
+    });
     const settingsBtn = document.getElementById('qf-settings-btn');
     const settingsMenu = document.getElementById('qf-settings-menu');
     settingsBtn.addEventListener('click', (e) => {
@@ -6316,6 +7540,7 @@
       });
     }
     renderHistoryBadge();
+    refreshAddressBookBadge();
     document.getElementById('qf-scan-btn').addEventListener('click', scanAllPages);
     document.getElementById('qf-select-toggle')?.addEventListener('click', () => {
       setSelectMode(!state.selectMode);

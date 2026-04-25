@@ -2,3 +2,7 @@
 .claude/plans/
 node_modules/
 
+# Internal research notes — ห้าม commit / push
+notes/
+TODO-order-export-research.md
+

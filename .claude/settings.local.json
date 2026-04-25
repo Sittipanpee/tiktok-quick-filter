@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git -C /Users/testaccount/workspace/tiktok-quick-filter-main remote -v)"
+      "Bash(git -C /Users/testaccount/workspace/tiktok-quick-filter-main remote -v)",
+      "Bash(curl -s http://localhost:9222/json/version)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('OK:', d.get\\('Browser'\\)\\)\")"
     ]
   }
 }
