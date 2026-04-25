@@ -13551,6 +13551,11 @@
 
   // ==================== INIT ====================
   function init() {
+    // §When running inside an iframe (used by primeOrderGetTemplate to
+    // capture the signed /order/get URL), skip the widget UI entirely. The
+    // fetch hook above still runs and posts the captured template to the
+    // parent — that's all we need from the iframe.
+    if (window.top !== window) return;
     if (!isOrderPage() && !isLabelsPage()) return;
     // §7.6: Populate seller email from TikTok's session cookie (best-effort).
     try {
