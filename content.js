@@ -2971,66 +2971,32 @@
       }
       return '';
     };
-    // Verified via TikTok's order detail React tree: the canonical paths are
-    // `buyer_remark.note` and `seller_remark.note` (camelCase on detail page,
-    // snake_case on the labels API). Walk the record DEEPLY to find the
-    // first matching key — the labels API has been observed to nest these
-    // inside `trade_order_module[0]`, `order_remark_module`, and at root
-    // depending on shop region / API version, so we don't hard-code paths.
-    //
-    // Look for object form `{note,message,text}` first, then fall back to
-    // a flat string value. Stops as soon as a non-empty string is found.
-    const findNoteByKey = (obj, keyPattern, depth = 0, seen = new WeakSet()) => {
-      if (!obj || typeof obj !== 'object' || depth > 5 || seen.has(obj)) return '';
-      seen.add(obj);
-      // Direct keys at this level
-      for (const [k, v] of Object.entries(obj)) {
-        if (keyPattern.test(k)) {
-          if (typeof v === 'string' && v.trim()) return v.trim();
-          if (v && typeof v === 'object') {
-            const inner = v.note || v.message || v.text || v.content || v.value;
-            if (typeof inner === 'string' && inner.trim()) return inner.trim();
-          }
-        }
-      }
-      // Recurse into nested objects/arrays
-      for (const v of Object.values(obj)) {
-        if (v && typeof v === 'object') {
-          const found = findNoteByKey(v, keyPattern, depth + 1, seen);
-          if (found) return found;
-        }
-      }
-      return '';
-    };
-
-    const BUYER_NOTE_RE  = /^buyer_(remark|note|message)$/i;
-    const SELLER_NOTE_RE = /^seller_(remark|note|message|mark)$/i;
+    // Verified by capturing the live labels API: presence of notes is signaled
+    // by `rec.note_module.has_buyer_note` / `has_seller_note` (booleans). The
+    // labels list response intentionally does NOT include the note text — it
+    // must be fetched on-demand from the order detail endpoint (see
+    // `fetchOrderNotes` below). Keep legacy field-path probes as a safety net
+    // in case some shop regions still return inline text.
+    const noteModule = rec.note_module || {};
+    const hasBuyerFlag  = !!noteModule.has_buyer_note;
+    const hasSellerFlag = !!noteModule.has_seller_note;
 
     let buyerNote  = pickStr(
       tom.buyer_remark?.note, tom.buyer_remark?.message, tom.buyer_remark?.text,
       rec.buyer_remark?.note, rec.buyer_remark?.message, rec.buyer_remark?.text,
-      oem.buyer_remark?.note, orm.buyer_remark?.note,
       tom.buyer_message, tom.buyer_note,
-      oem.buyer_message, oem.buyer_note,
-      orm.buyer_message, orm.buyer_note,
       rec.buyer_message, rec.buyer_note, rec.order_note,
-      typeof tom.buyer_remark === 'string' ? tom.buyer_remark : null,
-      typeof rec.buyer_remark === 'string' ? rec.buyer_remark : null,
     );
-    if (!buyerNote) buyerNote = findNoteByKey(rec, BUYER_NOTE_RE);
-
     let sellerNote = pickStr(
       tom.seller_remark?.note, tom.seller_remark?.message, tom.seller_remark?.text,
       rec.seller_remark?.note, rec.seller_remark?.message, rec.seller_remark?.text,
-      oem.seller_remark?.note, orm.seller_remark?.note,
       tom.seller_note, tom.seller_message, tom.seller_mark,
-      oem.seller_note, oem.seller_remark, oem.seller_message,
-      orm.seller_note, orm.seller_remark, orm.seller_message,
       rec.seller_note, rec.seller_message,
-      typeof tom.seller_remark === 'string' ? tom.seller_remark : null,
-      typeof rec.seller_remark === 'string' ? rec.seller_remark : null,
     );
-    if (!sellerNote) sellerNote = findNoteByKey(rec, SELLER_NOTE_RE);
+
+    // Booleans drive the ★ badge on the label even when text isn't loaded yet.
+    const hasBuyerNote  = hasBuyerFlag  || !!buyerNote;
+    const hasSellerNote = hasSellerFlag || !!sellerNote;
 
     // §Debug: when scanning the very first record of a session that has any
     // note-shaped field, dump it so we can spot where TikTok actually puts
@@ -3057,14 +3023,21 @@
     return {
       fulfillUnitId: rec.fulfill_unit_id || lm.fulfill_unit_id,
       batchId: lm.batch_id,
-      orderIds: lm.order_ids || rec.order_ids,
+      // Order IDs live in `order_module[]` on the labels API — earlier we only
+      // looked at `label_module.order_ids` / root which were always undefined,
+      // so picking-list "Orders: 0" and order-claim lookup both failed.
+      orderIds: (lm.order_ids && lm.order_ids.length ? lm.order_ids : null)
+             || (rec.order_ids && rec.order_ids.length ? rec.order_ids : null)
+             || ((rec.order_module || []).map(o => o.main_order_id).filter(Boolean)),
       labelStatus: lm.label_status,
       isPreOrder,
       // hasNote: legacy flag — any note present. Kept so old call sites
       // (filters, routing) don't break. Prefer hasBuyerNote/hasSellerNote.
-      hasNote: !!(buyerNote || sellerNote),
-      hasBuyerNote: !!buyerNote,
-      hasSellerNote: !!sellerNote,
+      // The note_module flags from the labels API drive the booleans even
+      // when text isn't loaded yet (we lazy-fetch text from order detail).
+      hasNote: hasBuyerNote || hasSellerNote,
+      hasBuyerNote,
+      hasSellerNote,
       buyerNote,
       sellerNote,
       // Time fields — all converted to ms timestamps (some sources are in seconds)
@@ -5437,7 +5410,9 @@
       showAlias:   vis('alias'),
       showName:    true,
       showVariant: true,
-      showCarrier: vis('carrier'),
+      // Carrier is forced on — when groups are split by carrier the divider
+      // MUST show which one this block belongs to. Regardless of preset.
+      showCarrier: true,
       showImage:   true,
       showQty:     vis('qty'),
       showWorker:  vis('worker'),
@@ -5572,14 +5547,12 @@
       const iconSize = 14;
       let iconImg = null;
       if (payload.carrierIconURL) {
+        // Use toGrayscaleJpeg (canvas-based) — same path the product image
+        // uses, which avoids CORS / mixed-content issues that broke direct
+        // _origFetch + embedJpg on TikTok CDN icons.
         try {
-          const iconResp = await _origFetch.call(window, payload.carrierIconURL, { credentials: 'omit' });
-          if (iconResp.ok) {
-            const iconBuf = await iconResp.arrayBuffer();
-            const ct = iconResp.headers.get('content-type') || '';
-            const isPng = ct.includes('png') || payload.carrierIconURL.toLowerCase().includes('.png');
-            iconImg = isPng ? await pdfDoc.embedPng(iconBuf) : await pdfDoc.embedJpg(iconBuf);
-          }
+          const iconBuf = await toGrayscaleJpeg(payload.carrierIconURL);
+          if (iconBuf) iconImg = await pdfDoc.embedJpg(iconBuf);
         } catch { iconImg = null; }
       }
       const gap = iconImg ? 5 : 0;
