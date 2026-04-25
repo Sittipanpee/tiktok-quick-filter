@@ -3,7 +3,7 @@
   // VERSION MARKER — bumped when testing new features in DevTools.
   // Increment this string to confirm the browser picked up the freshest
   // content.js after reloading the extension in chrome://extensions.
-  window.__qfContentScriptBuild = 'address-book-eye-v2';
+  window.__qfContentScriptBuild = 'shopee-discovery-v1';
 
   // ==================== FETCH HOOK (runs at document_start, before TikTok saves window.fetch) ====================
   let _apiListUrl = null;
@@ -31,6 +31,69 @@
   // pre-order detection fails, so the user can report the real field name.
   // Reset per scan in scanAllPages so probing survives across scans.
   let _shopeePreOrderProbeLogged = false;
+  let _noteProbeLogged = false;
+
+  // Shopee endpoint discovery probe — captures any URL touching logistics /
+  // waybill / address / detail so we can map the print pipeline. Ring buffer
+  // bounded to keep memory low during long sessions. Inspect via
+  // window.__qfShopeeProbes() in DevTools after clicking print on Shopee.
+  const _shopeeProbeRing = [];
+  const SHOPEE_PROBE_RING_MAX = 20;
+  // Substring patterns that flag a URL as "interesting for Shopee print/address
+  // research". Add patterns here when we discover new endpoints. Negative
+  // patterns excluded later (chat, image upload).
+  const SHOPEE_PROBE_INTEREST = [
+    'logistics',           // /api/v3/logistics/* — waybill, can_print, channel info
+    'waybill',             // explicit waybill endpoints
+    'shipping',            // shipping label URLs
+    'print',               // any print-related path
+    'order/detail',        // single-order detail
+    'order/get_one',       // get_one_order
+    'buyer_address',       // buyer address endpoint
+    'buyer_user',          // buyer user info
+    'recipient',           // recipient details
+    'logistic_info',       // logistic info per order
+    'order/get_logistic',  // logistic lookup
+  ];
+  const SHOPEE_PROBE_EXCLUDE = ['/chat/', '/image/', '/file/upload', '/track/', '/log/event'];
+
+  function _shopeeShouldProbe(url) {
+    if (!url || typeof url !== 'string') return false;
+    if (!url.includes('shopee')) {
+      // Same-origin requests: only probe when host is the seller domain.
+      if (location.hostname !== 'seller.shopee.co.th') return false;
+    }
+    if (SHOPEE_PROBE_EXCLUDE.some(p => url.includes(p))) return false;
+    return SHOPEE_PROBE_INTEREST.some(p => url.includes(p));
+  }
+
+  function _shopeePushProbe(entry) {
+    _shopeeProbeRing.push({ ts: Date.now(), ...entry });
+    if (_shopeeProbeRing.length > SHOPEE_PROBE_RING_MAX) _shopeeProbeRing.shift();
+  }
+
+  // Expose inspector helpers — copy/paste these in DevTools console after
+  // performing the action you want to map (e.g. clicking Shopee's print button).
+  //   __qfShopeeProbes()              — table of captured URLs + status
+  //   __qfShopeeProbe(idx)            — full request+response of one entry
+  //   __qfShopeeProbeClear()          — reset ring buffer
+  window.__qfShopeeProbes = () => {
+    if (!_shopeeProbeRing.length) {
+      console.warn('[QF Shopee] no probes captured yet — perform an action (print, view order detail) on Shopee Seller');
+      return [];
+    }
+    return _shopeeProbeRing.map((p, i) => ({
+      idx: i,
+      method: p.method,
+      url: p.url.length > 80 ? p.url.slice(0, 80) + '…' : p.url,
+      status: p.status,
+      hasReqBody: !!p.requestBody,
+      hasRespJson: !!p.responseJson,
+      tsAgo: `${Math.round((Date.now() - p.ts) / 1000)}s ago`,
+    }));
+  };
+  window.__qfShopeeProbe = (idx) => _shopeeProbeRing[idx] || null;
+  window.__qfShopeeProbeClear = () => { _shopeeProbeRing.length = 0; console.log('[QF Shopee] probe ring cleared'); };
   // Passive API sniffer — captures the live endpoint URL and request-body template
   // the FIRST TIME TikTok/Shopee fires each order-list/labels API call, then stores
   // them for replay (bulk scan across pages). This is why content.js runs in MAIN
@@ -117,7 +180,38 @@
       captureBody(b => { if (!_shopeeCardBody) _shopeeCardBody = b; });
     }
 
+    // Shopee print/waybill/address discovery probe — captures full req+resp for
+    // any logistics/waybill/detail endpoint so we can map the print pipeline
+    // without rebuilding extension between every test.
+    const isShopeeProbe = _shopeeShouldProbe(url);
+    let _shopeeProbeReqBody = null;
+    if (isShopeeProbe) {
+      if (rawBodyStr) {
+        try { _shopeeProbeReqBody = JSON.parse(rawBodyStr); } catch { _shopeeProbeReqBody = rawBodyStr; }
+      } else if (bodyPromise) {
+        try { _shopeeProbeReqBody = await bodyPromise.then(t => { try { return JSON.parse(t); } catch { return t; } }); } catch {}
+      }
+    }
+
     const resp = await _origFetch.apply(this, args);
+
+    if (isShopeeProbe && resp) {
+      try {
+        resp.clone().json()
+          .then(j => {
+            _shopeePushProbe({
+              method: (args[1]?.method) || (args[0] instanceof Request ? args[0].method : 'GET'),
+              url, status: resp.status,
+              requestBody: _shopeeProbeReqBody,
+              responseJson: j,
+            });
+            console.log(`[QF Shopee probe] ${resp.status} ${url.slice(0, 100)} — keys:`, Object.keys(j?.data || j || {}));
+          })
+          .catch(() => {
+            _shopeePushProbe({ method: 'POST', url, status: resp.status, requestBody: _shopeeProbeReqBody, responseJson: null });
+          });
+      } catch {}
+    }
 
     // Passive response sniffer for /order/get — clone and parse off-thread
     // so we never block the response path or mutate anything TikTok consumes.
@@ -168,6 +262,30 @@
       _shopeeCardUrl = url;
       if (typeof body === 'string') { try { _shopeeCardBody = JSON.parse(body); } catch {} }
     }
+
+    // Shopee discovery probe — same coverage as fetch hook. We listen for
+    // load to read responseText, then push to ring buffer for inspection.
+    if (_shopeeShouldProbe(url)) {
+      let reqBody = body;
+      if (typeof body === 'string') {
+        try { reqBody = JSON.parse(body); } catch {}
+      }
+      const onLoad = () => {
+        let respJson = null;
+        try { respJson = JSON.parse(this.responseText); } catch { respJson = this.responseText; }
+        _shopeePushProbe({
+          method: this._qfMethod || 'POST', url, status: this.status,
+          requestBody: reqBody, responseJson: respJson,
+        });
+        try {
+          const top = respJson && typeof respJson === 'object' ? Object.keys(respJson?.data || respJson || {}) : [];
+          console.log(`[QF Shopee probe] ${this.status} ${url.slice(0, 100)} — keys:`, top);
+        } catch {}
+        this.removeEventListener('load', onLoad);
+      };
+      this.addEventListener('load', onLoad);
+    }
+
     return _origXhrSend.apply(this, [body]);
   };
 
@@ -2176,6 +2294,7 @@
     state.preOrderOf.clear();
     // Allow one fresh Shopee pre-order probe dump per scan
     _shopeePreOrderProbeLogged = false;
+    _noteProbeLogged = false;
 
     const statusEl = document.getElementById('qf-scan-status');
     const btn = document.getElementById('qf-scan-btn');
@@ -2530,9 +2649,6 @@
     const labelStatus = logisticsStatus >= 3 ? LABEL_STATUS_PRINTED : LABEL_STATUS_NOT_PRINTED;
 
     // Pre-order detection. CLAUDE.md lists 3 possible locations; try each.
-    // If none are present (unknown schema), dump the first record shape to
-    // the console once so the user can identify the real field and we can
-    // pin it down. Guard with a module-level flag to avoid log spam.
     const firstItem = items?.[0] || {};
     let isPreOrder = !!(
       ext?.is_pre_order
@@ -2542,25 +2658,52 @@
       || firstItem.inner_item_ext_info?.is_pre_order
       || firstItem.item_ext_info?.is_pre_order
     );
-    // TODO (needs live verification): Shopee's exact pre-order field is not
-    // documented here. If isPreOrder stays false for every record on a tab
-    // with known pre-order items, inspect the dump below and add the right
-    // path. Dump runs once per scan — cleared in scanAllPages.
-    if (!isPreOrder && !_shopeePreOrderProbeLogged && (ext || pkgExt || fulfilment)) {
+
+    // Carrier icon — Shopee's exact field name not yet pinned. Try the most
+    // common shapes; falls back to '' so existing UI doesn't break.
+    const sp = fulfilment || {};
+    const carrierIconUrl = sp.icon_url
+      || sp.logistics_image
+      || sp.channel_logo
+      || sp.image_url
+      || sp.fulfilment_channel_logo
+      || sp.fulfilment_channel_image
+      || '';
+    const carrierName = sp.fulfilment_channel_name || sp.masked_channel_name || 'ไม่ระบุ';
+    const carrierId = String(sp.fulfilment_channel_id || sp.fulfilment_channel_name || ext.masked_channel_id || 'unknown');
+
+    // Buyer note — defensive walk of common Shopee fields.
+    const buyerNote = String(
+      ext?.buyer_remark
+      || pkgExt?.buyer_remark
+      || ext?.note_to_seller
+      || ext?.buyer_message
+      || firstItem.buyer_remark
+      || ''
+    ).trim();
+
+    // First-record discovery dump — runs once per scan when ANY of these are
+    // missing (pre-order field, carrier icon, note). Reset in scanAllPages.
+    if (!_shopeePreOrderProbeLogged && (ext || pkgExt || fulfilment)) {
       _shopeePreOrderProbeLogged = true;
       try {
-        console.log('[QF Shopee pre-order probe] ext keys:', Object.keys(ext || {}));
-        console.log('[QF Shopee pre-order probe] pkgExt keys:', Object.keys(pkgExt || {}));
-        console.log('[QF Shopee pre-order probe] fulfilment keys:', Object.keys(fulfilment || {}));
-        console.log('[QF Shopee pre-order probe] item keys:', Object.keys(firstItem));
-        console.log('[QF Shopee pre-order probe] inner_item_ext_info:', firstItem.inner_item_ext_info);
-        console.log('[QF Shopee pre-order probe] full ext:', ext);
+        const probe = {
+          ext_keys: Object.keys(ext || {}),
+          pkgExt_keys: Object.keys(pkgExt || {}),
+          fulfilment_keys: Object.keys(fulfilment || {}),
+          item_keys: Object.keys(firstItem),
+          inner_item_keys: Object.keys(firstItem.inner_item_ext_info || {}),
+          // Detected values (or empty if missing)
+          detected: { isPreOrder, carrierName, carrierIconUrl, buyerNote: buyerNote.slice(0, 50) },
+          // Full objects so we can grep for the right field name visually
+          fulfilment_full: fulfilment,
+          ext_sample: ext,
+        };
+        console.log('[QF Shopee record probe] First scanned record →', probe);
+        console.log('[QF Shopee record probe] To inspect more: window.__qfShopeeProbes()');
       } catch {}
     }
 
-    const sp = fulfilment || {};
-    const carrierName = sp.fulfilment_channel_name || sp.masked_channel_name || 'ไม่ระบุ';
-    const carrierId = String(sp.fulfilment_channel_name || ext.masked_channel_id || 'unknown');
     processLabelRecord({
       fulfillUnitId: String(fulfillUnitId),
       batchId: String(batchId || fulfillUnitId),
@@ -2568,8 +2711,11 @@
       labelStatus,
       isPreOrder,
       skuList,
-      shippingProviderInfo: { name: carrierName, iconUrl: '' },
-      deliveryInfo: { shippingProvider: { id: carrierId, name: carrierName, icon_url: '' } },
+      shippingProviderInfo: { name: carrierName, iconUrl: carrierIconUrl },
+      deliveryInfo: { shippingProvider: { id: carrierId, name: carrierName, icon_url: carrierIconUrl } },
+      buyerNote,
+      hasBuyerNote: !!buyerNote,
+      hasNote: !!buyerNote,
     });
   }
 
@@ -2813,13 +2959,101 @@
     const olm = rec.order_label_module || [];
     const isPreOrder = olm.some(o => o.isPreOrder === 1 || o.is_pre_order === 1);
     // Note capture — separate buyer vs seller so they never collide on the
-    // label or in the note-zone divider. Each side has multiple candidate
-    // fields across API versions; pick the first non-empty value.
+    // label or in the note-zone divider. TikTok's API uses different field
+    // names across versions and sometimes tucks notes inside nested modules,
+    // so we walk a wide net. First non-empty wins per side.
     const tom = rec.trade_order_module?.[0] || {};
-    const buyerNote = (tom.buyer_message || tom.buyer_note
-      || rec.buyer_message || rec.order_note || '').trim();
-    const sellerNote = (tom.seller_note || tom.seller_remark || tom.seller_message
-      || rec.seller_note || rec.seller_remark || tom.remark || '').trim();
+    const oem = rec.order_extra_module?.[0] || rec.order_extra_module || {};
+    const orm = rec.order_remark_module?.[0] || rec.order_remark_module || {};
+    const pickStr = (...vals) => {
+      for (const v of vals) {
+        if (typeof v === 'string' && v.trim()) return v.trim();
+      }
+      return '';
+    };
+    // Verified via TikTok's order detail React tree: the canonical paths are
+    // `buyer_remark.note` and `seller_remark.note` (camelCase on detail page,
+    // snake_case on the labels API). Walk the record DEEPLY to find the
+    // first matching key — the labels API has been observed to nest these
+    // inside `trade_order_module[0]`, `order_remark_module`, and at root
+    // depending on shop region / API version, so we don't hard-code paths.
+    //
+    // Look for object form `{note,message,text}` first, then fall back to
+    // a flat string value. Stops as soon as a non-empty string is found.
+    const findNoteByKey = (obj, keyPattern, depth = 0, seen = new WeakSet()) => {
+      if (!obj || typeof obj !== 'object' || depth > 5 || seen.has(obj)) return '';
+      seen.add(obj);
+      // Direct keys at this level
+      for (const [k, v] of Object.entries(obj)) {
+        if (keyPattern.test(k)) {
+          if (typeof v === 'string' && v.trim()) return v.trim();
+          if (v && typeof v === 'object') {
+            const inner = v.note || v.message || v.text || v.content || v.value;
+            if (typeof inner === 'string' && inner.trim()) return inner.trim();
+          }
+        }
+      }
+      // Recurse into nested objects/arrays
+      for (const v of Object.values(obj)) {
+        if (v && typeof v === 'object') {
+          const found = findNoteByKey(v, keyPattern, depth + 1, seen);
+          if (found) return found;
+        }
+      }
+      return '';
+    };
+
+    const BUYER_NOTE_RE  = /^buyer_(remark|note|message)$/i;
+    const SELLER_NOTE_RE = /^seller_(remark|note|message|mark)$/i;
+
+    let buyerNote  = pickStr(
+      tom.buyer_remark?.note, tom.buyer_remark?.message, tom.buyer_remark?.text,
+      rec.buyer_remark?.note, rec.buyer_remark?.message, rec.buyer_remark?.text,
+      oem.buyer_remark?.note, orm.buyer_remark?.note,
+      tom.buyer_message, tom.buyer_note,
+      oem.buyer_message, oem.buyer_note,
+      orm.buyer_message, orm.buyer_note,
+      rec.buyer_message, rec.buyer_note, rec.order_note,
+      typeof tom.buyer_remark === 'string' ? tom.buyer_remark : null,
+      typeof rec.buyer_remark === 'string' ? rec.buyer_remark : null,
+    );
+    if (!buyerNote) buyerNote = findNoteByKey(rec, BUYER_NOTE_RE);
+
+    let sellerNote = pickStr(
+      tom.seller_remark?.note, tom.seller_remark?.message, tom.seller_remark?.text,
+      rec.seller_remark?.note, rec.seller_remark?.message, rec.seller_remark?.text,
+      oem.seller_remark?.note, orm.seller_remark?.note,
+      tom.seller_note, tom.seller_message, tom.seller_mark,
+      oem.seller_note, oem.seller_remark, oem.seller_message,
+      orm.seller_note, orm.seller_remark, orm.seller_message,
+      rec.seller_note, rec.seller_message,
+      typeof tom.seller_remark === 'string' ? tom.seller_remark : null,
+      typeof rec.seller_remark === 'string' ? rec.seller_remark : null,
+    );
+    if (!sellerNote) sellerNote = findNoteByKey(rec, SELLER_NOTE_RE);
+
+    // §Debug: when scanning the very first record of a session that has any
+    // note-shaped field, dump it so we can spot where TikTok actually puts
+    // the data when the field paths above miss it. One-shot guard prevents
+    // log spam. Read window.__qfNoteProbe in DevTools.
+    if (!_noteProbeLogged && (buyerNote || sellerNote || tom.buyer_remark || tom.seller_remark || rec.buyer_remark || rec.seller_remark)) {
+      _noteProbeLogged = true;
+      try {
+        window.__qfNoteProbe = {
+          tom, oem, orm,
+          recBuyerRemark: rec.buyer_remark, recSellerRemark: rec.seller_remark,
+          tomBuyerRemark: tom.buyer_remark, tomSellerRemark: tom.seller_remark,
+          recKeys: Object.keys(rec),
+          tomKeys: Object.keys(tom),
+        };
+        console.log('[QF note-probe] tom keys:', Object.keys(tom));
+        console.log('[QF note-probe] tom.buyer_remark:', tom.buyer_remark);
+        console.log('[QF note-probe] tom.seller_remark:', tom.seller_remark);
+        console.log('[QF note-probe] rec.buyer_remark:', rec.buyer_remark);
+        console.log('[QF note-probe] rec.seller_remark:', rec.seller_remark);
+        console.log('[QF note-probe] resolved:', { buyerNote, sellerNote });
+      } catch {}
+    }
     return {
       fulfillUnitId: rec.fulfill_unit_id || lm.fulfill_unit_id,
       batchId: lm.batch_id,
