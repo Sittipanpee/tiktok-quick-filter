@@ -5724,43 +5724,69 @@
     return { fieldLabel, rangeText };
   }
 
-  // §7.4: Insert a full-page note-zone divider before note-order labels.
-  // payload = { alias, officialName, variantName, carrierName, notes: [{idx, msg}] }
+  // §7.4: Insert note-zone divider page(s) before note-order labels.
+  // Switches per-section to compact inline layout when notes > threshold,
+  // and spawns continuation pages on overflow so nothing is truncated.
+  // payload = { alias, officialName, variantName, carrierName, buyerNotes, sellerNotes }
   async function buildNoteZoneDividerPage(pdfDoc, { W, H }, payload, font) {
     const { rgb } = window.PDFLib;
-    const page = pdfDoc.addPage([W, H]);
     const BLACK = rgb(0, 0, 0);
     const DARK  = rgb(0.15, 0.15, 0.15);
     const MID   = rgb(0.4, 0.4, 0.4);
     const LIGHT = rgb(0.6, 0.6, 0.6);
     const PAD   = 14;
+    const FOOTER_RESERVE = 18; // keep room for timestamp footer
+    const COMPACT_THRESHOLD = 6; // per-section: >N → inline reflow
     const contentW = W - PAD * 2;
 
     // Back-compat: older callers may pass `notes` (buyer-only).
     const buyerNotes  = payload.buyerNotes  || payload.notes || [];
     const sellerNotes = payload.sellerNotes || [];
 
-    // ── Header bar ───────────────────────────────────────────────────────────
+    let page = pdfDoc.addPage([W, H]);
+    let y;
+
+    const drawFooter = (pg) => {
+      const now = new Date();
+      const p2  = n => String(n).padStart(2, '0');
+      pg.drawText(
+        `พิมพ์เมื่อ ${p2(now.getDate())}/${p2(now.getMonth()+1)}/${now.getFullYear()} ${p2(now.getHours())}:${p2(now.getMinutes())} น.`,
+        { x: PAD, y: 8, size: 7, font, color: LIGHT }
+      );
+    };
+
+    const newPage = () => {
+      drawFooter(page);
+      page = pdfDoc.addPage([W, H]);
+      y = H - 14;
+      page.drawText('★ หมายเหตุ (ต่อ)', { x: PAD, y, size: 9, font, color: MID });
+      y -= 11;
+      page.drawLine({ start: { x: PAD, y }, end: { x: W - PAD, y }, thickness: 0.5, color: LIGHT });
+      y -= 10;
+    };
+
+    const ensureSpace = (needed) => {
+      if (y - needed < FOOTER_RESERVE) newPage();
+    };
+
+    // ── Page 1 header ─────────────────────────────────────────────────────────
     const TITLE_SIZE = 10;
-    let y = H - 14;
+    y = H - 14;
     page.drawText('★ หมายเหตุ', { x: PAD, y, size: TITLE_SIZE, font, color: MID });
     y -= TITLE_SIZE + 4;
 
-    // Alias (dynamic, up to 2 lines, slightly smaller than standard divider)
     if (payload.alias) {
       const aliasBase = Math.min(H * 0.04, 16);
       y = drawAliasBlock(page, font, payload.alias, aliasBase, contentW, W, y, BLACK);
       y -= 2;
     }
 
-    // Product line: officialName · variant · carrier (small, grey)
     const productParts = [payload.officialName, payload.variantName, payload.carrierName].filter(Boolean);
     if (productParts.length) {
       page.drawText(productParts.join(' · '), { x: PAD, y, size: 7.5, font, color: DARK, maxWidth: contentW });
       y -= 10;
     }
 
-    // Count
     const noteCount = buyerNotes.length + sellerNotes.length;
     const countParts = [];
     if (buyerNotes.length)  countParts.push(`ลูกค้า ${buyerNotes.length}`);
@@ -5769,46 +5795,85 @@
     page.drawText(countText, { x: PAD, y, size: 8, font, color: MID });
     y -= 8;
 
-    // Separator
     page.drawLine({ start: { x: PAD, y }, end: { x: W - PAD, y }, thickness: 1, color: BLACK });
     y -= 12;
 
-    // Render one note section (buyer or seller) — shared code, differs only
-    // by section heading + marker prefix. Uses glyphs ALL confirmed present
-    // in Sarabun-Bold (★ + Thai letters) to avoid .notdef squares.
-    const drawSection = (heading, prefix, notes) => {
-      if (!notes.length || y < 30) return;
+    // Verbose mode (≤threshold): one note per row, marker + wrapped message.
+    const drawSectionVerbose = (heading, prefix, notes) => {
+      if (!notes.length) return;
+      ensureSpace(11);
       page.drawText(heading, { x: PAD, y, size: 9, font, color: BLACK });
       y -= 11;
       for (const note of notes) {
-        if (y < 20) break;
         const marker = `${prefix}★${note.idx}`;
         const markerW = font.widthOfTextAtSize(marker, 10) + 6;
-        page.drawText(marker, { x: PAD, y, size: 10, font, color: BLACK });
         const msg = note.msg ? `"${note.msg}"` : '—';
         const msgLines = wrapTextToLines(msg, 3, font, 8.5, contentW - markerW);
+        const blockH = Math.max(11 * msgLines.length, 11) + 3;
+        ensureSpace(blockH);
+        page.drawText(marker, { x: PAD, y, size: 10, font, color: BLACK });
         let lineY = y;
         for (const line of msgLines) {
           page.drawText(line, { x: PAD + markerW, y: lineY, size: 8.5, font, color: DARK });
           lineY -= 11;
-          if (lineY < 20) break;
         }
-        y = Math.min(lineY, y - 14) - 3;
+        y = Math.min(lineY, y - 11) - 3;
       }
       y -= 4;
+    };
+
+    // Compact inline mode (>threshold): tokens flow with separator, wrap as paragraph.
+    const drawSectionInline = (heading, prefix, notes) => {
+      if (!notes.length) return;
+      ensureSpace(11);
+      page.drawText(heading, { x: PAD, y, size: 9, font, color: BLACK });
+      y -= 11;
+      const SIZE   = 8.5;
+      const LINE_H = 11;
+      const SEP    = ' · ';
+      let curLine = '';
+      const flush = () => {
+        if (!curLine) return;
+        ensureSpace(LINE_H);
+        page.drawText(curLine, { x: PAD, y, size: SIZE, font, color: DARK });
+        y -= LINE_H;
+        curLine = '';
+      };
+      for (const note of notes) {
+        const msg = (note.msg || '—').replace(/\s+/g, ' ').trim();
+        const token = `${prefix}★${note.idx} ${msg}`;
+        const candidate = curLine ? `${curLine}${SEP}${token}` : token;
+        if (font.widthOfTextAtSize(candidate, SIZE) <= contentW) {
+          curLine = candidate;
+          continue;
+        }
+        flush();
+        // Single token wider than contentW → hard-wrap across lines.
+        if (font.widthOfTextAtSize(token, SIZE) > contentW) {
+          const sub = wrapTextToLines(token, 99, font, SIZE, contentW);
+          for (let i = 0; i < sub.length - 1; i++) {
+            ensureSpace(LINE_H);
+            page.drawText(sub[i], { x: PAD, y, size: SIZE, font, color: DARK });
+            y -= LINE_H;
+          }
+          curLine = sub[sub.length - 1] || '';
+        } else {
+          curLine = token;
+        }
+      }
+      flush();
+      y -= 4;
+    };
+
+    const drawSection = (heading, prefix, notes) => {
+      if (notes.length > COMPACT_THRESHOLD) drawSectionInline(heading, prefix, notes);
+      else                                   drawSectionVerbose(heading, prefix, notes);
     };
 
     drawSection('หมายเหตุลูกค้า', 'ล', buyerNotes);
     drawSection('หมายเหตุร้านค้า', 'ร', sellerNotes);
 
-    // ── Footer timestamp ──────────────────────────────────────────────────────
-    const now = new Date();
-    const p2  = n => String(n).padStart(2, '0');
-    page.drawText(
-      `พิมพ์เมื่อ ${p2(now.getDate())}/${p2(now.getMonth()+1)}/${now.getFullYear()} ${p2(now.getHours())}:${p2(now.getMinutes())} น.`,
-      { x: PAD, y: 8, size: 7, font, color: LIGHT }
-    );
-
+    drawFooter(page);
     return page;
   }
 
