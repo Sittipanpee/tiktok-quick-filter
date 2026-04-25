@@ -146,6 +146,20 @@
     if (isOrderGet && !_orderGetUrl) {
       _orderGetUrl = url;
       captureBody(b => { if (!_orderGetBodyTemplate) _orderGetBodyTemplate = b; });
+      // §When this content script runs inside the auto-priming iframe (see
+      // primeOrderGetTemplate), forward the captured URL + body to the parent
+      // labels page so it can run note backfill without the user navigating.
+      if (window.top !== window) {
+        captureBody(b => {
+          try {
+            window.parent.postMessage({
+              __qfNotePrime: true,
+              url,
+              body: b || null,
+            }, '*');
+          } catch (e) {}
+        });
+      }
     }
 
     // Buyer contact info (eye-icon decrypt) — capture URL + template body.
@@ -1319,20 +1333,82 @@
     return _orderGetUrl || null;
   }
 
+  // §Auto-prime the /order/get template by loading any order-detail URL in
+  // a hidden iframe. The iframe runs the same content script, captures the
+  // signed URL + body when TikTok fires order/get, and posts it back to the
+  // parent. We accept the message in the listener registered below.
+  // Idempotent: if the template is already captured (or priming is already
+  // in flight), returns the existing promise so concurrent callers wait
+  // on the same operation.
+  let _primePromise = null;
+  function primeOrderGetTemplate(sampleOrderId) {
+    if (_orderGetUrl && _orderGetBodyTemplate) return Promise.resolve(true);
+    if (_primePromise) return _primePromise;
+    if (!sampleOrderId) return Promise.resolve(false);
+
+    _primePromise = new Promise((resolve) => {
+      let resolved = false;
+      const cleanup = (frame, ok) => {
+        if (resolved) return;
+        resolved = true;
+        try { frame?.remove(); } catch (e) {}
+        // Allow another prime attempt later if this one failed.
+        if (!ok) _primePromise = null;
+        resolve(ok);
+      };
+
+      // Listener resolves when iframe posts back the captured template.
+      const onMsg = (ev) => {
+        const d = ev.data;
+        if (!d || !d.__qfNotePrime || !d.url) return;
+        // Update parent-scope captures so backfill can run.
+        if (!_orderGetUrl) _orderGetUrl = d.url;
+        if (!_orderGetBodyTemplate && d.body) _orderGetBodyTemplate = d.body;
+        window.removeEventListener('message', onMsg);
+        cleanup(frame, true);
+      };
+      window.addEventListener('message', onMsg);
+
+      const frame = document.createElement('iframe');
+      frame.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;border:0;opacity:0;pointer-events:none;';
+      frame.src = `/order/detail?order_no=${encodeURIComponent(sampleOrderId)}&shop_region=TH`;
+      document.body.appendChild(frame);
+
+      // Timeout: TikTok's detail page should fire order/get within ~6s on
+      // most networks. After 12s we give up — likely the URL pattern changed
+      // or auth timed out — but don't break print, just skip notes.
+      setTimeout(() => {
+        window.removeEventListener('message', onMsg);
+        cleanup(frame, !!(_orderGetUrl && _orderGetBodyTemplate));
+      }, 12000);
+    });
+
+    return _primePromise;
+  }
+
   // Notes-only backfill — one /order/get per unique orderId where the local
   // record has no buyerNote / sellerNote yet. Reuses the same throttling so
   // we don't double-bill the rate-limit budget. Skips orders we've already
   // populated from a passive sniff or an earlier print run.
   async function tryBackfillNotesViaOrderGet(tasks) {
+    // Wait briefly on a prime that's already running (kicked off at scan
+    // completion). DO NOT start a fresh prime here — that would block the
+    // print path for up to 12s. If the user printed before prime completed,
+    // we just skip notes for this chunk (subsequent chunks will pick up
+    // notes once the in-flight prime finishes).
+    if ((!_orderGetUrl || !_orderGetBodyTemplate) && _primePromise) {
+      try {
+        await Promise.race([
+          _primePromise,
+          new Promise(r => setTimeout(r, 1500)), // hard cap so print isn't held up
+        ]);
+      } catch (e) {}
+    }
     const orderGetUrl = deriveOrderGetUrl();
     if (!orderGetUrl || !_orderGetBodyTemplate) {
-      // One-shot dev hint so the user knows why notes don't appear yet.
       if (!_noteTemplateHintShown) {
         _noteTemplateHintShown = true;
-        try {
-          showToast('เปิดหน้า "รายละเอียดออเดอร์" 1 ครั้ง เพื่อเปิดใช้ ★ note บนใบฉลาก', 5000);
-        } catch (e) {}
-        console.log('[QF] note backfill skipped — open any order detail page once to capture /order/get template');
+        console.log('[QF] note backfill skipped — order_get template not yet captured (prime still in flight)');
       }
       return;
     }
@@ -2471,6 +2547,16 @@
         else await scanLabelsPage(statusEl);
         statusEl.textContent = `✓ ${state.products.size} สินค้า | ${state.weirdOrders.length} แปลก`;
         renderAll();
+        // §Background prime for /order/get template — kicks off a hidden
+        // iframe so by print time we already have the signed URL + body
+        // captured. Adds 0ms to the print path; runs in parallel with the
+        // user reviewing the scan result.
+        if (isTikTok() && !_orderGetUrl) {
+          for (const rec of state.records.values()) {
+            const sample = rec.orderIds?.[0];
+            if (sample) { primeOrderGetTemplate(sample).catch(() => {}); break; }
+          }
+        }
       } catch (err) {
         statusEl.textContent = 'ผิดพลาด: ' + err.message;
         console.error('[QF] scan failed:', err);
