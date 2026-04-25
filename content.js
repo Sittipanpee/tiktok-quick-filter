@@ -1255,50 +1255,69 @@
     // Resolve orderIds from state.records (fulfillUnitId → orderIds) and
     // determine which contact_info_type slots are still missing per order.
     const tasks = [];
+    // Note tasks track every (orderId, fulfillUnitId) regardless of whether
+    // the address book is already full — addresses and notes are independent
+    // and notes need their own backfill pass.
+    const noteTasks = [];
     for (const fid of fulfillIds) {
       const rec = state.records.get(fid);
       if (!rec) continue;
       const oids = rec.orderIds || [];
       for (const oid of oids) {
         const existing = await getAddressByOrderId(oid);
-        // Consider "fully captured" if we already have name+phone+address
-        // (the three fields we care about for reprint/claims workflow).
         const full = existing && !existing.isMasked
                      && existing.recipientName
                      && existing.recipientPhone
                      && existing.addressDetail;
+        // Always queue for note backfill if note text is missing on the
+        // record, regardless of address-book state.
+        if (!rec.buyerNote && !rec.sellerNote) {
+          noteTasks.push({ orderId: String(oid), fulfillUnitId: String(fid) });
+        }
         if (full) continue;
         const needTypes = [];
         if (!existing?.recipientName)   needTypes.push(CONTACT_TYPE_NAME);
         if (!existing?.addressDetail)   needTypes.push(CONTACT_TYPE_ADDRESS);
         if (!existing?.recipientPhone)  needTypes.push(CONTACT_TYPE_PHONE);
-        // Nickname (type 3) is cheap info — only fetch if we have budget.
-        // Skipped in backfill; user sees it when they manually click an eye.
         tasks.push({ orderId: String(oid), fulfillUnitId: String(fid), needTypes });
       }
     }
-    if (!tasks.length) return;
 
-    // Prefer eye-click endpoint; fall back to /order/get if template missing.
     // Notes (buyer/seller remarks) live ONLY in /order/get's response — the
     // labels list and buyer_contact endpoints don't carry them — so we fire
-    // a parallel notes backfill whenever we have the order_get template.
-    const notesPromise = (_orderGetUrl && _orderGetBodyTemplate)
-      ? tryBackfillNotesViaOrderGet(tasks)
-      : Promise.resolve();
+    // a parallel notes backfill that derives /order/get URL from the labels
+    // API URL when needed (works without a captured order_get template).
+    const notesPromise = noteTasks.length ? tryBackfillNotesViaOrderGet(noteTasks) : Promise.resolve();
 
+    if (!tasks.length) {
+      // All addresses already in book — only notes remain.
+      await notesPromise;
+      return;
+    }
     if (_buyerContactUrl && _buyerContactBodyTemplate) {
       await Promise.all([tryBackfillViaBuyerContact(tasks), notesPromise]);
       return;
     }
     if (_orderGetUrl && _orderGetBodyTemplate) {
-      // No buyer_contact template yet — order/get already returns address +
-      // notes in one shot, so the existing flow covers both.
+      // No buyer_contact template yet — order/get returns address + notes in
+      // one shot, so the existing flow covers both.
       await tryBackfillViaOrderGet(tasks);
       return;
     }
-    // Neither template available — at least try notes if we have order_get.
+    // Neither full template available — notes backfill still tries via the
+    // derived URL. Address won't backfill without a real template.
     await notesPromise;
+  }
+
+  // Derive an /order/get URL from the captured labels API URL when TikTok
+  // hasn't fired order/get yet in this session (most common: user goes
+  // straight from labels page to print without opening a single order).
+  // Both endpoints share the same signed query string (aid, app_name, fp,
+  // device_platform, etc.) — only the path differs — so we just swap paths.
+  function deriveOrderGetUrl() {
+    if (_orderGetUrl) return _orderGetUrl;
+    if (!_labelsApiUrl) return null;
+    return _labelsApiUrl.replace('/api/fulfillment/package/list', '/api/fulfillment/order/get');
   }
 
   // Notes-only backfill — one /order/get per unique orderId where the local
@@ -1306,7 +1325,12 @@
   // we don't double-bill the rate-limit budget. Skips orders we've already
   // populated from a passive sniff or an earlier print run.
   async function tryBackfillNotesViaOrderGet(tasks) {
-    if (!_orderGetUrl || !_orderGetBodyTemplate) return;
+    const orderGetUrl = deriveOrderGetUrl();
+    if (!orderGetUrl) return;
+    // Body template is optional — order/get accepts a minimal {order_id_list}
+    // shape. If TikTok captured a richer template earlier we use it; otherwise
+    // we send the bare minimum and let the server fill in defaults.
+    const bodyTemplate = _orderGetBodyTemplate || {};
     // Dedupe per orderId — multiple fulfill units can share one main order.
     const seen = new Set();
     const targets = [];
@@ -1331,8 +1355,8 @@
         if (!rateLimitGateOpen()) break;
         const t = targets[i++];
         try {
-          const body = { ...(_orderGetBodyTemplate || {}), order_id: t.orderId, order_id_list: [t.orderId] };
-          const r = await _origFetch.call(window, _orderGetUrl, {
+          const body = { ...bodyTemplate, order_id: t.orderId, order_id_list: [t.orderId] };
+          const r = await _origFetch.call(window, orderGetUrl, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(body),
