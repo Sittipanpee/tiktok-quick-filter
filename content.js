@@ -1333,10 +1333,24 @@
     return _orderGetUrl || null;
   }
 
+  // §Always-on listener for prime postMessages from any child iframe.
+  // Set at module load (not inside primeOrderGetTemplate) so even passive
+  // iframes — TikTok itself sometimes spawns a detail iframe — can populate
+  // the parent's _orderGetUrl / _orderGetBodyTemplate. Race-safe: only the
+  // first non-empty payload wins; later messages no-op once captured.
+  if (typeof window !== 'undefined' && window.top === window) {
+    window.addEventListener('message', (ev) => {
+      const d = ev.data;
+      if (!d || !d.__qfNotePrime || !d.url) return;
+      if (!_orderGetUrl) _orderGetUrl = d.url;
+      if (!_orderGetBodyTemplate && d.body) _orderGetBodyTemplate = d.body;
+    });
+  }
+
   // §Auto-prime the /order/get template by loading any order-detail URL in
   // a hidden iframe. The iframe runs the same content script, captures the
   // signed URL + body when TikTok fires order/get, and posts it back to the
-  // parent. We accept the message in the listener registered below.
+  // parent. The always-on listener above handles message reception.
   // Idempotent: if the template is already captured (or priming is already
   // in flight), returns the existing promise so concurrent callers wait
   // on the same operation.
@@ -1352,33 +1366,27 @@
         if (resolved) return;
         resolved = true;
         try { frame?.remove(); } catch (e) {}
-        // Allow another prime attempt later if this one failed.
-        if (!ok) _primePromise = null;
+        if (!ok) _primePromise = null; // allow retry later
         resolve(ok);
       };
-
-      // Listener resolves when iframe posts back the captured template.
-      const onMsg = (ev) => {
-        const d = ev.data;
-        if (!d || !d.__qfNotePrime || !d.url) return;
-        // Update parent-scope captures so backfill can run.
-        if (!_orderGetUrl) _orderGetUrl = d.url;
-        if (!_orderGetBodyTemplate && d.body) _orderGetBodyTemplate = d.body;
-        window.removeEventListener('message', onMsg);
-        cleanup(frame, true);
-      };
-      window.addEventListener('message', onMsg);
 
       const frame = document.createElement('iframe');
       frame.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;border:0;opacity:0;pointer-events:none;';
       frame.src = `/order/detail?order_no=${encodeURIComponent(sampleOrderId)}&shop_region=TH`;
       document.body.appendChild(frame);
 
-      // Timeout: TikTok's detail page should fire order/get within ~6s on
-      // most networks. After 12s we give up — likely the URL pattern changed
-      // or auth timed out — but don't break print, just skip notes.
+      // Poll the always-on listener's effect — once _orderGetUrl is set we
+      // know the iframe posted back successfully and we can clean up early.
+      const pollId = setInterval(() => {
+        if (_orderGetUrl && _orderGetBodyTemplate) {
+          clearInterval(pollId);
+          cleanup(frame, true);
+        }
+      }, 200);
+
+      // Hard timeout — give up after 12s if the iframe never posts back.
       setTimeout(() => {
-        window.removeEventListener('message', onMsg);
+        clearInterval(pollId);
         cleanup(frame, !!(_orderGetUrl && _orderGetBodyTemplate));
       }, 12000);
     });
