@@ -1942,6 +1942,28 @@
     url: _buyerContactUrl,
     body: _buyerContactBodyTemplate ? { ..._buyerContactBodyTemplate } : null,
   });
+  // Debug visibility for note backfill — exposes what we've captured so far
+  // and lets us trigger a single backfill call manually for diagnostics.
+  window.__qfOrderGetTemplate = () => ({
+    url: _orderGetUrl,
+    body: _orderGetBodyTemplate ? { ..._orderGetBodyTemplate } : null,
+    derivedFromLabels: deriveOrderGetUrl(),
+    labelsApiUrl: _labelsApiUrl,
+  });
+  window.__qfTryOrderGet = async (orderId) => {
+    const url = deriveOrderGetUrl();
+    if (!url) return { err: 'no labels url to derive from' };
+    const body = { ...(_orderGetBodyTemplate || {}), order_id: String(orderId), order_id_list: [String(orderId)] };
+    try {
+      const r = await _origFetch.call(window, url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const j = await r.json();
+      return { code: j.code, msg: j.message, hasData: !!j.data, dataKeys: j.data ? Object.keys(j.data) : null, sample: j };
+    } catch (e) { return { err: e.message }; }
+  };
   window.__qfProbeParallelContact = async (orderId, { burst = 20, type = 3 } = {}) => {
     if (!_buyerContactUrl || !_buyerContactBodyTemplate) {
       console.warn('[QF] no template — click 👁 first');
