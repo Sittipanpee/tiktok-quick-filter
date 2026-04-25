@@ -32,6 +32,7 @@
   // Reset per scan in scanAllPages so probing survives across scans.
   let _shopeePreOrderProbeLogged = false;
   let _noteProbeLogged = false;
+  let _noteTemplateHintShown = false;
 
   // Shopee endpoint discovery probe — captures any URL touching logistics /
   // waybill / address / detail so we can map the print pipeline. Ring buffer
@@ -1309,15 +1310,13 @@
     await notesPromise;
   }
 
-  // Derive an /order/get URL from the captured labels API URL when TikTok
-  // hasn't fired order/get yet in this session (most common: user goes
-  // straight from labels page to print without opening a single order).
-  // Both endpoints share the same signed query string (aid, app_name, fp,
-  // device_platform, etc.) — only the path differs — so we just swap paths.
+  // Verified empirically: TikTok's request signing (msToken / X-Bogus /
+  // X-Gnarly) is PATH-SPECIFIC, so we cannot derive a working /order/get URL
+  // from the labels API URL — replays return code 21001001 ("System error").
+  // The extension must observe a real /order/get call (which fires when the
+  // user opens any order detail page) before notes backfill can run.
   function deriveOrderGetUrl() {
-    if (_orderGetUrl) return _orderGetUrl;
-    if (!_labelsApiUrl) return null;
-    return _labelsApiUrl.replace('/api/fulfillment/package/list', '/api/fulfillment/order/get');
+    return _orderGetUrl || null;
   }
 
   // Notes-only backfill — one /order/get per unique orderId where the local
@@ -1326,11 +1325,18 @@
   // populated from a passive sniff or an earlier print run.
   async function tryBackfillNotesViaOrderGet(tasks) {
     const orderGetUrl = deriveOrderGetUrl();
-    if (!orderGetUrl) return;
-    // Body template is optional — order/get accepts a minimal {order_id_list}
-    // shape. If TikTok captured a richer template earlier we use it; otherwise
-    // we send the bare minimum and let the server fill in defaults.
-    const bodyTemplate = _orderGetBodyTemplate || {};
+    if (!orderGetUrl || !_orderGetBodyTemplate) {
+      // One-shot dev hint so the user knows why notes don't appear yet.
+      if (!_noteTemplateHintShown) {
+        _noteTemplateHintShown = true;
+        try {
+          showToast('เปิดหน้า "รายละเอียดออเดอร์" 1 ครั้ง เพื่อเปิดใช้ ★ note บนใบฉลาก', 5000);
+        } catch (e) {}
+        console.log('[QF] note backfill skipped — open any order detail page once to capture /order/get template');
+      }
+      return;
+    }
+    const bodyTemplate = _orderGetBodyTemplate;
     // Dedupe per orderId — multiple fulfill units can share one main order.
     const seen = new Set();
     const targets = [];
