@@ -921,11 +921,56 @@
     for (const od of Array.isArray(orders) ? orders : [orders]) {
       const rec = parseOrderDetail(od);
       if (rec) parsed.push(rec);
+      // §Note capture: same response carries the buyer/seller remarks. The
+      // labels list API only exposes a `has_*_note` flag (often unreliable —
+      // it stays false even when a note exists), so we treat order/get as
+      // the source of truth and patch state.records when either side has
+      // a non-empty note. Fires non-blocking, ignores parse failures.
+      try { captureNotesFromOrderDetail(od); } catch (e) {}
     }
     if (parsed.length) {
       saveAddressBatch(parsed, 'sniff')
         .then(() => { try { refreshAddressBookBadge(); } catch (e) {} })
         .catch(e => {});
+    }
+  }
+
+  // Pull buyer/seller remark text out of an order/get response object and
+  // patch every state.records entry whose orderIds contains this main_order_id
+  // (a single order may map to multiple fulfill units when split-shipped).
+  function captureNotesFromOrderDetail(od) {
+    if (!od || typeof od !== 'object') return;
+    const orderId = String(
+      od.order_id || od.main_order_id || od.orderId
+      || od.order?.order_id || od.order?.main_order_id || ''
+    );
+    if (!orderId) return;
+    // Try every observed shape for the note text.
+    const buyerSrc  = od.buyer_remark  || od.buyerRemark  || {};
+    const sellerSrc = od.seller_remark || od.sellerRemark || {};
+    const readNote = (src) => {
+      if (!src) return '';
+      if (typeof src === 'string') return src.trim();
+      if (typeof src !== 'object') return '';
+      const v = src.note || src.message || src.text || src.content || src.value;
+      return typeof v === 'string' ? v.trim() : '';
+    };
+    const buyerNote  = readNote(buyerSrc)  || (typeof od.buyer_message === 'string' ? od.buyer_message.trim() : '');
+    const sellerNote = readNote(sellerSrc);
+    if (!buyerNote && !sellerNote) return;
+
+    // Patch all matching records (immutable copy per CLAUDE.md rules).
+    for (const [fid, rec] of state.records) {
+      if (!rec.orderIds || !rec.orderIds.includes(orderId)) continue;
+      const next = {
+        ...rec,
+        buyerNote:     buyerNote  || rec.buyerNote  || '',
+        sellerNote:    sellerNote || rec.sellerNote || '',
+        hasBuyerNote:  !!(buyerNote  || rec.buyerNote),
+        hasSellerNote: !!(sellerNote || rec.sellerNote),
+        hasNote:       !!(buyerNote || sellerNote || rec.buyerNote || rec.sellerNote),
+      };
+      state.records.set(fid, next);
     }
   }
 
@@ -1235,13 +1280,79 @@
     if (!tasks.length) return;
 
     // Prefer eye-click endpoint; fall back to /order/get if template missing.
+    // Notes (buyer/seller remarks) live ONLY in /order/get's response — the
+    // labels list and buyer_contact endpoints don't carry them — so we fire
+    // a parallel notes backfill whenever we have the order_get template.
+    const notesPromise = (_orderGetUrl && _orderGetBodyTemplate)
+      ? tryBackfillNotesViaOrderGet(tasks)
+      : Promise.resolve();
+
     if (_buyerContactUrl && _buyerContactBodyTemplate) {
-      await tryBackfillViaBuyerContact(tasks);
+      await Promise.all([tryBackfillViaBuyerContact(tasks), notesPromise]);
       return;
     }
     if (_orderGetUrl && _orderGetBodyTemplate) {
+      // No buyer_contact template yet — order/get already returns address +
+      // notes in one shot, so the existing flow covers both.
       await tryBackfillViaOrderGet(tasks);
+      return;
     }
+    // Neither template available — at least try notes if we have order_get.
+    await notesPromise;
+  }
+
+  // Notes-only backfill — one /order/get per unique orderId where the local
+  // record has no buyerNote / sellerNote yet. Reuses the same throttling so
+  // we don't double-bill the rate-limit budget. Skips orders we've already
+  // populated from a passive sniff or an earlier print run.
+  async function tryBackfillNotesViaOrderGet(tasks) {
+    if (!_orderGetUrl || !_orderGetBodyTemplate) return;
+    // Dedupe per orderId — multiple fulfill units can share one main order.
+    const seen = new Set();
+    const targets = [];
+    for (const t of tasks) {
+      if (seen.has(t.orderId)) continue;
+      seen.add(t.orderId);
+      // Skip if any record for this order already has note text — passive
+      // sniff or a prior call already covered it.
+      let alreadyNoted = false;
+      for (const rec of state.records.values()) {
+        if (rec.orderIds?.includes(t.orderId) && (rec.buyerNote || rec.sellerNote)) {
+          alreadyNoted = true; break;
+        }
+      }
+      if (!alreadyNoted) targets.push(t);
+    }
+    if (!targets.length) return;
+
+    let i = 0;
+    const runWorker = async () => {
+      while (i < targets.length) {
+        if (!rateLimitGateOpen()) break;
+        const t = targets[i++];
+        try {
+          const body = { ...(_orderGetBodyTemplate || {}), order_id: t.orderId, order_id_list: [t.orderId] };
+          const r = await _origFetch.call(window, _orderGetUrl, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          if (!r.ok) continue;
+          const j = await r.json();
+          if (isRateLimitResponse(j)) { recordRateLimitHit(j); break; }
+          recordRateLimitSuccess();
+          // Reuses the same parser — captures address (when not masked) AND
+          // notes via captureNotesFromOrderDetail() inside it.
+          captureAddressFromOrderGet(j);
+          await sleep(RATE_LIMIT_STATE.currentGapMs);
+        } catch (e) { /* best-effort */ }
+      }
+    };
+    const workers = Array.from(
+      { length: Math.max(1, RATE_LIMIT_STATE.currentConcurrency) },
+      runWorker
+    );
+    await Promise.all(workers);
   }
 
   // Buyer-contact-info active backfill — fires ONE call per (order × type).
