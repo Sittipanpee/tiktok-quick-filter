@@ -1,8 +1,34 @@
-.claude/worktrees/
-.claude/plans/
-node_modules/
+# Claude Code internal files
+.claude/
+CLAUDE.md
 
-# Internal research notes — ห้าม commit / push
+# Internal planning + research notes
+docs/pdf-builder-phase1.md
+docs/store-listing.md
 notes/
 TODO-order-export-research.md
 
+# Dev tools (calibration scripts, preview HTML, render samples)
+tools/
+
+# Standalone marketing/ad pages (not extension files)
+facebook-ad-quickfilter.html
+salespage.html
+
+# Node / npm (extension has no build step)
+node_modules/
+package.json
+package-lock.json
+
+# Release zips
+*.zip
+
+# Vendor preview artifacts (not used by extension runtime)
+vendor/jnt_masked_preview.jpg
+vendor/jnt_masked_preview.png
+
+# OS / editor noise
+.DS_Store
+*.swp
+.vscode/
+.idea/
